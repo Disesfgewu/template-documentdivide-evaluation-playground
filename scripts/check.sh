@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts)
+SUITES=(governance api api-db worker parser web contracts fixtures)
 scope=auto
 base=origin/main
 selected=()
@@ -32,8 +32,9 @@ suite_for_base() {
     tests/api_db/*|deploy/*) echo api-db;;
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
-    contracts/*|tests/contracts/*) echo contracts;;
     web/*) echo web;;
+    contracts/*|tests/contracts/*) echo "contracts fixtures";;
+    fixtures/*|tests/fixtures/*) echo fixtures;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -74,6 +75,10 @@ run_suite() {
     contracts)
       # Versioned data contracts: examples, negative cases, schema drift.
       PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/contracts
+      ;;
+    fixtures)
+      # Fixture registry: rebuild every registered item and compare sha256.
+      PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/fixtures
       ;;
     parser)
       PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
