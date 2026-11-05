@@ -1,0 +1,115 @@
+{
+  "$defs": {
+    "Modality": {
+      "description": "What a question needs to read (SPEC 19.5 modality_requirements).",
+      "enum": [
+        "text",
+        "table",
+        "image"
+      ],
+      "title": "Modality",
+      "type": "string"
+    },
+    "QuotaBucket": {
+      "enum": [
+        "general",
+        "cross_page",
+        "chart_table",
+        "confusable"
+      ],
+      "title": "QuotaBucket",
+      "type": "string"
+    },
+    "ReasoningType": {
+      "enum": [
+        "value_lookup",
+        "trend",
+        "comparison",
+        "calculation",
+        "diagram_relation",
+        "image_text_integration",
+        "cross_page_integration"
+      ],
+      "title": "ReasoningType",
+      "type": "string"
+    }
+  },
+  "$id": "lab-contracts/v1/Question.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "language": {
+      "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+      "title": "Language",
+      "type": "string"
+    },
+    "modality_requirements": {
+      "items": {
+        "$ref": "#/$defs/Modality"
+      },
+      "minItems": 1,
+      "title": "Modality Requirements",
+      "type": "array"
+    },
+    "ordinal": {
+      "minimum": 0,
+      "title": "Ordinal",
+      "type": "integer"
+    },
+    "question_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Question Hash",
+      "type": "string"
+    },
+    "question_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Question Id",
+      "type": "string"
+    },
+    "question_text": {
+      "maxLength": 8000,
+      "minLength": 1,
+      "title": "Question Text",
+      "type": "string"
+    },
+    "quota_bucket": {
+      "$ref": "#/$defs/QuotaBucket"
+    },
+    "reasoning_type": {
+      "$ref": "#/$defs/ReasoningType"
+    },
+    "tags": {
+      "items": {
+        "maxLength": 64,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "visual_object_refs": {
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Visual Object Refs",
+      "type": "array"
+    }
+  },
+  "required": [
+    "question_id",
+    "ordinal",
+    "question_text",
+    "language",
+    "tags",
+    "quota_bucket",
+    "question_hash",
+    "modality_requirements",
+    "reasoning_type",
+    "visual_object_refs"
+  ],
+  "title": "Question",
+  "type": "object"
+}

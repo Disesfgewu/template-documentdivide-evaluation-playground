@@ -1,0 +1,143 @@
+{
+  "$defs": {
+    "Distractor": {
+      "additionalProperties": false,
+      "properties": {
+        "confusion_reason": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Confusion Reason",
+          "type": "string"
+        },
+        "disambiguating_condition": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Disambiguating Condition",
+          "type": "string"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Evidence Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "confusion_reason",
+        "disambiguating_condition"
+      ],
+      "title": "Distractor",
+      "type": "object"
+    },
+    "EvidenceSet": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "set_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Set Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "set_id",
+        "evidence_ids"
+      ],
+      "title": "EvidenceSet",
+      "type": "object"
+    },
+    "FactSupportSet": {
+      "additionalProperties": false,
+      "properties": {
+        "fact_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "support_sets": {
+          "items": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "minItems": 1,
+          "title": "Support Sets",
+          "type": "array"
+        }
+      },
+      "required": [
+        "fact_id",
+        "support_sets"
+      ],
+      "title": "FactSupportSet",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/SourceAnswer.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "distractors": {
+      "items": {
+        "$ref": "#/$defs/Distractor"
+      },
+      "title": "Distractors",
+      "type": "array"
+    },
+    "evidence_sets": {
+      "items": {
+        "$ref": "#/$defs/EvidenceSet"
+      },
+      "minItems": 1,
+      "title": "Evidence Sets",
+      "type": "array"
+    },
+    "fact_support_sets": {
+      "items": {
+        "$ref": "#/$defs/FactSupportSet"
+      },
+      "title": "Fact Support Sets",
+      "type": "array"
+    },
+    "question_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Question Id",
+      "type": "string"
+    },
+    "validation_refs": {
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Validation Refs",
+      "type": "array"
+    }
+  },
+  "required": [
+    "question_id",
+    "evidence_sets",
+    "fact_support_sets",
+    "distractors",
+    "validation_refs"
+  ],
+  "title": "SourceAnswer",
+  "type": "object"
+}

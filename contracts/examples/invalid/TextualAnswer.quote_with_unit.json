@@ -1,0 +1,20 @@
+{
+  "question_id": "q_002",
+  "checks": [
+    {
+      "check_id": "t1",
+      "fact_id": "f1",
+      "kind": "quote",
+      "expected": "x",
+      "interval": null,
+      "unit": "ms",
+      "normalization_rule": null,
+      "absolute_tolerance": null,
+      "relative_tolerance": null,
+      "precision": null,
+      "supporting_evidence_ids": [
+        "e18"
+      ]
+    }
+  ]
+}

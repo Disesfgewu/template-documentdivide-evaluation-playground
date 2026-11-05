@@ -1,0 +1,190 @@
+{
+  "$defs": {
+    "PartHashes": {
+      "additionalProperties": false,
+      "properties": {
+        "questions": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Questions",
+          "type": "string"
+        },
+        "semantic_answers": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Semantic Answers",
+          "type": "string"
+        },
+        "source_answers": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Answers",
+          "type": "string"
+        },
+        "textual_answers": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Textual Answers",
+          "type": "string"
+        }
+      },
+      "required": [
+        "questions",
+        "semantic_answers",
+        "textual_answers",
+        "source_answers"
+      ],
+      "title": "PartHashes",
+      "type": "object"
+    },
+    "QuotaCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "chart_table": {
+          "minimum": 0,
+          "title": "Chart Table",
+          "type": "integer"
+        },
+        "confusable": {
+          "minimum": 0,
+          "title": "Confusable",
+          "type": "integer"
+        },
+        "cross_page": {
+          "minimum": 0,
+          "title": "Cross Page",
+          "type": "integer"
+        },
+        "general": {
+          "minimum": 0,
+          "title": "General",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "general",
+        "cross_page",
+        "chart_table",
+        "confusable"
+      ],
+      "title": "QuotaCounts",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/BenchmarkManifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "benchmark_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Benchmark Id",
+      "type": "string"
+    },
+    "compliance": {
+      "enum": [
+        "compliant",
+        "partial"
+      ],
+      "title": "Compliance",
+      "type": "string"
+    },
+    "document_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Document Id",
+      "type": "string"
+    },
+    "document_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Document Sha256",
+      "type": "string"
+    },
+    "exceptions": {
+      "items": {
+        "maxLength": 8000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Exceptions",
+      "type": "array"
+    },
+    "file_hashes": {
+      "$ref": "#/$defs/PartHashes"
+    },
+    "frozen_at": {
+      "format": "date-time",
+      "title": "Frozen At",
+      "type": "string"
+    },
+    "generator_config_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Generator Config Version",
+      "type": "string"
+    },
+    "n_target": {
+      "minimum": 20,
+      "title": "N Target",
+      "type": "integer"
+    },
+    "n_valid": {
+      "minimum": 0,
+      "title": "N Valid",
+      "type": "integer"
+    },
+    "page_count": {
+      "minimum": 1,
+      "title": "Page Count",
+      "type": "integer"
+    },
+    "q_min": {
+      "minimum": 2,
+      "title": "Q Min",
+      "type": "integer"
+    },
+    "quota_counts": {
+      "$ref": "#/$defs/QuotaCounts"
+    },
+    "revision_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Revision Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "selection_rule_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Selection Rule Version",
+      "type": "string"
+    },
+    "validator_config_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Validator Config Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "benchmark_id",
+    "revision_id",
+    "document_id",
+    "document_sha256",
+    "page_count",
+    "file_hashes",
+    "n_target",
+    "n_valid",
+    "q_min",
+    "quota_counts",
+    "compliance",
+    "exceptions",
+    "generator_config_version",
+    "validator_config_version",
+    "selection_rule_version",
+    "frozen_at"
+  ],
+  "title": "BenchmarkManifest",
+  "type": "object"
+}

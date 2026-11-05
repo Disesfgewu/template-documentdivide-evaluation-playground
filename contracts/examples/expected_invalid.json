@@ -1,4 +1,28 @@
 {
+  "BenchmarkManifest.compliant_short_bucket.json": {
+    "loc": "",
+    "message": "compliant requires n_valid == n_target and every special bucket >= q_min",
+    "type": "value_error"
+  },
+  "BenchmarkManifest.counts_do_not_sum.json": {
+    "loc": "",
+    "message": "quota_counts must sum to n_valid (one bucket per question)",
+    "type": "value_error"
+  },
+  "BenchmarkManifest.naive_frozen_at.json": {
+    "loc": "frozen_at",
+    "type": "timezone_aware"
+  },
+  "BenchmarkManifest.partial_without_exceptions.json": {
+    "loc": "",
+    "message": "partial manifests must list their exceptions",
+    "type": "value_error"
+  },
+  "BenchmarkManifest.wrong_q.json": {
+    "loc": "",
+    "message": "n_target/q_min must be 21/3 for page_count=21",
+    "type": "value_error"
+  },
   "ErrorResponse.empty_request_id.json": {
     "loc": "error.request_id",
     "type": "string_too_short"
@@ -11,6 +35,14 @@
     "loc": "error.retryable",
     "type": "bool_type"
   },
+  "EvidenceUnit.confidence_over_one.json": {
+    "loc": "ocr_confidence",
+    "type": "less_than_equal"
+  },
+  "EvidenceUnit.no_regions.json": {
+    "loc": "regions",
+    "type": "too_short"
+  },
   "PageRequest.over_max.json": {
     "loc": "page_size",
     "type": "less_than_equal"
@@ -18,6 +50,71 @@
   "PageRequest.zero.json": {
     "loc": "page_size",
     "type": "greater_than_equal"
+  },
+  "Question.duplicate_tag.json": {
+    "loc": "",
+    "message": "duplicate tag: 'a'",
+    "type": "value_error"
+  },
+  "Question.empty_text.json": {
+    "loc": "question_text",
+    "type": "string_too_short"
+  },
+  "Question.no_modality.json": {
+    "loc": "modality_requirements",
+    "type": "too_short"
+  },
+  "Question.ordinal_float.json": {
+    "loc": "ordinal",
+    "type": "int_type"
+  },
+  "Question.unknown_bucket.json": {
+    "loc": "quota_bucket",
+    "type": "enum"
+  },
+  "SemanticAnswer.duplicate_fact.json": {
+    "loc": "",
+    "message": "duplicate fact_id: 'f1'",
+    "type": "value_error"
+  },
+  "SemanticAnswer.formula_bad_arity.json": {
+    "loc": "calculation.formula.op",
+    "message": "sub takes exactly 2 args",
+    "type": "value_error"
+  },
+  "SemanticAnswer.formula_unknown_operand.json": {
+    "loc": "calculation",
+    "message": "formula references unknown operands: ['c']",
+    "type": "value_error"
+  },
+  "SemanticAnswer.no_facts.json": {
+    "loc": "required_facts",
+    "type": "too_short"
+  },
+  "SemanticAnswer.zero_weight.json": {
+    "loc": "required_facts.0.weight",
+    "type": "greater_than"
+  },
+  "SourceAnswer.distractor_without_condition.json": {
+    "loc": "distractors.0.disambiguating_condition",
+    "type": "string_too_short"
+  },
+  "SourceAnswer.duplicate_evidence_in_set.json": {
+    "loc": "evidence_sets.0",
+    "message": "duplicate evidence_id: 'e18'",
+    "type": "value_error"
+  },
+  "SourceAnswer.empty_set.json": {
+    "loc": "evidence_sets.0.evidence_ids",
+    "type": "too_short"
+  },
+  "SourceAnswer.empty_support_alternative.json": {
+    "loc": "fact_support_sets.0.support_sets.0",
+    "type": "too_short"
+  },
+  "SourceAnswer.no_evidence_sets.json": {
+    "loc": "evidence_sets",
+    "type": "too_short"
   },
   "SourceRegion.bbox_out_of_unit.json": {
     "loc": "bbox.2",
@@ -65,5 +162,43 @@
   "SourceRegionPage.missing_next_cursor.json": {
     "loc": "next_cursor",
     "type": "missing"
+  },
+  "TextualAnswer.interval_with_tolerance.json": {
+    "loc": "checks.0",
+    "message": "interval checks must not also carry tolerances or precision",
+    "type": "value_error"
+  },
+  "TextualAnswer.inverted_interval.json": {
+    "loc": "checks.0",
+    "message": "interval requires low <= high",
+    "type": "value_error"
+  },
+  "TextualAnswer.no_support.json": {
+    "loc": "checks.0.supporting_evidence_ids",
+    "type": "too_short"
+  },
+  "TextualAnswer.point_and_interval.json": {
+    "loc": "checks.0",
+    "message": "numeric check requires exactly one of expected or interval",
+    "type": "value_error"
+  },
+  "TextualAnswer.point_without_tolerance.json": {
+    "loc": "checks.0",
+    "message": "point numeric check requires absolute_tolerance or relative_tolerance",
+    "type": "value_error"
+  },
+  "TextualAnswer.quote_with_unit.json": {
+    "loc": "checks.0",
+    "message": "quote check must leave numeric fields and unit null",
+    "type": "value_error"
+  },
+  "ValidationRecord.reviewer_without_time.json": {
+    "loc": "",
+    "message": "reviewer and reviewed_at must both be set or both be null",
+    "type": "value_error"
+  },
+  "ValidationRecord.unknown_verdict.json": {
+    "loc": "verdict",
+    "type": "literal_error"
   }
 }

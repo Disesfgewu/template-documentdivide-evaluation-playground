@@ -1,0 +1,31 @@
+{
+  "question_id": "q_003",
+  "evidence_sets": [
+    {
+      "set_id": "s1",
+      "evidence_ids": [
+        "e6"
+      ]
+    }
+  ],
+  "fact_support_sets": [
+    {
+      "fact_id": "f1",
+      "support_sets": [
+        [
+          "e6"
+        ]
+      ]
+    }
+  ],
+  "distractors": [
+    {
+      "evidence_id": "e5",
+      "confusion_reason": "同一指標的舊版本數值",
+      "disambiguating_condition": ""
+    }
+  ],
+  "validation_refs": [
+    "v_003"
+  ]
+}

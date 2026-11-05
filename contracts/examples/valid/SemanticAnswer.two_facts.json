@@ -1,0 +1,33 @@
+{
+  "question_id": "q_002",
+  "reference_answer": "方案 B，p99 為 12 ms。",
+  "required_facts": [
+    {
+      "fact_id": "f1",
+      "statement": "高負載定義為負載至少 80%",
+      "weight": 1.0,
+      "allowed_equivalences": [],
+      "scoring_rule": {
+        "full_credit": "陳述與事實一致",
+        "partial_credit": null,
+        "no_credit": "缺漏或錯誤"
+      }
+    },
+    {
+      "fact_id": "f2",
+      "statement": "方案 B 的 p99 最低，為 12 ms",
+      "weight": 1.0,
+      "allowed_equivalences": [],
+      "scoring_rule": {
+        "full_credit": "陳述與事實一致",
+        "partial_credit": null,
+        "no_credit": "缺漏或錯誤"
+      }
+    }
+  ],
+  "conditions": [
+    "正式測試",
+    "高負載"
+  ],
+  "calculation": null
+}
