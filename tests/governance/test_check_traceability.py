@@ -78,6 +78,10 @@ class TraceabilityTests(unittest.TestCase):
         self.assertTrue(errs(lambda d: d["tests"][0].update(owners=[])))
         self.assertEqual(errs(lambda d: d["tests"][0].update(owners=[], note="unassigned: ask PM")), [])
 
+    def test_primary_must_be_an_owner(self):
+        self.assertEqual(errs(lambda d: d["tests"][0].update(primary=4)), [])
+        self.assertTrue(errs(lambda d: d["tests"][0].update(primary=9)))
+
     def test_bad_status(self):
         self.assertTrue(errs(lambda d: d["tests"][0].update(status="done")))
 

@@ -86,6 +86,8 @@ def check(doc, ids: dict[str, set[str]]) -> list[str]:
                 errors.append(f"{where}: owners must be Issue numbers 2-14")
             elif not owners and "unassigned" not in (e.get("note") or ""):
                 errors.append(f"{where}: empty owners must be marked unassigned in note")
+            elif "primary" in e and e["primary"] not in owners:
+                errors.append(f"{where}: primary must be one of owners")
             if not isinstance(e.get("title"), str) or not e["title"].strip():
                 errors.append(f"{where}: title required")
             if e.get("release_owner") != 15:

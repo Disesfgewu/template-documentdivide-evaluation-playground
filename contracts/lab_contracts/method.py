@@ -163,6 +163,10 @@ class Answer(Contract):
     claims: Annotated[list[Claim], Field(max_length=MAX_CLAIMS)]
 
 
+VISUAL_KINDS = frozenset({RegionKind.image, RegionKind.figure, RegionKind.table, RegionKind.page,
+                          RegionKind.formula})
+
+
 class Hit(Contract):
     hit_id: ResourceId
     rank: PosInt
@@ -172,17 +176,29 @@ class Hit(Contract):
 
     @model_validator(mode="after")
     def _empty_content_needs_visual_regions(self):
-        # A "pure visual" hit: no text, and every region is non-text so LAB can
-        # re-crop it from the PDF. Whitespace-only content counts as empty.
-        if not self.content.strip() and any(r.kind is RegionKind.text for r in self.regions):
-            raise ValueError("empty content is only allowed when every region is non-text (visual)")
+        # PM decision (#4, 2026-11-05): an image hit may also carry the text
+        # regions it needs (caption, conditions); empty content only requires
+        # at least one visual region LAB can re-crop from the original PDF.
+        # Whitespace-only content counts as empty. This is a structural rule,
+        # not proof that the geometry semantically supports the answer.
+        if not self.content.strip() and not any(r.kind in VISUAL_KINDS for r in self.regions):
+            raise ValueError("empty content requires at least one visual region (image/figure/table/page/formula)")
         return self
 
 
 class Citation(Contract):
+    """region_indices may repeat (PM #4 Q1): accepted as submitted, and
+    ``normalized_region_indices`` gives the de-duplicated order-preserving
+    form scorers must use, so repeats never add coverage or dilute errors.
+    The payload hash is always computed over the original submission."""
+
     claim_id: ResourceId
     hit_id: ResourceId
     region_indices: Annotated[list[NonNegInt], Field(min_length=1)]
+
+    @property
+    def normalized_region_indices(self) -> list[int]:
+        return list(dict.fromkeys(self.region_indices))
 
 
 class Telemetry(Contract):

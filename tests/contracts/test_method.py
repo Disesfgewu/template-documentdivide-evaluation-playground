@@ -93,6 +93,30 @@ class QueryResponseTests(unittest.TestCase):
         r.update(retrieved_hits=[], citations=[])
         vj(QueryResponse, r)
 
+    def test_image_hit_rules_pm_q3(self):
+        # Mixed image + caption text with empty content: allowed.
+        r = copy.deepcopy(RESP); h = r["retrieved_hits"][0]; h["content"] = ""
+        h["regions"].append({**h["regions"][0], "kind": "figure", "quote": None})
+        self.assertEqual(vj(QueryResponse, r).retrieved_hits[0].content, "")
+        # Whitespace-only content with text regions only: rejected.
+        r = copy.deepcopy(RESP); r["retrieved_hits"][0]["content"] = "  \n "
+        with self.assertRaises(ValidationError) as cm:
+            vj(QueryResponse, r)
+        self.assertIn("at least one visual region", str(cm.exception))
+        # A visual region on a wrong page/hash keeps the answer (flagged later).
+        r = copy.deepcopy(RESP); h = r["retrieved_hits"][0]; h["content"] = ""
+        h["regions"] = [{**h["regions"][0], "kind": "image", "quote": None, "page_index": 9999,
+                         "document_sha256": "c" * 64}]
+        self.assertTrue(vj(QueryResponse, r).answer.text)
+
+    def test_repeated_region_indices_are_normalized_pm_q1(self):
+        r = copy.deepcopy(RESP); r["citations"][0]["region_indices"] = [0, 0]
+        cit = vj(QueryResponse, r).citations[0]
+        self.assertEqual((cit.region_indices, cit.normalized_region_indices), ([0, 0], [0]))
+        r = copy.deepcopy(RESP); r["citations"][0]["region_indices"] = [0, 5]
+        with self.assertRaises(ValidationError):  # out of range still rejected
+            vj(QueryResponse, r)
+
     def test_duplicate_claim_rejected_repeated_region_index_allowed(self):
         r = copy.deepcopy(RESP); r["answer"]["claims"][1]["claim_id"] = "c1"
         with self.assertRaises(ValidationError) as cm:
