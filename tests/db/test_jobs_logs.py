@@ -36,12 +36,12 @@ class JobStateTests(FreshDatabase):
     def test_spec_16_6_transitions(self):
         with self.connect() as c:
             f = JobFixture(self, c)
-            lease = jobs.acquire(c, f.job, "w1")
-            jobs.finish(c, lease, "succeeded", "done")
+            lease = jobs.acquire(c, f.p, f.job, "w1")
+            jobs.finish(c, f.p, lease, "succeeded", "done")
             self.assertEqual(f.status(), "succeeded")
             # Terminal: a new request needs a new job.
             with self.assertRaises(jobs.LeaseUnavailable):
-                jobs.acquire(c, f.job, "w2")
+                jobs.acquire(c, f.p, f.job, "w2")
             with self.assertRaises(errors.IntegrityConstraintViolation):
                 with c.transaction():
                     c.execute("UPDATE jobs SET status = 'queued', row_version = row_version + 1 WHERE id = %s", (f.job,))
@@ -58,8 +58,8 @@ class JobStateTests(FreshDatabase):
                     with c.transaction():
                         c.execute("UPDATE jobs SET status = %s, row_version = row_version + 1 WHERE id = %s",
                                   (target, f.job))
-            lease = jobs.acquire(c, f.job, "w1")
-            jobs.finish(c, lease, "cancel_requested", "user cancel")
+            lease = jobs.acquire(c, f.p, f.job, "w1")
+            jobs.finish(c, f.p, lease, "cancel_requested", "user cancel")
             with self.assertRaises(errors.IntegrityConstraintViolation):
                 with c.transaction():  # cancel_requested -> queued is not allowed
                     c.execute("UPDATE jobs SET status = 'queued', row_version = row_version + 1 WHERE id = %s", (f.job,))
@@ -68,8 +68,8 @@ class JobStateTests(FreshDatabase):
         with self.connect() as c:
             f = JobFixture(self, c, max_attempts=2, retryable=True)
             for n in (1, 2):
-                lease = jobs.acquire(c, f.job, "w")
-                jobs.finish(c, lease, "failed", f"attempt {n} failed")
+                lease = jobs.acquire(c, f.p, f.job, "w")
+                jobs.finish(c, f.p, lease, "failed", f"attempt {n} failed")
                 if n == 1:
                     with c.transaction():
                         c.execute("UPDATE jobs SET status = 'queued', row_version = row_version + 1 WHERE id = %s", (f.job,))
@@ -77,7 +77,7 @@ class JobStateTests(FreshDatabase):
                 with c.transaction():
                     c.execute("UPDATE jobs SET status = 'queued', row_version = row_version + 1 WHERE id = %s", (f.job,))
             g = JobFixture(self, c, retryable=False)
-            jobs.finish(c, jobs.acquire(c, g.job, "w"), "failed", "permanent")
+            jobs.finish(c, g.p, jobs.acquire(c, g.p, g.job, "w"), "failed", "permanent")
             with self.assertRaises(errors.CheckViolation):
                 with c.transaction():
                     c.execute("UPDATE jobs SET status = 'queued', row_version = row_version + 1 WHERE id = %s", (g.job,))
@@ -87,26 +87,26 @@ class FencingTests(FreshDatabase):
     def test_live_lease_blocks_second_worker(self):
         with self.connect() as c:
             f = JobFixture(self, c)
-            jobs.acquire(c, f.job, "w1", ttl_seconds=60)
+            jobs.acquire(c, f.p, f.job, "w1", ttl_seconds=60)
             with self.assertRaises(jobs.LeaseUnavailable):
-                jobs.acquire(c, f.job, "w2")
+                jobs.acquire(c, f.p, f.job, "w2")
 
     def test_expired_lease_taken_over_and_old_worker_fenced(self):
         with self.connect() as c:
             f = JobFixture(self, c)
             tid = f.thread()
-            old = jobs.acquire(c, f.job, "w1", ttl_seconds=1)
-            self.assertEqual(jobs.save_checkpoint(c, old, tid, "wf@1", 1, {"stage": "parse"}, 1, "parse_batch"), 1)
+            old = jobs.acquire(c, f.p, f.job, "w1", ttl_seconds=1)
+            self.assertEqual(jobs.save_checkpoint(c, f.p, old, tid, "wf@1", 1, {"stage": "parse"}, 1, "parse_batch"), 1)
             time.sleep(1.5)
-            new = jobs.acquire(c, f.job, "w2", ttl_seconds=60)
+            new = jobs.acquire(c, f.p, f.job, "w2", ttl_seconds=60)
             self.assertGreater(new.token, old.token)
-            for call in (lambda: jobs.save_checkpoint(c, old, tid, "wf@1", 1, {"stage": "stale"}, 2, "x"),
-                         lambda: jobs.heartbeat(c, old),
-                         lambda: jobs.finish(c, old, "succeeded", "stale worker")):
+            for call in (lambda: jobs.save_checkpoint(c, f.p, old, tid, "wf@1", 1, {"stage": "stale"}, 2, "x"),
+                         lambda: jobs.heartbeat(c, f.p, old),
+                         lambda: jobs.finish(c, f.p, old, "succeeded", "stale worker")):
                 with self.assertRaises(jobs.LeaseLost):
                     call()
-            self.assertEqual(jobs.save_checkpoint(c, new, tid, "wf@1", 1, {"stage": "normalize"}, 2, "normalize"), 2)
-            cp = jobs.load_checkpoint(c, tid)
+            self.assertEqual(jobs.save_checkpoint(c, f.p, new, tid, "wf@1", 1, {"stage": "normalize"}, 2, "normalize"), 2)
+            cp = jobs.load_checkpoint(c, f.p, tid)
             self.assertEqual((cp["seq"], cp["state"], cp["last_node"]), (2, {"stage": "normalize"}, "normalize"))
             with self.assertRaises(errors.IntegrityConstraintViolation):
                 with c.transaction():
@@ -116,18 +116,18 @@ class FencingTests(FreshDatabase):
         with self.connect() as c:
             f = JobFixture(self, c)
             tid = f.thread(rev="wf@1")
-            lease = jobs.acquire(c, f.job, "w1")
+            lease = jobs.acquire(c, f.p, f.job, "w1")
             with self.assertRaises(jobs.GraphRevisionChanged):
-                jobs.save_checkpoint(c, lease, tid, "wf@2", 1, {}, 1, "x")
+                jobs.save_checkpoint(c, f.p, lease, tid, "wf@2", 1, {}, 1, "x")
 
     def test_checkpoint_state_round_trips_types(self):
         with self.connect() as c:
             f = JobFixture(self, c)
             tid = f.thread()
-            lease = jobs.acquire(c, f.job, "w1")
+            lease = jobs.acquire(c, f.p, f.job, "w1")
             state = {"attempt": 3, "ratio": 0.5, "refs": ["a", "b"], "nested": {"n": None, "ok": True}}
-            jobs.save_checkpoint(c, lease, tid, "wf@1", 1, state, 1, "n")
-            got = jobs.load_checkpoint(c, tid)["state"]
+            jobs.save_checkpoint(c, f.p, lease, tid, "wf@1", 1, state, 1, "n")
+            got = jobs.load_checkpoint(c, f.p, tid)["state"]
             self.assertEqual(got, state)
             self.assertIsInstance(got["attempt"], int)
 

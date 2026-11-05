@@ -223,6 +223,10 @@ def ingest_document(
 
     doc_version_id = uuid.uuid4()
     with conn.transaction():
+        # Serialize revision allocation per (project, logical_id) so two
+        # concurrent imports cannot both compute the same next revision.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                     (f"document_version:{project_id}:{logical_id}",))
         rev_row = conn.execute(
             "SELECT COALESCE(MAX(revision), 0) + 1 "
             "FROM resource_versions "

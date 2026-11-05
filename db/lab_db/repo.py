@@ -188,26 +188,47 @@ class StaleVersion(Exception):
     """row_version did not match: someone else changed the row (409)."""
 
 
-def transition_benchmark(conn: psycopg.Connection, benchmark_id: uuid.UUID, expected_row_version: int,
-                         to_status: str, reason: str, actor_id: uuid.UUID,
+def transition_benchmark(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID,
+                         expected_row_version: int, to_status: str, reason: str, actor_id: uuid.UUID,
                          compliance: Optional[str] = None) -> int:
-    """Optimistic-concurrency state change; the DB rejects illegal
-    transitions. Returns the new row_version."""
+    """Optimistic-concurrency state change of a benchmark revision, scoped to
+    ``project_id`` and authorized for ``actor_id`` (build_edit_freeze; a
+    reviewer's "comments only" right does not allow it). The DB rejects
+    illegal transitions and writes the transition row itself (0007 trigger);
+    this function adds the operation, audit and outbox event in the same
+    transaction. Returns the new row_version."""
+    if not reason or not reason.strip():
+        raise ValueError("a transition reason is required")
+    decision = authorize(conn, project_id, actor_id, "build_edit_freeze")
+    if decision.condition is not None:
+        raise PermissionDenied(f"{decision.role} may only comment, not {to_status} a benchmark")
     with conn.transaction():
-        cur = conn.execute("SELECT status, row_version FROM benchmark_revisions WHERE id = %s FOR UPDATE",
-                           (benchmark_id,)).fetchone()
+        cur = conn.execute("SELECT status::text, row_version, resource_id FROM benchmark_revisions "
+                           "WHERE id = %s AND project_id = %s FOR UPDATE", (benchmark_id, project_id)).fetchone()
         if cur is None:
             raise NotFound("benchmark")
-        from_status, version = cur
+        from_status, version, resource_id = cur
         if version != expected_row_version:
             raise StaleVersion(f"benchmark {benchmark_id} is at row_version {version}, not {expected_row_version}")
+        conn.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', %s, true)",
+                     (str(actor_id), reason))
         new_version = conn.execute(
             "UPDATE benchmark_revisions SET status = %s, row_version = row_version + 1, "
             "compliance = COALESCE(%s, compliance), "
             "frozen_at = CASE WHEN %s::text = 'frozen' THEN now() ELSE frozen_at END "
             "WHERE id = %s RETURNING row_version",
             (to_status, compliance, to_status, benchmark_id)).fetchone()[0]
-        conn.execute("INSERT INTO benchmark_transitions (benchmark_id, from_status, to_status, row_version, reason, actor_id) "
-                     "VALUES (%s, %s, %s, %s, %s, %s)",
-                     (benchmark_id, from_status, to_status, new_version, reason, actor_id))
+        op_id = uuid.uuid4()
+        conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
+                     "VALUES (%s, %s, 'benchmark.transition', %s, 'succeeded', now())", (op_id, project_id, actor_id))
+        conn.execute("INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, "
+                     "before_revision, after_revision, reason, outcome, operation_id) "
+                     "VALUES (%s, %s, %s, %s, 'benchmark_revision', %s, %s, %s, %s, 'succeeded', %s)",
+                     (uuid.uuid4(), project_id, actor_id, f"benchmark.{to_status}", resource_id,
+                      version, new_version, reason, op_id))
+        conn.execute("INSERT INTO outbox_events (event_id, project_id, topic, payload, operation_id) "
+                     "VALUES (%s, %s, 'benchmark.transitioned', %s, %s)",
+                     (uuid.uuid4(), project_id,
+                      Jsonb({"benchmark_id": str(benchmark_id), "from": from_status, "to": to_status,
+                             "row_version": new_version}), op_id))
     return new_version

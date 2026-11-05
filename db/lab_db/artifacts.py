@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import datetime
 import uuid
 
 import psycopg
+from psycopg import errors, sql
 
 
 class ArtifactError(Exception):
@@ -18,6 +20,27 @@ class ChecksumMismatch(ArtifactError):
 
 class InvalidState(ArtifactError):
     """Raised when an artifact state transition or argument is invalid for the operation."""
+
+
+@dataclass(frozen=True)
+class GcResult:
+    deleted: list[uuid.UUID]
+    skipped: list[uuid.UUID]
+
+
+_FIND_ARTIFACT_FK_REFS_SQL = """
+SELECT ns.nspname, cls.relname, a.attname
+FROM pg_constraint c
+JOIN pg_class cls ON cls.oid = c.conrelid
+JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+JOIN unnest(c.conkey, c.confkey) AS k(attnum, refattnum) ON true
+JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum AND NOT a.attisdropped
+JOIN pg_attribute fa ON fa.attrelid = c.confrelid AND fa.attnum = k.refattnum AND NOT fa.attisdropped
+WHERE c.contype = 'f'
+  AND c.confrelid = 'artifacts'::regclass
+  AND fa.attname = 'id'
+ORDER BY ns.nspname, cls.relname, a.attname
+"""
 
 
 def stage(
@@ -102,27 +125,59 @@ def collect_staged(
     conn: psycopg.Connection,
     grace: datetime.timedelta,
     now: datetime.datetime | None = None,
-) -> list[uuid.UUID]:
-    """Delete unreferenced 'staged' artifacts older than (now - grace) and return deleted IDs."""
+) -> GcResult:
+    """Delete unreferenced 'staged' artifacts older than (now - grace).
+
+    Discovers all foreign key columns referencing ``artifacts(id)`` dynamically
+    from ``pg_catalog``, selects non-``legal_hold`` staged rows older than the
+    cutoff with ``FOR UPDATE SKIP LOCKED``, and deletes each row inside its own
+    SAVEPOINT so a concurrent reference (``ForeignKeyViolation``) skips only
+    that row instead of aborting the batch.
+    """
     if grace < datetime.timedelta(0):
         raise ValueError("grace timedelta must be non-negative")
 
+    deleted: list[uuid.UUID] = []
+    skipped: list[uuid.UUID] = []
+
     with conn.transaction():
-        # A concurrent writer that references a row we are deleting makes the
-        # whole statement fail (FK RESTRICT); the caller simply retries later.
-        rows = conn.execute(
+        fk_refs = conn.execute(_FIND_ARTIFACT_FK_REFS_SQL).fetchall()
+        not_exists_clauses = [
+            sql.SQL("AND NOT EXISTS (SELECT 1 FROM {tbl} r WHERE r.{col} = a.id)").format(
+                tbl=sql.Identifier(nspname, relname),
+                col=sql.Identifier(attname),
+            )
+            for nspname, relname, attname in fk_refs
+        ]
+        select_query = sql.SQL(
             """
-            DELETE FROM artifacts a
+            SELECT a.id
+            FROM artifacts a
             WHERE a.state = 'staged'
+              AND a.retention <> 'legal_hold'
               AND a.created_at < (coalesce(%s::timestamptz, now()) - %s)
-              AND NOT EXISTS (SELECT 1 FROM document_versions dv WHERE dv.artifact_id = a.id)
-              AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.payload_artifact_id = a.id)
-              AND NOT EXISTS (SELECT 1 FROM node_operations nop WHERE nop.result_artifact_id = a.id)
-            RETURNING a.id
-            """,
-            (now, grace),
-        ).fetchall()
-    return [r[0] for r in rows]
+              {not_exists}
+            ORDER BY a.created_at, a.id
+            FOR UPDATE OF a SKIP LOCKED
+            """
+        ).format(not_exists=sql.SQL("\n              ").join(not_exists_clauses))
+
+        candidates = [r[0] for r in conn.execute(select_query, (now, grace)).fetchall()]
+        for art_id in candidates:
+            try:
+                with conn.transaction():
+                    cur = conn.execute(
+                        "DELETE FROM artifacts WHERE id = %s AND state = 'staged' AND retention <> 'legal_hold'",
+                        (art_id,),
+                    )
+                    if cur.rowcount == 1:
+                        deleted.append(art_id)
+                    else:
+                        skipped.append(art_id)
+            except errors.ForeignKeyViolation:
+                skipped.append(art_id)
+
+    return GcResult(deleted=deleted, skipped=skipped)
 
 
 def tombstone(

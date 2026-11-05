@@ -120,37 +120,16 @@ class TestArtifactLifecycleAndGC(FreshDatabase):
             commit(conn, tombstoned_id, observed_sha256=t_hash, observed_size=t_size)
             tombstone(conn, tombstoned_id, reason="scheduled retention policy cleanup")
 
-            # Reference ref_staged_id from node_operations
-            job_id = uuid.uuid4()
-            node_op_id = uuid.uuid4()
+            # Reference ref_staged_id from a table that may hold staged references
+            # (0007 requires node_operations/submissions to reference committed
+            # artifacts only). collect_staged discovers referencing FKs from the
+            # catalog, so this table is protected without being hard-coded.
             with conn.transaction():
-                conn.execute(
-                    """
-                    INSERT INTO jobs (id, project_id, kind, max_attempts)
-                    VALUES (%s, %s, 'parse', 3)
-                    """,
-                    (job_id, project_id),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO node_operations (
-                        id, job_id, work_item_id, node_revision,
-                        logical_invocation_id, attempt, status, result_artifact_id
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, 'intent', %s)
-                    """,
-                    (
-                        node_op_id,
-                        job_id,
-                        "work-item-1",
-                        "parse_batch@v1",
-                        uuid.uuid4(),
-                        1,
-                        ref_staged_id,
-                    ),
-                )
+                conn.execute("CREATE TABLE IF NOT EXISTS test_gc_refs (artifact_id uuid NOT NULL "
+                             "REFERENCES artifacts(id) ON DELETE RESTRICT)")
+                conn.execute("INSERT INTO test_gc_refs VALUES (%s)", (ref_staged_id,))
 
-            deleted_ids = collect_staged(conn, grace=datetime.timedelta(hours=24))
+            deleted_ids = collect_staged(conn, grace=datetime.timedelta(hours=24)).deleted
             self.assertEqual(deleted_ids, [expired_orphan_id])
 
             # Verify expired orphan is gone and all others remain intact
@@ -166,7 +145,7 @@ class TestArtifactLifecycleAndGC(FreshDatabase):
                 conn,
                 grace=datetime.timedelta(hours=24),
                 now=future_now,
-            )
+            ).deleted
             self.assertEqual(deleted_future, [fresh_staged_id])
             self.assertIsNone(self._get_artifact_row(conn, fresh_staged_id))
             # Referenced staged artifact is still protected even when expired relative to future_now

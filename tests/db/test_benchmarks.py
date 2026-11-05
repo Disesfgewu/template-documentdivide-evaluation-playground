@@ -78,8 +78,8 @@ class Fixture:
     def freeze(self):
         v = 1
         for s in HAPPY_PATH:
-            v = transition_benchmark(self.c, self.bench, v, s, f"to {s}", self.a)
-        return transition_benchmark(self.c, self.bench, v, "frozen", "freeze", self.a, compliance="partial")
+            v = transition_benchmark(self.c, self.p, self.bench, v, s, f"to {s}", self.a)
+        return transition_benchmark(self.c, self.p, self.bench, v, "frozen", "freeze", self.a, compliance="partial")
 
 
 class DocumentIntegrityTests(FreshDatabase):
@@ -146,16 +146,16 @@ class StateMachineTests(FreshDatabase):
         with self.connect() as c:
             f = Fixture(self, c)
             with self.assertRaises(errors.IntegrityConstraintViolation):
-                transition_benchmark(c, f.bench, 1, "frozen", "skip everything", f.a, compliance="compliant")
+                transition_benchmark(c, f.p, f.bench, 1, "frozen", "skip everything", f.a, compliance="compliant")
             self.assertEqual(c.execute("SELECT status::text, row_version FROM benchmark_revisions WHERE id = %s",
                                        (f.bench,)).fetchone(), ("draft", 1))
 
     def test_stale_row_version(self):
         with self.connect() as c:
             f = Fixture(self, c)
-            transition_benchmark(c, f.bench, 1, "parsing", "start", f.a)
+            transition_benchmark(c, f.p, f.bench, 1, "parsing", "start", f.a)
             with self.assertRaises(StaleVersion):
-                transition_benchmark(c, f.bench, 1, "cancelled", "late writer", f.a)
+                transition_benchmark(c, f.p, f.bench, 1, "cancelled", "late writer", f.a)
 
     def test_concurrent_transitions_one_wins(self):
         with self.connect() as c:
@@ -166,7 +166,7 @@ class StateMachineTests(FreshDatabase):
             with psycopg.connect(self.url) as conn:
                 barrier.wait()
                 try:
-                    transition_benchmark(conn, f.bench, 1, target, "race", f.a)
+                    transition_benchmark(conn, f.p, f.bench, 1, target, "race", f.a)
                     outcomes.append("ok")
                 except StaleVersion:
                     outcomes.append("stale")
