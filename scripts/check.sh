@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker)
+SUITES=(governance api api-db worker parser)
 scope=auto
 base=origin/main
 selected=()
@@ -31,6 +31,7 @@ suite_for() {
     services/api/*|tests/api/*) echo "api api-db";;
     tests/api_db/*|deploy/*) echo api-db;;
     services/worker/*) echo worker;;
+    services/parser/*|tests/parser/*) echo parser;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -52,6 +53,9 @@ run_suite() {
         return 3
       fi
       PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
+      ;;
+    parser)
+      PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
       ;;
     worker)
       # Go worker. GOTOOLCHAIN=local: never auto-download a different Go;

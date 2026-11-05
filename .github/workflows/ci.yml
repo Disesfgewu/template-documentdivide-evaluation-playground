@@ -31,7 +31,7 @@ jobs:
           go-version-file: services/worker/go.mod
           cache: false
       - name: Install pinned dependencies
-        run: python -m pip install -r requirements-dev.txt -r services/api/requirements.lock
+        run: python -m pip install -r requirements-dev.txt -r services/api/requirements.lock -r services/parser/requirements.lock
       - name: Start PostgreSQL + pgvector (deploy/compose.dev.yml)
         run: docker compose -f deploy/compose.dev.yml up -d --wait
       - name: Scoped checks (PR)
