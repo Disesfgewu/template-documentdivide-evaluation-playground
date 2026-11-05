@@ -1398,9 +1398,13 @@ acceptance:
   - 11
   - 14
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_gold_isolation.py
+  note: DB 層 RLS：participant/observer/非成員/未設定 actor 讀不到 facts、evidence sets/members、distractors；reviewer 可讀不可寫；跨專案隔離。API 端點、trace/向量搜尋/匯出的 gold 隔離（#11、#14）尚未完成。
   primary: 5
 - id: A19
   title: bbox、頁碼或文件 hash 錯誤
