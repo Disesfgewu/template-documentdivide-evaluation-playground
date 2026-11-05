@@ -27,6 +27,11 @@ def _escape(s: str) -> str:
 def build(pages: int) -> bytes:
     if isinstance(pages, bool) or not isinstance(pages, int) or not 1 <= pages <= 2000:
         raise ValueError("pages must be an integer in [1, 2000]")
+    return _build_unbounded(pages)
+
+
+def _build_unbounded(pages: int) -> bytes:
+    """No page cap; only for over-limit fixtures (bad_pdfs.many_pages)."""
     objs: list[bytes] = []  # objs[k] is object number k+1
 
     def add(body: bytes) -> int:

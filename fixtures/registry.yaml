@@ -89,13 +89,62 @@ fixtures:
   - 尚未建立
 - id: F05
   title: 空/假/損壞/加密/超限 PDF、文件內含指令注入測試字串
-  status: planned
-  license: null
-  items: []
-  expected: null
-  golden: null
+  status: partial
+  license: 合成資料，由本 repo 的 fixtures/generators/bad_pdfs.py 產生（repo LICENSE）；加密案例使用固定版本 pypdf 6.21.1
+  items:
+  - id: F05.empty
+    generator: fixtures.generators.bad_pdfs
+    args:
+    - empty
+    sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  - id: F05.fake_text
+    generator: fixtures.generators.bad_pdfs
+    args:
+    - fake_text
+    sha256: 1b95aff91730813ff98a06f91dfe279cbc174544c7a979ee25012183f799fcc4
+  - id: F05.fake_html
+    generator: fixtures.generators.bad_pdfs
+    args:
+    - fake_html
+    sha256: 18e99d7f63f552ada7d3281389c3946651bcfe223d7543bd8a83693cfde8cfc3
+  - id: F05.truncated
+    generator: fixtures.generators.bad_pdfs
+    args:
+    - truncated
+    sha256: 38e5567605c53b18ef10a7edc2ff9e82a0f8b5d85948ce1ee52397bd97ea3e32
+  - id: F05.bad_xref
+    generator: fixtures.generators.bad_pdfs
+    args:
+    - bad_xref
+    sha256: 57c9ce987f2d069e096b12dc540b1931585781553d462107e20494487bcb9e5b
+  - id: F05.encrypted
+    generator: fixtures.generators.bad_pdfs
+    args:
+    - encrypted
+    sha256: cfc32857acc413387411136701d06c7e0926543a867b0291bdf12fd7fb5aecfa
+  - id: F05.many_pages
+    generator: fixtures.generators.bad_pdfs
+    args:
+    - many_pages
+    sha256: 6fffad6a18db3430258f0f6334bc75bd0c495e6ef8be9fbdba2bcc283fec20f4
+  - id: F05.injection
+    generator: fixtures.generators.bad_pdfs
+    args:
+    - injection
+    sha256: cc566535fc183deb599dc41d2a218df40c2aac12f8c868c3e5d4a01ba8b63cf9
+  expected: fixtures/F05/expected.json
+  golden:
+    origin: script
+    review:
+      human: false
+      by: coding-agent
+      date: '2026-11-05'
+      method: 以 pypdf strict 模式獨立確認每個檔案的特性（無法開啟、需修復、需密碼、頁數、可抽出注入文字）
+      note: 預期行為（outcome）待 PM 確認；尚待人工覆核
   missing:
-  - 尚未建立
+  - '檔案大小超限（如數百 MB）的案例：不適合放進 CI，需在 #7 以設定值測試'
+  - AES 加密（需 cryptography 套件）
+  - 掃描影像內含的注入文字
 - id: F06
   title: 手算可驗證答案與 hit/citation，錯頁/錯單位/空答案/重複/預算邊界
   status: planned
