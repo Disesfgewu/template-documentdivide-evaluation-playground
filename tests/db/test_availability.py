@@ -166,7 +166,7 @@ class AvailabilityTests(FreshDatabase):
 
     def test_document_available_and_tombstoned(self):
         with self.connect() as conn:
-            fx = RunFixture(conn)
+            fx = RunFixture(self, conn)
             doc_rv, art_id = self._doc_resource_and_artifact(conn, fx.doc)
             method_rv = self._method_resource(conn, fx.method)
 
@@ -187,7 +187,7 @@ class AvailabilityTests(FreshDatabase):
 
     def test_document_store_verify_missing_and_corrupt(self):
         with tempfile.TemporaryDirectory() as tmpdir, self.connect() as conn:
-            fx = RunFixture(conn)
+            fx = RunFixture(self, conn)
             store = LocalArtifactStore(Path(tmpdir))
             raw = b"%PDF-1.4 test document bytes"
 
@@ -228,7 +228,7 @@ class AvailabilityTests(FreshDatabase):
 
     def test_submission_declared_only_and_tombstoned(self):
         with self.connect() as conn:
-            fx = RunFixture(conn)
+            fx = RunFixture(self, conn)
             run_id = fx.run()
             att_id = fx.attempt(run_id, fx.q)
             sub_id = fx.submission(run_id, att_id, fx.q)
@@ -253,7 +253,7 @@ class AvailabilityTests(FreshDatabase):
 
     def test_cross_project_lookup_error(self):
         with self.connect() as conn:
-            fx = RunFixture(conn)
+            fx = RunFixture(self, conn)
             other_p, _ = self.make_project(conn)
             doc_rv, _ = self._doc_resource_and_artifact(conn, fx.doc)
 
