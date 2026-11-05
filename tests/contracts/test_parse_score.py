@@ -5,7 +5,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from lab_contracts.parse import CAPABILITIES, CapabilityManifest, ParseManifest, ParseRequest, ParseResult
-from lab_contracts.score import MetricResult, display
+from lab_contracts.score import MetricResult, display, display_ratio
 
 EX = Path(__file__).resolve().parents[2] / "contracts" / "examples" / "valid"
 
@@ -49,6 +49,21 @@ class ParseContractTests(unittest.TestCase):
         other = load(ParseRequest, "ParseRequest.three_pages", page_indices=[0, 1], operation_id="op_x")
         self.assertEqual(res.check_against_request(other),
                          ["operation_id_mismatch", "unrequested_pages_reported"])
+
+
+class ParseResultNegativeTests(unittest.TestCase):
+    def test_duplicate_reported_page_rejected(self):
+        obj = json.loads((EX / "ParseResult.mixed_pages.json").read_text())
+        obj["pages"].append(dict(obj["pages"][0]))
+        with self.assertRaises(ValidationError) as cm:
+            ParseResult.model_validate_json(json.dumps(obj))
+        self.assertIn("page_index", str(cm.exception))
+
+    def test_missing_extra_and_wrong_binding_reported_together(self):
+        req = load(ParseRequest, "ParseRequest.three_pages", page_indices=[0, 9], operation_id="op_other")
+        res = load(ParseResult, "ParseResult.mixed_pages")
+        self.assertEqual(res.check_against_request(req),
+                         ["operation_id_mismatch", "unrequested_pages_reported", "requested_pages_missing"])
 
 
 def metric(**kw):
@@ -104,6 +119,27 @@ class ScoreContractTests(unittest.TestCase):
         for bad in ("lab-round-2", "", None):
             with self.subTest(bad=bad), self.assertRaises(ValidationError):
                 metric(numerator=1.0, denominator=2.0, raw_value=50.0, display_value="50.00", rounding=bad)
+
+    def test_ratio_ties_round_half_up(self):
+        # Exact decimal ties on the ratio path: 1/800 -> 0.125 -> "0.13";
+        # 1/1600 -> 0.0625 -> "0.06" (not a tie at 2 places, rounds down).
+        self.assertEqual(display_ratio(1.0, 800.0), "0.13")
+        self.assertEqual(display_ratio(1.0, 1600.0), "0.06")
+        self.assertEqual(display_ratio(5.0, 8000.0), "0.06")   # 0.0625
+        self.assertEqual(display_ratio(1.0, 8.0), "12.50")
+        metric(numerator=1.0, denominator=800.0, raw_value=0.125, display_value="0.13")
+        with self.assertRaises(ValidationError):
+            metric(numerator=1.0, denominator=800.0, raw_value=0.125, display_value="0.12")
+
+    def test_non_finite_numbers_rejected(self):
+        # JSON has no NaN/Infinity literals; Python's json emits them, the
+        # contract must still refuse them.
+        for field in ("numerator", "denominator", "raw_value"):
+            for bad in (float("nan"), float("inf")):
+                kw = dict(numerator=1.0, denominator=2.0, raw_value=50.0, display_value="50.00")
+                kw[field] = bad
+                with self.subTest(field=field, bad=bad), self.assertRaises(ValidationError):
+                    metric(**kw)
 
     def test_error_status_carries_no_number(self):
         with self.assertRaises(ValidationError):
