@@ -3,15 +3,23 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db"},
-    "scripts/check.sh": {"governance", "api", "api-db"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
     "tests/api_db/test_readiness_real_db.py": {"api-db"},
     "deploy/compose.dev.yml": {"api-db"},
+    "services/worker/cmd/lab-worker/main.go": {"worker"},
+    "services/worker/go.mod": {"worker"},
     "docs/TESTING.md": {"governance"},
+    "web/src/App.tsx": {"web"},
+    "web/package-lock.json": {"web"},
+    "web/README.md": {"web", "governance"},
+    "services/parser/README.md": {"parser", "governance"},
+    "services/parser/lab_parser/main.py": {"parser"},
+    "tests/parser/test_parser_service.py": {"parser"},
     "unknown/file.go": set(),  # unmapped -> check.sh runs all suites
 }
 
