@@ -1,0 +1,41 @@
+name: 開發任務 / Task
+description: 可獨立驗收的實作任務，需對應 Epic、依賴與 SPEC R/T/A。
+title: "[P?][ID] "
+body:
+  - type: input
+    id: epic
+    attributes:
+      label: Epic
+      description: 例如 #1
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 優先序與依賴
+      description: 前置 Issue 與 PM 優先序；未滿足依賴不得認領實作。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 必要交付與驗收
+      description: 以 checklist 列出可驗證的驗收條件。
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: SPEC／測試對應
+      description: R / T / A IDs。對應編號不代表測試已通過。
+    validations:
+      required: true
+  - type: textarea
+    id: blockers
+    attributes:
+      label: 已知阻擋（憑證/硬體/權限）
+      description: 缺少的能力請列為 blocked，不可寫成 passed。
+    validations:
+      required: false
