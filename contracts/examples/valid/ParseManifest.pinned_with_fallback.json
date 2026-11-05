@@ -1,0 +1,50 @@
+{
+  "parser_name": "unstructured",
+  "package_or_service_version": "0.18.3",
+  "adapter_revision": "unstructured-adapter@0",
+  "output_schema": "unstructured-elements@0.18",
+  "model_revisions": [
+    {
+      "name": "layout",
+      "revision": "yolox@2024-05",
+      "checksum": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "requested_profile": "hi_res",
+  "effective_profile": "fast",
+  "fallback_reason": "hi_res 逾時，改用 fast；table_structure 能力消失，頁面標 needs_review",
+  "ocr_languages": [
+    "zh-Hant",
+    "en"
+  ],
+  "page_selection": [
+    0,
+    1,
+    2
+  ],
+  "page_index_map": [
+    {
+      "parser_page": 1,
+      "page_index": 0
+    },
+    {
+      "parser_page": 2,
+      "page_index": 1
+    },
+    {
+      "parser_page": 3,
+      "page_index": 2
+    }
+  ],
+  "render_settings": {
+    "dpi": 150,
+    "max_megapixels": 16.0
+  },
+  "postprocess_flags": [],
+  "endpoint_deployment_id": null,
+  "started_at": "2026-11-05T10:00:00Z",
+  "finished_at": "2026-11-05T10:00:42Z",
+  "cost_usd": null,
+  "warnings": [],
+  "reproducible": true
+}

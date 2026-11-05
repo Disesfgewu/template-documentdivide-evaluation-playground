@@ -1,0 +1,253 @@
+{
+  "$defs": {
+    "ModelRevision": {
+      "additionalProperties": false,
+      "properties": {
+        "checksum": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Checksum"
+        },
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "revision": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "revision",
+        "checksum"
+      ],
+      "title": "ModelRevision",
+      "type": "object"
+    },
+    "PageMapEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "page_index": {
+          "minimum": 0,
+          "title": "Page Index",
+          "type": "integer"
+        },
+        "parser_page": {
+          "minimum": 0,
+          "title": "Parser Page",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "parser_page",
+        "page_index"
+      ],
+      "title": "PageMapEntry",
+      "type": "object"
+    },
+    "RenderSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "dpi": {
+          "maximum": 600,
+          "minimum": 72,
+          "title": "Dpi",
+          "type": "integer"
+        },
+        "max_megapixels": {
+          "exclusiveMinimum": 0,
+          "maximum": 16,
+          "title": "Max Megapixels",
+          "type": "number"
+        }
+      },
+      "required": [
+        "dpi",
+        "max_megapixels"
+      ],
+      "title": "RenderSettings",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/ParseManifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "adapter_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Adapter Revision",
+      "type": "string"
+    },
+    "cost_usd": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Cost Usd"
+    },
+    "effective_profile": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Effective Profile",
+      "type": "string"
+    },
+    "endpoint_deployment_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Endpoint Deployment Id"
+    },
+    "fallback_reason": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Fallback Reason"
+    },
+    "finished_at": {
+      "format": "date-time",
+      "title": "Finished At",
+      "type": "string"
+    },
+    "model_revisions": {
+      "items": {
+        "$ref": "#/$defs/ModelRevision"
+      },
+      "title": "Model Revisions",
+      "type": "array"
+    },
+    "ocr_languages": {
+      "items": {
+        "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+        "type": "string"
+      },
+      "title": "Ocr Languages",
+      "type": "array"
+    },
+    "output_schema": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Output Schema",
+      "type": "string"
+    },
+    "package_or_service_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Package Or Service Version",
+      "type": "string"
+    },
+    "page_index_map": {
+      "items": {
+        "$ref": "#/$defs/PageMapEntry"
+      },
+      "minItems": 1,
+      "title": "Page Index Map",
+      "type": "array"
+    },
+    "page_selection": {
+      "items": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "minItems": 1,
+      "title": "Page Selection",
+      "type": "array"
+    },
+    "parser_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Parser Name",
+      "type": "string"
+    },
+    "postprocess_flags": {
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Postprocess Flags",
+      "type": "array"
+    },
+    "render_settings": {
+      "$ref": "#/$defs/RenderSettings"
+    },
+    "reproducible": {
+      "title": "Reproducible",
+      "type": "boolean"
+    },
+    "requested_profile": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Requested Profile",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "warnings": {
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "parser_name",
+    "package_or_service_version",
+    "adapter_revision",
+    "output_schema",
+    "model_revisions",
+    "requested_profile",
+    "effective_profile",
+    "fallback_reason",
+    "ocr_languages",
+    "page_selection",
+    "page_index_map",
+    "render_settings",
+    "postprocess_flags",
+    "endpoint_deployment_id",
+    "started_at",
+    "finished_at",
+    "cost_usd",
+    "warnings",
+    "reproducible"
+  ],
+  "title": "ParseManifest",
+  "type": "object"
+}

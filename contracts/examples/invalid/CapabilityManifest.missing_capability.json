@@ -1,0 +1,47 @@
+{
+  "parser_name": "mineru",
+  "adapter_revision": "mineru-adapter@0",
+  "layout": {
+    "state": "supported",
+    "limitations": [],
+    "fixture_evidence": [
+      "fx_layout_01"
+    ]
+  },
+  "ocr": {
+    "state": "supported",
+    "limitations": [
+      "中英文以外語言未測"
+    ],
+    "fixture_evidence": [
+      "fx_ocr_scan_01"
+    ]
+  },
+  "table_structure": {
+    "state": "unknown",
+    "limitations": [],
+    "fixture_evidence": []
+  },
+  "cell_geometry": {
+    "state": "unsupported",
+    "limitations": [
+      "此版輸出無 cell bbox，只有整表 region"
+    ],
+    "fixture_evidence": []
+  },
+  "image_crops": {
+    "state": "unknown",
+    "limitations": [],
+    "fixture_evidence": []
+  },
+  "cross_page_table": {
+    "state": "unknown",
+    "limitations": [],
+    "fixture_evidence": []
+  },
+  "full_document_postprocess": {
+    "state": "unknown",
+    "limitations": [],
+    "fixture_evidence": []
+  }
+}

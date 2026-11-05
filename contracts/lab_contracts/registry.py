@@ -2,6 +2,8 @@
 from .api import ErrorResponse, Page, PageRequest
 from .benchmark import (BenchmarkManifest, EvidenceUnit, Question, SemanticAnswer, SourceAnswer,
                         TextualAnswer, ValidationRecord)
+from .parse import CapabilityManifest, ParseManifest, ParseRequest, ParseResult
+from .score import MetricResult
 from .source import SourceRegion
 
 MODELS = {
@@ -16,4 +18,9 @@ MODELS = {
     "EvidenceUnit": EvidenceUnit,
     "ValidationRecord": ValidationRecord,
     "BenchmarkManifest": BenchmarkManifest,
+    "CapabilityManifest": CapabilityManifest,
+    "ParseManifest": ParseManifest,
+    "ParseRequest": ParseRequest,
+    "ParseResult": ParseResult,
+    "MetricResult": MetricResult,
 }
