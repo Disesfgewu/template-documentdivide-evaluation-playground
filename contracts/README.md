@@ -56,4 +56,20 @@ scripts/check.sh --scope contracts
   - `BenchmarkManifest`：N/Q 必須和頁數一致；各桶數量加總等於 n_valid；compliant 必須剛好 N 題且三個特殊桶都 ≥ Q；partial 必須列出 exceptions。`check_manifest` 再和實際題目比對數量。
   - `examples/bundles/minimal.json`：3 題手工可核對的契約層 fixture（不是真實文件）。
 
-尚未完成（後續增量）：parser manifest、submission/scoring、OpenAPI 匯出、fixture registry 與 R/T/A traceability 檔。
+- Parser 內部契約（SPEC 19.2，`lab_contracts/parse.py`）：`CapabilityManifest`、`ParseManifest`、`ParseRequest`、`ParseResult`。上游 JSON 不直接作為 LAB 核心契約。
+  - CapabilityManifest：8 項能力各自宣告 supported、unsupported 或 unknown；標 supported 必須附 fixture 證據。
+  - ParseManifest：
+    - 上游沒有揭露的版本一律記 `unknown`，不補造；`reproducible=true` 時不得含 unknown。
+    - requested 與 effective profile 不同時，必須附 fallback_reason。
+    - page_index_map 必須剛好涵蓋選取的頁面；DPI 範圍 72–600；成本未知時為 null。
+  - ParseResult：非 ok 的頁面必須附 diagnostics；`check_against_request` 確認每一頁都有回報，失敗頁不會從覆蓋率中消失。
+- 評分結果（SPEC 16.5，`lab_contracts/score.py`）：`MetricResult`。
+  - scored 必須有分子、分母（>0），且 raw_value = 100×分子/分母。
+  - display_value 是 raw_value 以 half-up 四捨五入到 2 位小數；計算時保留完整精度。
+  - not_applicable、pending、error 不帶數值，也就是不以 0 代替，且必須附 reason_codes。
+- R/T/A 追溯表：`docs/traceability.yaml`，由 `tools/governance/check_traceability.py` 在 governance suite 檢查。
+  - 必須涵蓋 SPEC 的全部 R、T、A 編號。
+  - partial、blocked 必須附證據與說明；passed 必須附 main 上的 commit 與 CI run。
+  - 契約層測試最多只能讓項目成為 partial。
+
+尚未完成（後續增量）：OpenAPI 匯出、fixture registry（帶 hash 與手核 golden）、submission/scoring。

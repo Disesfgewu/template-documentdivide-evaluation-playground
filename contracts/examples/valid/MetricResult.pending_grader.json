@@ -1,0 +1,14 @@
+{
+  "question_id": "q_001",
+  "metric": "faithfulness",
+  "status": "pending",
+  "raw_value": null,
+  "display_value": null,
+  "numerator": null,
+  "denominator": null,
+  "reason_codes": [
+    "semantic_judge_unavailable"
+  ],
+  "grader_revision": "grader@1",
+  "support_refs": []
+}
