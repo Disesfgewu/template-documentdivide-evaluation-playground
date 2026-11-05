@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts fixtures)
+SUITES=(governance api api-db worker parser web contracts fixtures db)
 scope=auto
 base=origin/main
 selected=()
@@ -35,6 +35,7 @@ suite_for_base() {
     web/*) echo web;;
     contracts/*|tests/contracts/*) echo "contracts fixtures";;
     fixtures/*|tests/fixtures/*) echo fixtures;;
+    db/*|tests/db/*) echo db;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -72,6 +73,14 @@ run_suite() {
         return 3
       fi
       (cd web && node --version && npm ci && npm test && npm run build)
+      ;;
+    db)
+      # Migrations, constraints, transactions on real PostgreSQL. Missing DB = BLOCKED.
+      if [[ -z "${LAB_TEST_DATABASE_URL:-}" ]]; then
+        echo "BLOCKED: suite db needs LAB_TEST_DATABASE_URL (see docs/TESTING.md)" >&2
+        return 3
+      fi
+      PYTHONPATH=db python3 -m tools.governance.run_tests tests/db --fail-on-skip
       ;;
     fixtures)
       # Fixture registry: rebuild every registered item and compare sha256.

@@ -3,9 +3,9 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures"},
-    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures", "db"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures", "db"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures", "db"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
@@ -14,6 +14,8 @@ PATHS = {
     "services/worker/cmd/lab-worker/main.go": {"worker"},
     "services/worker/go.mod": {"worker"},
     "docs/TESTING.md": {"governance"},
+    "db/lab_db/migrations/0001_core.sql": {"db"},
+    "tests/db/test_constraints.py": {"db"},
     "fixtures/registry.yaml": {"fixtures"},
     "fixtures/generators/synthetic_pdf.py": {"fixtures"},
     "tests/fixtures/test_registry.py": {"fixtures"},
