@@ -324,9 +324,15 @@ def _reject_constant(name: str):
 def _exact_number(text: str) -> Decimal:
     """Keep the exact value of a JSON number token. Values a model cannot hold
     as a finite binary64 (overflow to inf, or a non-zero value that underflows
-    to 0) are rejected instead of being silently changed."""
-    d = Decimal(text)
-    f = float(d)
+    to 0) are rejected instead of being silently changed. A token whose
+    exponent is beyond what Decimal can represent at all (e.g.
+    1e999999999999999999999999, even with a zero mantissa) is rejected the
+    same way, never escaping as decimal.InvalidOperation (PR #26 review)."""
+    try:
+        d = Decimal(text)
+        f = float(d)
+    except ArithmeticError:
+        raise StrictJSONError("number out of range") from None
     if not math.isfinite(f) or (f == 0.0 and d != 0):
         raise StrictJSONError("number out of range")
     return d
@@ -353,7 +359,7 @@ def strict_loads(text: str) -> Any:
         raise StrictJSONError("nesting too deep") from None
     except StrictJSONError:
         raise
-    except ValueError as exc:
+    except (ValueError, ArithmeticError) as exc:
         raise StrictJSONError(f"invalid JSON ({type(exc).__name__})") from None
 
 

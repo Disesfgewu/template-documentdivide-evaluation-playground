@@ -277,6 +277,38 @@ class JsonlTests(unittest.TestCase):
         self.assertEqual(r[0][0].payload_hash, r[3][0].payload_hash)
         self.assertIsInstance(r[3][1], SubmissionLine)
 
+    def test_exponent_beyond_decimal_range_is_invalid_json_not_crash(self):
+        # PR #26 review: Decimal() raises InvalidOperation for these short
+        # tokens; it must become a per-line invalid_json / HTTP 400.
+        huge = ("1e999999999999999999999999", "0e-99999999999999999999999",
+                "-1E+999999999999999999999999", "1.5e-999999999999999999999999")
+        for tok in huge:
+            with self.subTest(tok=tok):
+                with self.assertRaises(method.StrictJSONError):
+                    method.strict_loads("[%s]" % tok)
+                code, model, reasons = parse_query_response(('{"n":%s}' % tok).encode())
+                self.assertEqual((code, model, reasons), (400, None, ["invalid_json"]))
+                resp = copy.deepcopy(RESP); resp["retrieval_trace"] = [{"n": "__N__"}]
+                body = json.dumps(resp).replace('"__N__"', tok).encode()
+                self.assertEqual(parse_query_response(body)[:2], (400, None))
+                q = copy.deepcopy(LINE); q["response"]["retrieval_trace"] = [{"n": "__N__"}]
+                q["response"]["question_id"] = "q_002"
+                bad = json.dumps(q, ensure_ascii=False).replace('"__N__"', tok)
+                q3 = copy.deepcopy(LINE); q3["response"]["question_id"] = "q_003"
+                r = parse_jsonl(jsonl(LINE, bad, q3))
+                self.assertEqual([(x.status, x.code) for x, _ in r],
+                                 [("accepted", None), ("rejected", "invalid_json"),
+                                  ("accepted", None)])
+                self.assertIsInstance(r[0][1], SubmissionLine)
+                self.assertIsInstance(r[2][1], SubmissionLine)
+                self.assertEqual(r[0][0].payload_hash, parse_jsonl(jsonl(LINE))[0][0].payload_hash)
+        # Large but representable exponents keep their existing behaviour.
+        self.assertEqual(payload_hash(method.strict_loads("[0e-999999]")),
+                         payload_hash(method.strict_loads("[0]")))
+        for tok in ("1e999999", "1e-999999"):
+            with self.subTest(tok=tok), self.assertRaises(method.StrictJSONError):
+                method.strict_loads("[%s]" % tok)
+
     def test_hash_is_of_raw_payload_not_model_dump(self):
         # Omitting an optional field and sending null are different payloads;
         # new optional model fields can never change an existing payload hash.
