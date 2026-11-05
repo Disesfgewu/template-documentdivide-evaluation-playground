@@ -5,6 +5,7 @@ from psycopg import errors
 from psycopg.types.json import Jsonb
 
 from lab_db.migrate import Migration, MigrationError, discover, migrate
+from lab_db.repo import Change, record_change
 
 from .base import FreshDatabase, h
 from .test_runs import RunFixture
@@ -180,10 +181,15 @@ class UpgradeDataTests(UpgradeTests):
             with c.transaction():
                 c.execute("UPDATE evaluations SET status = 'published' WHERE id = %s", (ev,))
 
+            # A real lineage edge: a derived resource version built from the benchmark.
+            bench_rv = c.execute("SELECT resource_id FROM benchmark_revisions WHERE id = %s",
+                                 (fx.bench,)).fetchone()[0]
+            record_change(c, Change(fx.p, fx.a, "report.derive", "report", "report_1", 1, h("report"),
+                                    "lab-c14n-1", "report.created", lineage=[(bench_rv, "derived_from")]))
             before = self._fingerprints(c)
 
         applied = migrate(self.url, "v-new")
-        self.assertEqual(applied, [4, 5])
+        self.assertEqual(applied, [m.version for m in discover()[3:]])
 
         with self.connect() as c:
             mig_rows = c.execute(
@@ -191,7 +197,7 @@ class UpgradeDataTests(UpgradeTests):
             ).fetchall()
             self.assertEqual(
                 mig_rows,
-                [(1, "v-old"), (2, "v-old"), (3, "v-old"), (4, "v-new"), (5, "v-new")],
+                [(m.version, "v-old" if m.version <= 3 else "v-new") for m in discover()],
             )
 
             after = self._fingerprints(c)
