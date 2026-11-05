@@ -92,16 +92,19 @@ scripts/check.sh --scope contracts
   - telemetry 可以省略；提供時每個 key 都必填，未知值用 null（0 只代表確認為零）。
   - HTTP 綁定：`check_binding` 比對 request_id、question_id、index_id。`PrepareResult.check_against_request` 比對文件 hash 與 method revision。
 - **`JobStatus`**：只有 succeeded 帶 result，而且型別必須符合 kind；failed 必須帶 error，其他狀態不能帶。
-- **嚴格 JSON（`strict_loads`）**：拒絕語法錯誤、重複 key、NaN/Infinity、溢位成 inf 的數字；過深的巢狀會轉成 `StrictJSONError`，不會讓 `RecursionError` 往外丟。
+- **嚴格 JSON（`strict_loads`）**：拒絕語法錯誤、重複 key、NaN/Infinity，以及超出有限 binary64 範圍的數字（溢位成 inf，或非零卻下溢成 0，例如 `1e-999`）；小數與指數數字以精確的 `Decimal` 回傳，不先轉成 float；過深的巢狀會轉成 `StrictJSONError`，不會讓 `RecursionError` 往外丟。
 - **`parse_query_response(body, request=None)`**：超過 16 MiB → 413；非 UTF-8 或不是嚴格 JSON → 400；schema 或語意錯誤 → 422；有傳入 request 但身分不符 → 422；合法 → 200。
 - **`parse_jsonl(body)`**（SPEC 16.6：最多 100 行、16 MiB）：
   - 整批拒絕：過大或行數超過上限 → 413；非 UTF-8 或含 BOM → 415；沒有內容或只有空白 → 422。
   - 其他情況逐行判斷（T33），壞的一行不會吞掉合法的行。逐行錯誤碼：`invalid_json`（含批內空行）、`line_too_large`、`schema_invalid`、`envelope_mismatch`（同一批的 run、benchmark、method、document_hashes 必須一致）、`duplicate_in_batch`。
   - 同一批內同一 attempt＋question 的重送：payload 相同時接受，並以 `duplicate_of` 標出第一次出現的行，避免重複寫入；payload 不同時拒絕。
-- **canonical payload hash（`lab-c14n-1`）**：
+- **canonical payload hash（`lab-c14n-2`，取代 `lab-c14n-1`）**：
   - hash 是對**實際傳送的 JSON 值**（經嚴格解析）計算，不是對 model dump 計算，所以日後新增選填欄位不會改變既有 payload 的 hash。
-  - 規則由 Python 定義，不是 RFC 8785 JCS：key 依 code point 排序、無空白、UTF-8（不跳脫非 ASCII）、整數值的浮點數寫成整數（`1.0` 與 `1` 相同）、其他浮點數用最短的 round-trip 表示、禁止非有限數字。字串不做 Unicode 正規化，所以 NFC 與 NFD 會得到不同的 hash。
+  - 規則由 Python 定義，不是 RFC 8785 JCS：key 依 code point 排序、無空白、UTF-8（不跳脫非 ASCII）、禁止非有限數字。字串不做 Unicode 正規化，所以 NFC 與 NFD 會得到不同的 hash。
+  - 數字以**原始 token 的精確十進位值**寫出，不經 binary64 捨入：去掉尾端的 0，數學上相等的寫法相同（`1`、`1.0`、`10e-1`；`0.1`、`1e-1`；`-0` 與 `0`），不同的值一定不同（`9007199254740992.0` 與 `9007199254740993.0`）。十進位指數在 [-7, 21) 內用一般寫法，其他用 `d.ddde<指數>`。Python float 依最短 round-trip 表示處理。
+  - `lab-c14n-1` 先把數字轉成 float，會讓不同的值得到相同的 hash，並把非零的下溢值當成 0（PR #26 review），所以升級版本。原有的黃金向量在兩個版本下相同。
   - 以黃金向量測試固定（`test_method.py`）。改任何規則都必須升級 `CANONICAL_JSON_VERSION`。
+- 模型驗證（`model_validate_json`）仍使用 float；hash 的身分與模型的數值是分開的兩條路徑。
 - **上限**：見 `method.py` 頂部的常數（文件數、問題與答案長度、hits、regions、claims、citations、trace）。測試直接引用這些常數，不另外放寬。
 - **OpenAPI**：`openapi/method-service.v1.json` 精確列出 SPEC 7.2 的 5 個端點，包含 200/202、錯誤與 job 結構。由模型產生，`lab_contracts.export --check` 會檢查漂移。這是**契約文件**，不代表已有可呼叫的正式方法服務。
 

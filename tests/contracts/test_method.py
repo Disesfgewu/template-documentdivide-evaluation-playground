@@ -199,7 +199,8 @@ class JsonlTests(unittest.TestCase):
                          [("accepted", None), ("rejected", "envelope_mismatch")])
 
     def test_payload_hash_golden_vectors(self):
-        # Pinned: changing lab-c14n-1 must change CANONICAL_JSON_VERSION.
+        # Pinned: changing lab-c14n-2 must change CANONICAL_JSON_VERSION.
+        # These lab-c14n-1 vectors are unchanged under lab-c14n-2.
         self.assertEqual(method.canonical_json({"b": 1.0, "a": [True, None, 0.5, "é"]}),
                          '{"a":[true,null,0.5,"é"],"b":1}'.encode())
         self.assertEqual(payload_hash({"b": 1, "a": 2}), payload_hash({"a": 2, "b": 1.0}))
@@ -210,7 +211,7 @@ class JsonlTests(unittest.TestCase):
             method.canonical_json({"a": float("nan")})
 
     def test_payload_hash_equivalent_and_distinct_inputs(self):
-        self.assertEqual(method.CANONICAL_JSON_VERSION, "lab-c14n-1")
+        self.assertEqual(method.CANONICAL_JSON_VERSION, "lab-c14n-2")
         # Formatting (whitespace, key order) of the transmitted text does not matter.
         compact = method.strict_loads('{"a":[1,2],"b":"x"}')
         spaced = method.strict_loads('{ "b" : "x",\n  "a" : [ 1 , 2 ] }')
@@ -230,6 +231,51 @@ class JsonlTests(unittest.TestCase):
         for text in ('{"a":NaN}', '{"a":Infinity}', '{"a":1e999}', '{"a":1,"a":1}'):
             with self.subTest(text=text), self.assertRaises(method.StrictJSONError):
                 method.strict_loads(text)
+
+    def test_numbers_hash_by_exact_token_value(self):
+        # PR #26 review: raw tokens must not be rounded to binary64 first.
+        h = lambda text: payload_hash(method.strict_loads(text))
+        self.assertNotEqual(h('{"a":9007199254740992.0}'), h('{"a":9007199254740993.0}'))
+        self.assertNotEqual(h('{"a":0.1}'), h('{"a":0.1000000000000000055511151231257827}'))
+        self.assertEqual(method.canonical_json(method.strict_loads('[9007199254740993.0]')),
+                         b"[9007199254740993]")
+        # Mathematically equal spellings are one value.
+        for group in (('1', '1.0', '1.000', '10e-1', '0.1e1', '1E0', '1e+0'),
+                      ('0.1', '1e-1', '0.10', '10E-2'),
+                      ('0', '0.0', '-0', '-0.0', '0e5'),
+                      ('-2.5', '-25e-1'),
+                      ('100000000000000000000000', '1e23', '1.0E+23')):
+            with self.subTest(group=group):
+                self.assertEqual(len({h("[%s]" % t) for t in group}), 1)
+        # Python floats hash as their shortest repr, i.e. like the same text.
+        self.assertEqual(payload_hash([0.1, 1.0, 1e-8, 1e23]), h("[0.1,1,1e-8,1e23]"))
+        for text, canon in (("[0.5]", b"[0.5]"), ("[1e-7]", b"[0.0000001]"), ("[1e-8]", b"[1e-8]"),
+                            ("[123.456e18]", b"[123456000000000000000]"), ("[1.5e21]", b"[1.5e21]"),
+                            ("[-1.25e-300]", b"[-1.25e-300]"), ("[12345678901234567890123]",
+                                                                 b"[1.2345678901234567890123e22]")):
+            with self.subTest(text=text):
+                self.assertEqual(method.canonical_json(method.strict_loads(text)), canon)
+        # Values a model cannot hold as finite binary64 are rejected, never
+        # silently turned into inf or 0.
+        for text in ('[1e-999]', '[-1e-400]', '[1e999]', '[-1.8e308]'):
+            with self.subTest(text=text), self.assertRaises(method.StrictJSONError):
+                method.strict_loads(text)
+        self.assertEqual(h("[0e-999]"), h("[0]"))
+        self.assertEqual(h("[5e-324]"), h("[5E-324]"))  # smallest subnormal is fine
+
+    def test_resend_with_different_number_is_conflict(self):
+        q = copy.deepcopy(LINE); q["response"]["retrieval_trace"] = [{"measurement": "__N__"}]
+        a = json.dumps(q, ensure_ascii=False).replace('"__N__"', "9007199254740992.0")
+        b = json.dumps(q, ensure_ascii=False).replace('"__N__"', "9007199254740993.0")
+        same = json.dumps(q, ensure_ascii=False).replace('"__N__"', "9007199254740992")
+        tiny = json.dumps(q, ensure_ascii=False).replace('"__N__"', "1e-999")
+        r = parse_jsonl(jsonl(a, tiny, b, same))
+        self.assertEqual([(x.status, x.code, x.duplicate_of) for x, _ in r],
+                         [("accepted", None, None), ("rejected", "invalid_json", None),
+                          ("rejected", "duplicate_in_batch", None), ("accepted", None, 1)])
+        self.assertNotEqual(r[0][0].payload_hash, r[2][0].payload_hash)
+        self.assertEqual(r[0][0].payload_hash, r[3][0].payload_hash)
+        self.assertIsInstance(r[3][1], SubmissionLine)
 
     def test_hash_is_of_raw_payload_not_model_dump(self):
         # Omitting an optional field and sending null are different payloads;

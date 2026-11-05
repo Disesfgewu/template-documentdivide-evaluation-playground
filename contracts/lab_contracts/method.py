@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
@@ -307,8 +308,9 @@ class SubmissionLine(Contract):
     response: QueryResponse
 
 
-CANONICAL_JSON_VERSION = "lab-c14n-1"
-_MAX_SAFE_INT = 2 ** 53
+# lab-c14n-2 replaces lab-c14n-1: numbers are hashed by their exact decimal
+# value instead of being rounded to binary64 first (PR #26 review).
+CANONICAL_JSON_VERSION = "lab-c14n-2"
 
 
 class StrictJSONError(ValueError):
@@ -319,11 +321,15 @@ def _reject_constant(name: str):
     raise StrictJSONError(f"non-finite number {name}")
 
 
-def _finite_float(text: str) -> float:
-    v = float(text)
-    if not math.isfinite(v):  # e.g. 1e999 overflows to inf
+def _exact_number(text: str) -> Decimal:
+    """Keep the exact value of a JSON number token. Values a model cannot hold
+    as a finite binary64 (overflow to inf, or a non-zero value that underflows
+    to 0) are rejected instead of being silently changed."""
+    d = Decimal(text)
+    f = float(d)
+    if not math.isfinite(f) or (f == 0.0 and d != 0):
         raise StrictJSONError("number out of range")
-    return v
+    return d
 
 
 def _no_duplicate_keys(pairs):
@@ -336,11 +342,13 @@ def _no_duplicate_keys(pairs):
 
 
 def strict_loads(text: str) -> Any:
-    """json.loads that rejects duplicate keys, NaN/Infinity and overflowing
-    numbers, and turns pathological nesting into StrictJSONError."""
+    """json.loads that rejects duplicate keys, NaN/Infinity and numbers outside
+    the finite binary64 range, and turns pathological nesting into
+    StrictJSONError. Fractional/exponent numbers are returned as exact
+    Decimal (integers as int) so hashing never sees a rounded value."""
     try:
         return json.loads(text, object_pairs_hook=_no_duplicate_keys,
-                          parse_constant=_reject_constant, parse_float=_finite_float)
+                          parse_constant=_reject_constant, parse_float=_exact_number)
     except RecursionError:
         raise StrictJSONError("nesting too deep") from None
     except StrictJSONError:
@@ -349,26 +357,79 @@ def strict_loads(text: str) -> Any:
         raise StrictJSONError(f"invalid JSON ({type(exc).__name__})") from None
 
 
-def _normalize(v: Any) -> Any:
-    if isinstance(v, bool) or v is None or isinstance(v, (int, str)):
-        return v
-    if isinstance(v, float):
-        # 1 and 1.0 are the same JSON number: integral floats hash as integers.
-        return int(v) if v.is_integer() and abs(v) < _MAX_SAFE_INT else v
-    if isinstance(v, list):
-        return [_normalize(x) for x in v]
-    if isinstance(v, dict):
-        return {k: _normalize(x) for k, x in v.items()}
-    raise TypeError(f"not a JSON value: {type(v).__name__}")
+def _canonical_number(d: Decimal) -> str:
+    """Exact, unique text for a finite number: trailing zeros dropped, so
+    1 == 1.0 == 10e-1 and 0.1 == 1e-1; positional when the decimal exponent is
+    in [-7, 21), otherwise d[.ddd]e<exp>. -0 is written as 0."""
+    if not d.is_finite():
+        raise ValueError("non-finite number")
+    if d == 0:
+        return "0"
+    sign, digits, exp = d.as_tuple()
+    ds = "".join(map(str, digits)).lstrip("0")
+    stripped = ds.rstrip("0")
+    exp += len(ds) - len(stripped)
+    ds = stripped
+    point = len(ds) + exp  # value = 0.<ds> * 10**point
+    neg = "-" if sign else ""
+    if -7 < point <= 21:
+        if exp >= 0:
+            return neg + ds + "0" * exp
+        if point > 0:
+            return neg + ds[:point] + "." + ds[point:]
+        return neg + "0." + "0" * (-point) + ds
+    mant = ds[0] + ("." + ds[1:] if len(ds) > 1 else "")
+    return f"{neg}{mant}e{point - 1}"
+
+
+def _write(v: Any, out: list[str]) -> None:
+    if v is None:
+        out.append("null")
+    elif isinstance(v, bool):
+        out.append("true" if v else "false")
+    elif isinstance(v, int):
+        out.append(_canonical_number(Decimal(v)))
+    elif isinstance(v, float):
+        if not math.isfinite(v):
+            raise ValueError("non-finite number")
+        # A Python float stands for its shortest round-trip decimal, the same
+        # value strict_loads gives for that text.
+        out.append(_canonical_number(Decimal(repr(v))))
+    elif isinstance(v, Decimal):
+        out.append(_canonical_number(v))
+    elif isinstance(v, str):
+        out.append(json.dumps(v, ensure_ascii=False))
+    elif isinstance(v, list):
+        out.append("[")
+        for i, x in enumerate(v):
+            if i:
+                out.append(",")
+            _write(x, out)
+        out.append("]")
+    elif isinstance(v, dict):
+        out.append("{")
+        for i, k in enumerate(sorted(v)):
+            if not isinstance(k, str):
+                raise TypeError(f"not a JSON object key: {type(k).__name__}")
+            if i:
+                out.append(",")
+            out.append(json.dumps(k, ensure_ascii=False))
+            out.append(":")
+            _write(v[k], out)
+        out.append("}")
+    else:
+        raise TypeError(f"not a JSON value: {type(v).__name__}")
 
 
 def canonical_json(value: Any) -> bytes:
-    """lab-c14n-1 (Python-defined, not RFC 8785 JCS): keys sorted by code
-    point, no whitespace, UTF-8, integral floats written as integers, other
-    floats as Python's shortest round-trip repr, non-finite numbers forbidden.
+    """lab-c14n-2 (Python-defined, not RFC 8785 JCS): keys sorted by code
+    point, no whitespace, UTF-8 without escaping non-ASCII, strings not
+    Unicode-normalized, numbers written from their exact decimal value by
+    _canonical_number (no binary64 rounding), non-finite numbers forbidden.
     Changing any of this requires a new CANONICAL_JSON_VERSION."""
-    return json.dumps(_normalize(value), sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, allow_nan=False).encode("utf-8")
+    out: list[str] = []
+    _write(value, out)
+    return "".join(out).encode("utf-8")
 
 
 def payload_hash(raw_value: Any) -> str:
