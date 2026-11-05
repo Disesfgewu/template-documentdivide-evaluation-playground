@@ -19,6 +19,13 @@ export function App({ load = fetchApiStatus }: { load?: () => Promise<ApiStatus>
   return (
     <main>
       <h1>document-seperater-playground LAB</h1>
+      <section aria-label="尚未接入的功能">
+        <h2>尚未接入的功能</h2>
+        <p>
+          文件上傳與解析、題庫、方法接入、評分、比較與 trace 畫面都還沒有實作（#7、#10–#13）。
+          本頁不顯示任何假資料或假進度。
+        </p>
+      </section>
       <section aria-label="系統狀態">
         <h2>系統狀態</h2>
         <StatusView status={status} />

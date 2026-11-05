@@ -45,6 +45,10 @@ describe("fetchApiStatus", () => {
 });
 
 describe("App", () => {
+  it("states plainly which features are not connected yet", () => {
+    render(<App load={() => new Promise<ApiStatus>(() => {})} />);
+    expect(screen.getByRole("region", { name: "尚未接入的功能" }).textContent).toContain("還沒有實作");
+  });
   it("shows loading first", () => {
     render(<App load={() => new Promise<ApiStatus>(() => {})} />);
     expect(screen.getByRole("status").textContent).toContain("檢查中");
