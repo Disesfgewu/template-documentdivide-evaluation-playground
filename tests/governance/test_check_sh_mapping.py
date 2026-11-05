@@ -3,14 +3,16 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db"},
-    "scripts/check.sh": {"governance", "api", "api-db"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
     "tests/api_db/test_readiness_real_db.py": {"api-db"},
     "deploy/compose.dev.yml": {"api-db"},
+    "services/worker/cmd/lab-worker/main.go": {"worker"},
+    "services/worker/go.mod": {"worker"},
     "docs/TESTING.md": {"governance"},
     "unknown/file.go": set(),  # unmapped -> check.sh runs all suites
 }
