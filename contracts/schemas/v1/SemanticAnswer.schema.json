@@ -1,0 +1,300 @@
+{
+  "$defs": {
+    "Calculation": {
+      "additionalProperties": false,
+      "properties": {
+        "answer_unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Answer Unit"
+        },
+        "formula": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Op"
+            },
+            {
+              "$ref": "#/$defs/Ref"
+            },
+            {
+              "$ref": "#/$defs/Const"
+            }
+          ],
+          "title": "Formula"
+        },
+        "operands": {
+          "items": {
+            "$ref": "#/$defs/Operand"
+          },
+          "minItems": 1,
+          "title": "Operands",
+          "type": "array"
+        }
+      },
+      "required": [
+        "operands",
+        "formula",
+        "answer_unit"
+      ],
+      "title": "Calculation",
+      "type": "object"
+    },
+    "Const": {
+      "additionalProperties": false,
+      "properties": {
+        "const": {
+          "title": "Const",
+          "type": "number"
+        }
+      },
+      "required": [
+        "const"
+      ],
+      "title": "Const",
+      "type": "object"
+    },
+    "Fact": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_equivalences": {
+          "items": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Allowed Equivalences",
+          "type": "array"
+        },
+        "fact_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "scoring_rule": {
+          "$ref": "#/$defs/ScoringRule"
+        },
+        "statement": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Statement",
+          "type": "string"
+        },
+        "weight": {
+          "exclusiveMinimum": 0,
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "fact_id",
+        "statement",
+        "weight",
+        "allowed_equivalences",
+        "scoring_rule"
+      ],
+      "title": "Fact",
+      "type": "object"
+    },
+    "Op": {
+      "additionalProperties": false,
+      "description": "Restricted formula AST: never executable model-generated code.",
+      "properties": {
+        "args": {
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Op"
+              },
+              {
+                "$ref": "#/$defs/Ref"
+              },
+              {
+                "$ref": "#/$defs/Const"
+              }
+            ]
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Args",
+          "type": "array"
+        },
+        "op": {
+          "enum": [
+            "add",
+            "sub",
+            "mul",
+            "div",
+            "neg",
+            "abs",
+            "min",
+            "max"
+          ],
+          "title": "Op",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "args"
+      ],
+      "title": "Op",
+      "type": "object"
+    },
+    "Operand": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,31}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Unit"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "unit",
+        "evidence_id"
+      ],
+      "title": "Operand",
+      "type": "object"
+    },
+    "Ref": {
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "pattern": "^[a-z][a-z0-9_]{0,31}$",
+          "title": "Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "title": "Ref",
+      "type": "object"
+    },
+    "ScoringRule": {
+      "additionalProperties": false,
+      "description": "Defined at authoring time. partial_credit null = no 0.5 score allowed.",
+      "properties": {
+        "full_credit": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Full Credit",
+          "type": "string"
+        },
+        "no_credit": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "No Credit",
+          "type": "string"
+        },
+        "partial_credit": {
+          "anyOf": [
+            {
+              "maxLength": 8000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Partial Credit"
+        }
+      },
+      "required": [
+        "full_credit",
+        "partial_credit",
+        "no_credit"
+      ],
+      "title": "ScoringRule",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/SemanticAnswer.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "calculation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Calculation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "conditions": {
+      "items": {
+        "maxLength": 8000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Conditions",
+      "type": "array"
+    },
+    "question_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Question Id",
+      "type": "string"
+    },
+    "reference_answer": {
+      "maxLength": 8000,
+      "minLength": 1,
+      "title": "Reference Answer",
+      "type": "string"
+    },
+    "required_facts": {
+      "items": {
+        "$ref": "#/$defs/Fact"
+      },
+      "minItems": 1,
+      "title": "Required Facts",
+      "type": "array"
+    }
+  },
+  "required": [
+    "question_id",
+    "reference_answer",
+    "required_facts",
+    "conditions",
+    "calculation"
+  ],
+  "title": "SemanticAnswer",
+  "type": "object"
+}

@@ -1,6 +1,6 @@
 # lab_contracts — 版本化資料契約（基礎）
 
-#21 範圍：SPEC 4.1、16.1、16.4 的基礎型別、SourceRegion、錯誤格式與分頁。四部分 benchmark、方法接入協定、parser、評分等契約在 #4 的後續子任務。
+#21：SPEC 4.1、16.1、16.4 的基礎型別、SourceRegion、錯誤格式與分頁。#23：SPEC 5、16.2、19.5 的四部分題庫契約（`benchmark.py`）。方法接入協定、parser、評分等契約在 #4 的後續子任務。
 
 ## 來源與產生
 
@@ -31,6 +31,53 @@ scripts/check.sh --scope contracts
 - **`Page`**：items 數量不能超過 page_size；`next_cursor` 必填，最後一頁為 null，空字串不合法。
   - cursor 必須綁定 filter/order，HTTP status 的對應規則在後續 API 實作。**這裡沒有實作，也不宣稱已完成。**
 
+## 四部分題庫（#23，`lab_contracts/benchmark.py`）
+
+- **四部分**：`Question`、`SemanticAnswer`、`TextualAnswer`、`SourceAnswer`，**只以 `question_id` 聯結**，不依陣列位置。沒有第五份答案集。另有 `EvidenceUnit`（原 PDF regions、原始與正規化內容分開保存）、`ValidationRecord`、`BenchmarkManifest`。
+- `Question` 保存 `modality_requirements`、`reasoning_type`、`visual_object_refs`，`tags` 不可重複，`ordinal` 為 strict int。
+- `SemanticAnswer.required_facts` 不能是空的；每個 fact 的 `weight` 必須大於 0，`scoring_rule.partial_credit` 為 null 時代表不允許 0.5 分。
+- 公式 `Calculation` 是**受限的 AST**：
+  - 只允許 add、sub、mul、div、neg、abs、min、max。
+  - 每個 op 的參數數量固定，深度上限 16，常數必須是有限值。
+  - 每個引用都必須是已宣告的 operand，宣告的 operand 也都必須被使用。
+  - **不會執行任何模型產生的程式碼**（沒有 eval/exec）。
+- `TextCheck`：
+  - quote/entity 類：數值欄位與 unit 都是 null。
+  - numeric 類：單點值必須帶 tolerance，預期值為 0 時必須有絕對容差；區間 `[low, high]` 不得再帶 tolerance 或 precision，避免容許範圍被重複放寬。
+  - `numeric_matches` 只用於結構驗證與測試，單位換算與正式評分在 #12。
+- `SourceAnswer`：
+  - `evidence_sets` 是 OR-of-AND，不能是空的，集合內的證據不可重複。
+  - `fact_support_sets` 表達每個 fact 各自的 OR-of-AND。
+  - `distractors` 必須附上 confusion_reason 與 disambiguating_condition。
+- **`validate_bundle(...)`**：跨物件檢查，回傳帶欄位路徑的問題清單，不丟例外。檢查項目：
+  - 缺少、多出或重複的 question_id；重複的 ordinal 或 question_hash。
+  - 引用到不存在的 fact、evidence 或 validation 紀錄，或驗證紀錄屬於別題。
+  - 證據來自多份文件。
+  - 某個 evidence set 沒有涵蓋每個 fact 的任一支持組合。
+  - fact 沒有支持證據。
+  - distractor 出現在任何 gold 欄位（evidence set、fact support、textual check、公式 operand）。
+  - cross_page 題：任一證據集合只有一頁，或每個 fact 都能在同一頁找到支持。
+  - chart_table 題沒有 table/figure/image 證據。
+  - confusable 題沒有 distractor。
+- **只驗證結構**：`validate_bundle` 不能證明證據在語意上是必要的、圖表真的有被讀過、confusable 題沒有歧義。這些都是驗證器與人工閘門的工作（#9、#10），結果記在 `ValidationRecord`。
+- **`target_counts(P)`**：N=max(20,P)、Q=ceil(0.1N)，用整數運算。
+- **`BenchmarkManifest`**：
+  - N/Q 必須和頁數一致；各桶數量加總等於 n_valid（每題只占一桶）。
+  - compliant：必須剛好 N 題，且三個特殊桶都至少 Q 題。
+  - partial：必須列出 exceptions。
+  - `check_manifest` 會再和實際題目比對數量。
+- **手算 fixtures**：`examples/bundles/*.json` 都是**合成的契約層 fixture**，不能當作 parser、視覺判讀或人工品質已通過的證據。每個檔案附上 `_scenario`、`_expected_problems`、`_counts`，測試會逐一比對：
+
+| 檔案 | 情境 | 預期 |
+| --- | --- | --- |
+| `minimal.json` | 一般題、必要跨頁題、confusable 題 | 沒有問題 |
+| `or_alternative_cross_page.json` | 兩組證據集合都需要兩頁 | 沒有問題 |
+| `single_page_alternative_vetoes_cross_page.json` | 有一組單頁就能成立的替代集合 | 否決 cross_page |
+| `chart_table_with_caption.json` | 圖像加圖說文字 | 沒有問題 |
+| `chart_table_without_visual.json` | 圖表題沒有視覺證據 | 報錯 |
+| `confusable_without_distractor.json` | confusable 題沒有 distractor | 報錯 |
+| `distractor_used_as_gold_support.json` | distractor 混進 gold | 報錯 |
+
 ## required、null、empty 的區別
 
 - **必填且可為 null**（`quote`、`next_cursor`）：缺少這個欄位是 `missing` 錯誤；明確給 null 是合法的。
@@ -53,6 +100,8 @@ scripts/check.sh --scope contracts
 - `Attributes` 的大小上限，以及「必須能序列化成 JSON」。
 - strict integer：JSON Schema 的 `integer` 會接受 `3.0`。
 - 和文件相關的檢查（hash、頁數），由 `check_against_document` 處理。
+- 題庫的所有跨欄位、跨物件規則：公式 AST 的參數數量、深度與引用；TextCheck 的形狀；`validate_bundle` 與 manifest 的配額規則。
+- Question 的 `ordinal` 是 strict integer：JSON Schema 的 `integer` 會接受 `3.0`。
 
 `tests/contracts/test_schema_validation.py` 用獨立的 `jsonschema` 驗證器確認兩件事：匯出的 schema 接受所有合法範例，也拒絕所有純結構性的非法範例。上面列出的規則只由 pydantic 檢查。
 

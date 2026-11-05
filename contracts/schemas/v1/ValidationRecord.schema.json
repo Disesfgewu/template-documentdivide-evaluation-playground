@@ -1,0 +1,135 @@
+{
+  "$defs": {
+    "SourceCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Check",
+          "type": "string"
+        },
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "check",
+        "passed"
+      ],
+      "title": "SourceCheck",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/ValidationRecord.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "confidence": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Confidence"
+    },
+    "operation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "question_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Question Id",
+      "type": "string"
+    },
+    "reason": {
+      "maxLength": 8000,
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "reviewed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reviewed At"
+    },
+    "reviewer": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reviewer"
+    },
+    "source_checks": {
+      "items": {
+        "$ref": "#/$defs/SourceCheck"
+      },
+      "title": "Source Checks",
+      "type": "array"
+    },
+    "validation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Validation Id",
+      "type": "string"
+    },
+    "validator_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Validator Revision",
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "needs_review"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    }
+  },
+  "required": [
+    "validation_id",
+    "question_id",
+    "validator_revision",
+    "operation_id",
+    "verdict",
+    "reason",
+    "source_checks",
+    "confidence",
+    "reviewer",
+    "reviewed_at"
+  ],
+  "title": "ValidationRecord",
+  "type": "object"
+}

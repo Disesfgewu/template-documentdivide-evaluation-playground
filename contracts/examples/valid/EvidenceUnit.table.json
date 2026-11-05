@@ -1,0 +1,25 @@
+{
+  "evidence_id": "e247",
+  "regions": [
+    {
+      "document_id": "doc_001",
+      "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "page_index": 246,
+      "bbox": [
+        0.1,
+        0.1,
+        0.9,
+        0.3
+      ],
+      "kind": "table",
+      "quote": null
+    }
+  ],
+  "raw_content": "正式高負載測試 p99：A=18 ms，B=12 ms，C=21 ms。",
+  "normalized_content": "正式高負載測試 p99：A=18 ms，B=12 ms，C=21 ms。",
+  "extractor_revision": "unstructured@0.1",
+  "ocr_confidence": null,
+  "asset_refs": [
+    "asset_e247"
+  ]
+}

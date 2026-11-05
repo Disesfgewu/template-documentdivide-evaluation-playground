@@ -1,0 +1,31 @@
+{
+  "schema_version": "v1",
+  "benchmark_id": "bm_1",
+  "revision_id": "bm_1@r1",
+  "document_id": "doc_001",
+  "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "page_count": 21,
+  "file_hashes": {
+    "questions": "000000000000000000000000000000000000000000000000000000000000000b",
+    "semantic_answers": "000000000000000000000000000000000000000000000000000000000000000c",
+    "textual_answers": "000000000000000000000000000000000000000000000000000000000000000d",
+    "source_answers": "000000000000000000000000000000000000000000000000000000000000000e"
+  },
+  "n_target": 21,
+  "n_valid": 19,
+  "q_min": 3,
+  "quota_counts": {
+    "general": 12,
+    "cross_page": 3,
+    "chart_table": 1,
+    "confusable": 3
+  },
+  "compliance": "partial",
+  "exceptions": [
+    "chart_table 缺 2 題：文件只有 1 張圖表"
+  ],
+  "generator_config_version": "gen@1",
+  "validator_config_version": "val@1",
+  "selection_rule_version": "sel@1",
+  "frozen_at": "2026-11-05T10:00:00Z"
+}

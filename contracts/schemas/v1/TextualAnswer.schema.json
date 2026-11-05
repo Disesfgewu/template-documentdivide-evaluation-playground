@@ -1,0 +1,178 @@
+{
+  "$defs": {
+    "TextCheck": {
+      "additionalProperties": false,
+      "description": "kind=quote/entity: expected is the string; numeric fields are null.\nkind=numeric: exactly one of expected (number, with tolerances) or\ninterval [low, high] (frozen; tolerances must be null so the interval is\nnever widened twice).",
+      "properties": {
+        "absolute_tolerance": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Absolute Tolerance"
+        },
+        "check_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Check Id",
+          "type": "string"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expected"
+        },
+        "fact_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "interval": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Interval"
+        },
+        "kind": {
+          "enum": [
+            "quote",
+            "entity",
+            "numeric"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "normalization_rule": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Normalization Rule"
+        },
+        "precision": {
+          "anyOf": [
+            {
+              "maximum": 12,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Precision"
+        },
+        "relative_tolerance": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Relative Tolerance"
+        },
+        "supporting_evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Supporting Evidence Ids",
+          "type": "array"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Unit"
+        }
+      },
+      "required": [
+        "check_id",
+        "fact_id",
+        "kind",
+        "expected",
+        "interval",
+        "unit",
+        "normalization_rule",
+        "absolute_tolerance",
+        "relative_tolerance",
+        "precision",
+        "supporting_evidence_ids"
+      ],
+      "title": "TextCheck",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/TextualAnswer.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checks": {
+      "items": {
+        "$ref": "#/$defs/TextCheck"
+      },
+      "title": "Checks",
+      "type": "array"
+    },
+    "question_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Question Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "question_id",
+    "checks"
+  ],
+  "title": "TextualAnswer",
+  "type": "object"
+}

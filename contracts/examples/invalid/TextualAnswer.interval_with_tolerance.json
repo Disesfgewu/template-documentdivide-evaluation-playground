@@ -1,0 +1,23 @@
+{
+  "question_id": "q_002",
+  "checks": [
+    {
+      "check_id": "t1",
+      "fact_id": "f2",
+      "kind": "numeric",
+      "expected": null,
+      "interval": [
+        11.5,
+        12.5
+      ],
+      "unit": "ms",
+      "normalization_rule": null,
+      "absolute_tolerance": 0.5,
+      "relative_tolerance": null,
+      "precision": 0,
+      "supporting_evidence_ids": [
+        "e247"
+      ]
+    }
+  ]
+}

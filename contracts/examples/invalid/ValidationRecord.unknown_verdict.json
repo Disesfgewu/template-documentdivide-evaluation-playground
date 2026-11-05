@@ -1,0 +1,18 @@
+{
+  "validation_id": "v_002",
+  "question_id": "q_002",
+  "validator_revision": "verifier@2",
+  "operation_id": "op_88",
+  "verdict": "ok",
+  "reason": "跨頁移除測試通過；表格讀值待人工核對",
+  "source_checks": [
+    {
+      "evidence_id": "e247",
+      "check": "cell_read",
+      "passed": true
+    }
+  ],
+  "confidence": null,
+  "reviewer": null,
+  "reviewed_at": null
+}

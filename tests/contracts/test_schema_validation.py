@@ -18,7 +18,7 @@ STRUCTURAL = {"int_type", "bool_type", "missing", "extra_forbidden", "enum", "li
               "string_pattern_mismatch", "string_too_short", "too_short", "greater_than",
               "greater_than_equal", "less_than_equal"}
 # JSON Schema "integer" accepts 3.0 (zero fraction); only strict pydantic rejects it.
-NOT_EXPRESSIBLE = {"SourceRegion.page_index_float.json"}
+NOT_EXPRESSIBLE = {"SourceRegion.page_index_float.json", "Question.ordinal_float.json"}
 
 
 def schema_for(name):

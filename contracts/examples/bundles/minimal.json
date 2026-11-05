@@ -1,0 +1,462 @@
+{
+  "_about": "Synthetic contract fixture: hand-written to exercise structural bundle rules. It is not a real document, and it is not evidence of parser, visual-reading or human-quality results.",
+  "_scenario": "一般題 q_001（單頁 e40）、必要跨頁題 q_002（e18 p17 + e247 p246，兩頁都必要）、confusable 題 q_003（gold e6=2024 年版，distractor e5=2023 年版，條件「2024 年版本」可區分）。",
+  "_expected_problems": [],
+  "_counts": {
+    "questions": 3,
+    "quota_buckets": {
+      "general": 1,
+      "cross_page": 1,
+      "confusable": 1,
+      "chart_table": 0
+    },
+    "note": "3 題只是契約層 fixture，不構成合規 benchmark（N=max(20,P) 至少 20）。"
+  },
+  "questions": [
+    {
+      "question_id": "q_002",
+      "ordinal": 1,
+      "question_text": "依正式測試的高負載定義，哪個方案的 p99 延遲最低？",
+      "language": "zh-Hant",
+      "tags": [
+        "latency",
+        "table"
+      ],
+      "quota_bucket": "cross_page",
+      "question_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+      "modality_requirements": [
+        "text",
+        "table"
+      ],
+      "reasoning_type": "cross_page_integration",
+      "visual_object_refs": [
+        "asset_e247"
+      ]
+    },
+    {
+      "question_id": "q_001",
+      "ordinal": 0,
+      "question_text": "系統支援的最大並行連線數是多少？",
+      "language": "zh-Hant",
+      "tags": [],
+      "quota_bucket": "general",
+      "question_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+      "modality_requirements": [
+        "text"
+      ],
+      "reasoning_type": "value_lookup",
+      "visual_object_refs": []
+    },
+    {
+      "question_id": "q_003",
+      "ordinal": 2,
+      "question_text": "2024 年版本的保固期是幾年？",
+      "language": "zh-Hant",
+      "tags": [
+        "warranty"
+      ],
+      "quota_bucket": "confusable",
+      "question_hash": "0000000000000000000000000000000000000000000000000000000000000003",
+      "modality_requirements": [
+        "text"
+      ],
+      "reasoning_type": "value_lookup",
+      "visual_object_refs": []
+    }
+  ],
+  "semantic_answers": [
+    {
+      "question_id": "q_003",
+      "reference_answer": "3 年。",
+      "required_facts": [
+        {
+          "fact_id": "f1",
+          "statement": "2024 年版本保固期為 3 年",
+          "weight": 1.0,
+          "allowed_equivalences": [
+            "三年"
+          ],
+          "scoring_rule": {
+            "full_credit": "陳述與事實一致",
+            "partial_credit": null,
+            "no_credit": "缺漏或錯誤"
+          }
+        }
+      ],
+      "conditions": [
+        "限 2024 年版本"
+      ],
+      "calculation": null
+    },
+    {
+      "question_id": "q_001",
+      "reference_answer": "512。",
+      "required_facts": [
+        {
+          "fact_id": "f1",
+          "statement": "最大並行連線數為 512",
+          "weight": 1.0,
+          "allowed_equivalences": [],
+          "scoring_rule": {
+            "full_credit": "陳述與事實一致",
+            "partial_credit": null,
+            "no_credit": "缺漏或錯誤"
+          }
+        }
+      ],
+      "conditions": [],
+      "calculation": null
+    },
+    {
+      "question_id": "q_002",
+      "reference_answer": "方案 B，p99 為 12 ms。",
+      "required_facts": [
+        {
+          "fact_id": "f1",
+          "statement": "高負載定義為負載至少 80%",
+          "weight": 1.0,
+          "allowed_equivalences": [],
+          "scoring_rule": {
+            "full_credit": "陳述與事實一致",
+            "partial_credit": null,
+            "no_credit": "缺漏或錯誤"
+          }
+        },
+        {
+          "fact_id": "f2",
+          "statement": "方案 B 的 p99 最低，為 12 ms",
+          "weight": 1.0,
+          "allowed_equivalences": [],
+          "scoring_rule": {
+            "full_credit": "陳述與事實一致",
+            "partial_credit": null,
+            "no_credit": "缺漏或錯誤"
+          }
+        }
+      ],
+      "conditions": [
+        "正式測試",
+        "高負載"
+      ],
+      "calculation": null
+    }
+  ],
+  "textual_answers": [
+    {
+      "question_id": "q_002",
+      "checks": [
+        {
+          "check_id": "t1",
+          "fact_id": "f2",
+          "kind": "numeric",
+          "expected": 12.0,
+          "interval": null,
+          "unit": "ms",
+          "normalization_rule": null,
+          "absolute_tolerance": 0.0,
+          "relative_tolerance": null,
+          "precision": 0,
+          "supporting_evidence_ids": [
+            "e247"
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "q_001",
+      "checks": [
+        {
+          "check_id": "t1",
+          "fact_id": "f1",
+          "kind": "numeric",
+          "expected": 512.0,
+          "interval": null,
+          "unit": null,
+          "normalization_rule": null,
+          "absolute_tolerance": 0.0,
+          "relative_tolerance": null,
+          "precision": 0,
+          "supporting_evidence_ids": [
+            "e40"
+          ]
+        }
+      ]
+    },
+    {
+      "question_id": "q_003",
+      "checks": []
+    }
+  ],
+  "source_answers": [
+    {
+      "question_id": "q_001",
+      "evidence_sets": [
+        {
+          "set_id": "s1",
+          "evidence_ids": [
+            "e40"
+          ]
+        }
+      ],
+      "fact_support_sets": [
+        {
+          "fact_id": "f1",
+          "support_sets": [
+            [
+              "e40"
+            ]
+          ]
+        }
+      ],
+      "distractors": [],
+      "validation_refs": [
+        "v_001"
+      ]
+    },
+    {
+      "question_id": "q_003",
+      "evidence_sets": [
+        {
+          "set_id": "s1",
+          "evidence_ids": [
+            "e6"
+          ]
+        }
+      ],
+      "fact_support_sets": [
+        {
+          "fact_id": "f1",
+          "support_sets": [
+            [
+              "e6"
+            ]
+          ]
+        }
+      ],
+      "distractors": [
+        {
+          "evidence_id": "e5",
+          "confusion_reason": "同一指標的舊版本數值",
+          "disambiguating_condition": "題目限定 2024 年版本"
+        }
+      ],
+      "validation_refs": [
+        "v_003"
+      ]
+    },
+    {
+      "question_id": "q_002",
+      "evidence_sets": [
+        {
+          "set_id": "s1",
+          "evidence_ids": [
+            "e18",
+            "e247"
+          ]
+        }
+      ],
+      "fact_support_sets": [
+        {
+          "fact_id": "f1",
+          "support_sets": [
+            [
+              "e18"
+            ]
+          ]
+        },
+        {
+          "fact_id": "f2",
+          "support_sets": [
+            [
+              "e247"
+            ]
+          ]
+        }
+      ],
+      "distractors": [],
+      "validation_refs": [
+        "v_002"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "e18",
+      "regions": [
+        {
+          "document_id": "doc_001",
+          "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "page_index": 17,
+          "bbox": [
+            0.1,
+            0.1,
+            0.9,
+            0.3
+          ],
+          "kind": "text",
+          "quote": "正式測試將負載至少 80% 定義為高負載。"
+        }
+      ],
+      "raw_content": "正式測試將負載至少 80% 定義為高負載。",
+      "normalized_content": "正式測試將負載至少 80% 定義為高負載。",
+      "extractor_revision": "unstructured@0.1",
+      "ocr_confidence": null,
+      "asset_refs": []
+    },
+    {
+      "evidence_id": "e247",
+      "regions": [
+        {
+          "document_id": "doc_001",
+          "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "page_index": 246,
+          "bbox": [
+            0.1,
+            0.1,
+            0.9,
+            0.3
+          ],
+          "kind": "table",
+          "quote": null
+        }
+      ],
+      "raw_content": "正式高負載測試 p99：A=18 ms，B=12 ms，C=21 ms。",
+      "normalized_content": "正式高負載測試 p99：A=18 ms，B=12 ms，C=21 ms。",
+      "extractor_revision": "unstructured@0.1",
+      "ocr_confidence": null,
+      "asset_refs": [
+        "asset_e247"
+      ]
+    },
+    {
+      "evidence_id": "e310",
+      "regions": [
+        {
+          "document_id": "doc_001",
+          "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "page_index": 300,
+          "bbox": [
+            0.1,
+            0.1,
+            0.9,
+            0.3
+          ],
+          "kind": "text",
+          "quote": "附錄重述：高負載(≥80%)下 B 的 p99 為 12 ms，為最低。"
+        }
+      ],
+      "raw_content": "附錄重述：高負載(≥80%)下 B 的 p99 為 12 ms，為最低。",
+      "normalized_content": "附錄重述：高負載(≥80%)下 B 的 p99 為 12 ms，為最低。",
+      "extractor_revision": "unstructured@0.1",
+      "ocr_confidence": null,
+      "asset_refs": []
+    },
+    {
+      "evidence_id": "e5",
+      "regions": [
+        {
+          "document_id": "doc_001",
+          "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "page_index": 4,
+          "bbox": [
+            0.1,
+            0.1,
+            0.9,
+            0.3
+          ],
+          "kind": "text",
+          "quote": "2023 年版本的保固期為 2 年。"
+        }
+      ],
+      "raw_content": "2023 年版本的保固期為 2 年。",
+      "normalized_content": "2023 年版本的保固期為 2 年。",
+      "extractor_revision": "unstructured@0.1",
+      "ocr_confidence": null,
+      "asset_refs": []
+    },
+    {
+      "evidence_id": "e6",
+      "regions": [
+        {
+          "document_id": "doc_001",
+          "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "page_index": 5,
+          "bbox": [
+            0.1,
+            0.1,
+            0.9,
+            0.3
+          ],
+          "kind": "text",
+          "quote": "2024 年版本的保固期為 3 年。"
+        }
+      ],
+      "raw_content": "2024 年版本的保固期為 3 年。",
+      "normalized_content": "2024 年版本的保固期為 3 年。",
+      "extractor_revision": "unstructured@0.1",
+      "ocr_confidence": null,
+      "asset_refs": []
+    },
+    {
+      "evidence_id": "e40",
+      "regions": [
+        {
+          "document_id": "doc_001",
+          "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "page_index": 40,
+          "bbox": [
+            0.1,
+            0.1,
+            0.9,
+            0.3
+          ],
+          "kind": "text",
+          "quote": "系統支援的最大並行連線數為 512。"
+        }
+      ],
+      "raw_content": "系統支援的最大並行連線數為 512。",
+      "normalized_content": "系統支援的最大並行連線數為 512。",
+      "extractor_revision": "unstructured@0.1",
+      "ocr_confidence": null,
+      "asset_refs": []
+    }
+  ],
+  "validations": [
+    {
+      "validation_id": "v_001",
+      "question_id": "q_001",
+      "validator_revision": "verifier@2",
+      "operation_id": "op_v_001",
+      "verdict": "pass",
+      "reason": "synthetic contract fixture: structural record only",
+      "source_checks": [],
+      "confidence": null,
+      "reviewer": "user_42",
+      "reviewed_at": "2026-11-05T09:00:00+08:00"
+    },
+    {
+      "validation_id": "v_002",
+      "question_id": "q_002",
+      "validator_revision": "verifier@2",
+      "operation_id": "op_v_002",
+      "verdict": "needs_review",
+      "reason": "synthetic contract fixture: structural record only",
+      "source_checks": [],
+      "confidence": null,
+      "reviewer": null,
+      "reviewed_at": null
+    },
+    {
+      "validation_id": "v_003",
+      "question_id": "q_003",
+      "validator_revision": "verifier@2",
+      "operation_id": "op_v_003",
+      "verdict": "pass",
+      "reason": "synthetic contract fixture: structural record only",
+      "source_checks": [],
+      "confidence": null,
+      "reviewer": "user_42",
+      "reviewed_at": "2026-11-05T09:00:00+08:00"
+    }
+  ]
+}

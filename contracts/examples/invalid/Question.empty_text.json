@@ -1,0 +1,20 @@
+{
+  "question_id": "q_002",
+  "ordinal": 1,
+  "question_text": "",
+  "language": "zh-Hant",
+  "tags": [
+    "latency",
+    "table"
+  ],
+  "quota_bucket": "cross_page",
+  "question_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "modality_requirements": [
+    "text",
+    "table"
+  ],
+  "reasoning_type": "cross_page_integration",
+  "visual_object_refs": [
+    "asset_e247"
+  ]
+}
