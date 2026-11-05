@@ -567,7 +567,12 @@ tests:
     commit: 5ad3d6e3805be7832d88c6327894f783d0075aa0
     tests:
     - tests/contracts/test_contracts.py::ExampleTests
-  note: contracts 的 JSON Schema 與合法/非法範例在 CI；OpenAPI 與實際 API status code 尚未實作。
+  - scope: contract
+    branch: main
+    commit: 1b5fe1d300c245ca348750af57b4ae9cb09a3c57
+    tests:
+    - tests/contracts/test_method.py::QueryResponseTests.test_http_status_classes
+  note: 契約層：JSON Schema、合法/非法範例與方法回應的 HTTP status 分類（PR #26）在 CI；method-service OpenAPI 已在 main，但 LAB 實際 API 的 status code 尚未實作。
 - id: T32
   title: async poll、過期下載 URL、late reply
   owners:
@@ -582,9 +587,14 @@ tests:
   - 4
   - 11
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: 方法 JSONL 契約（parse_jsonl 每行獨立）在 PR #26（#25）審查中，合併後才補 evidence；DB 冪等與 run lock 在 #5/#11。
+  status: partial
+  evidence:
+  - scope: contract
+    branch: main
+    commit: 1b5fe1d300c245ca348750af57b4ae9cb09a3c57
+    tests:
+    - tests/contracts/test_method.py::JsonlTests.test_lines_are_independent
+  note: 契約層：parse_jsonl 每行獨立（PR #26 合併為 main 1b5fe1d）；DB 冪等與 run lock 在 #5/#11。
 - id: T34
   title: submission 重送/衝突/finalize 競態
   owners:
