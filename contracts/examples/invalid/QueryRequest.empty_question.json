@@ -1,0 +1,14 @@
+{
+  "protocol_version": "1.0",
+  "request_id": "req_001",
+  "run_id": "run_001",
+  "question_id": "q_001",
+  "index_id": "idx_001",
+  "question": "",
+  "budget": {
+    "top_k": 10,
+    "max_evidence_tokens": 12000,
+    "max_visual_regions": 8,
+    "timeout_seconds": 180
+  }
+}

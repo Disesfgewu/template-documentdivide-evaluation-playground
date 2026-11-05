@@ -1,4 +1,8 @@
 {
+  "AsyncAccepted.negative_poll.json": {
+    "loc": "poll_after_ms",
+    "type": "greater_than_equal"
+  },
   "BenchmarkManifest.compliant_short_bucket.json": {
     "loc": "",
     "message": "compliant requires n_valid == n_target and every special bucket >= q_min",
@@ -23,6 +27,19 @@
     "message": "n_target/q_min must be 21/3 for page_count=21",
     "type": "value_error"
   },
+  "Capabilities.duplicate_modality.json": {
+    "loc": "",
+    "message": "duplicate modality: 'text'",
+    "type": "value_error"
+  },
+  "Capabilities.no_modalities.json": {
+    "loc": "supported_modalities",
+    "type": "too_short"
+  },
+  "Capabilities.zero_parallel.json": {
+    "loc": "max_parallel_queries",
+    "type": "greater_than_equal"
+  },
   "ErrorResponse.empty_request_id.json": {
     "loc": "error.request_id",
     "type": "string_too_short"
@@ -43,6 +60,30 @@
     "loc": "regions",
     "type": "too_short"
   },
+  "JobStatus.failed_without_error.json": {
+    "loc": "",
+    "message": "error is required for failed and forbidden otherwise",
+    "type": "value_error"
+  },
+  "JobStatus.progress_over_one.json": {
+    "loc": "progress",
+    "type": "less_than_equal"
+  },
+  "JobStatus.query_with_prepare_result.json": {
+    "loc": "",
+    "message": "query job result must be QueryResponse",
+    "type": "value_error"
+  },
+  "JobStatus.running_with_result.json": {
+    "loc": "",
+    "message": "only succeeded jobs carry result",
+    "type": "value_error"
+  },
+  "JobStatus.succeeded_without_result.json": {
+    "loc": "",
+    "message": "succeeded requires result",
+    "type": "value_error"
+  },
   "PageRequest.over_max.json": {
     "loc": "page_size",
     "type": "less_than_equal"
@@ -50,6 +91,130 @@
   "PageRequest.zero.json": {
     "loc": "page_size",
     "type": "greater_than_equal"
+  },
+  "PrepareRequest.duplicate_document.json": {
+    "loc": "",
+    "message": "duplicate document_id: 'doc_001'",
+    "type": "value_error"
+  },
+  "PrepareRequest.file_url.json": {
+    "loc": "documents.0.pdf_url",
+    "type": "string_pattern_mismatch"
+  },
+  "PrepareRequest.naive_expiry.json": {
+    "loc": "documents.0.url_expires_at",
+    "type": "timezone_aware"
+  },
+  "PrepareRequest.no_documents.json": {
+    "loc": "documents",
+    "type": "too_short"
+  },
+  "PrepareRequest.page_count_string.json": {
+    "loc": "documents.0.page_count",
+    "type": "int_type"
+  },
+  "PrepareResult.no_document_hashes.json": {
+    "loc": "document_hashes",
+    "type": "too_short"
+  },
+  "PrepareResult.not_ready.json": {
+    "loc": "status",
+    "type": "literal_error"
+  },
+  "QueryRequest.bad_protocol.json": {
+    "loc": "protocol_version",
+    "type": "string_pattern_mismatch"
+  },
+  "QueryRequest.empty_question.json": {
+    "loc": "question",
+    "type": "string_too_short"
+  },
+  "QueryRequest.top_k_zero.json": {
+    "loc": "budget.top_k",
+    "type": "greater_than_equal"
+  },
+  "QueryResponse.abstained_with_answer.json": {
+    "loc": "",
+    "message": "abstained requires empty answer.text and claims=[]",
+    "type": "value_error"
+  },
+  "QueryResponse.abstained_without_reason.json": {
+    "loc": "",
+    "message": "abstained requires reason",
+    "type": "value_error"
+  },
+  "QueryResponse.answered_empty_text.json": {
+    "loc": "",
+    "message": "answered requires non-empty answer.text",
+    "type": "value_error"
+  },
+  "QueryResponse.citation_region_out_of_range.json": {
+    "loc": "",
+    "message": "citations[0].region_indices out of range for hit",
+    "type": "value_error"
+  },
+  "QueryResponse.citation_unknown_claim.json": {
+    "loc": "",
+    "message": "citations[0].claim_id does not exist",
+    "type": "value_error"
+  },
+  "QueryResponse.citation_unknown_hit.json": {
+    "loc": "",
+    "message": "citations[0].hit_id does not exist",
+    "type": "value_error"
+  },
+  "QueryResponse.duplicate_hit_id.json": {
+    "loc": "",
+    "message": "duplicate hit_id: 'h1'",
+    "type": "value_error"
+  },
+  "QueryResponse.duplicate_rank.json": {
+    "loc": "",
+    "message": "ranks must be exactly 1..n without duplicates or gaps",
+    "type": "value_error"
+  },
+  "QueryResponse.empty_text_hit.json": {
+    "loc": "retrieved_hits.0",
+    "message": "empty content requires at least one visual region (image/figure/table/page/formula)",
+    "type": "value_error"
+  },
+  "QueryResponse.hit_without_regions.json": {
+    "loc": "retrieved_hits.0.regions",
+    "type": "too_short"
+  },
+  "QueryResponse.missing_citations.json": {
+    "loc": "citations",
+    "type": "missing"
+  },
+  "QueryResponse.rank_gap.json": {
+    "loc": "",
+    "message": "ranks must be exactly 1..n without duplicates or gaps",
+    "type": "value_error"
+  },
+  "QueryResponse.rank_string.json": {
+    "loc": "retrieved_hits.0.rank",
+    "type": "int_type"
+  },
+  "QueryResponse.telemetry_missing_key.json": {
+    "loc": "telemetry.model_calls",
+    "type": "missing"
+  },
+  "QueryResponse.unknown_status.json": {
+    "loc": "status",
+    "type": "literal_error"
+  },
+  "QueryResponse.unsupported_protocol.json": {
+    "loc": "protocol_version",
+    "message": "unsupported protocol_version (supported: ['1.0'])",
+    "type": "value_error"
+  },
+  "QueryResponse.whitespace_claim.json": {
+    "loc": "answer.claims.0.text",
+    "type": "string_pattern_mismatch"
+  },
+  "QueryResponse.whitespace_reason.json": {
+    "loc": "reason",
+    "type": "string_pattern_mismatch"
   },
   "Question.duplicate_tag.json": {
     "loc": "",
@@ -161,6 +326,15 @@
   },
   "SourceRegionPage.missing_next_cursor.json": {
     "loc": "next_cursor",
+    "type": "missing"
+  },
+  "SubmissionLine.bad_response.json": {
+    "loc": "response",
+    "message": "ranks must be exactly 1..n without duplicates or gaps",
+    "type": "value_error"
+  },
+  "SubmissionLine.missing_attempt.json": {
+    "loc": "attempt_id",
     "type": "missing"
   },
   "TextualAnswer.interval_with_tolerance.json": {

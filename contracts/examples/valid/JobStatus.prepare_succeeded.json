@@ -1,0 +1,22 @@
+{
+  "job_id": "job_1",
+  "kind": "prepare",
+  "status": "succeeded",
+  "progress": 1.0,
+  "result": {
+    "index_id": "idx_001",
+    "index_fingerprint": "bm25:v1:bbbbbbbbbbbbbbbb",
+    "document_hashes": {
+      "doc_001": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "method_revision": {
+      "method_id": "m_bm25",
+      "revision": "r1"
+    },
+    "status": "ready",
+    "stats": {
+      "chunks": 1234
+    }
+  },
+  "error": null
+}
