@@ -1,0 +1,23 @@
+# Local development dependencies. Start: docker compose -f deploy/compose.dev.yml up -d --wait
+# Credentials below are for a throwaway local container only; never reuse them elsewhere.
+name: lab-dev
+services:
+  db:
+    # pgvector 0.8.6 on PostgreSQL 17, pinned by digest.
+    image: pgvector/pgvector:0.8.6-pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    environment:
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: lab-dev-only
+      POSTGRES_DB: lab
+    ports:
+      - "127.0.0.1:${LAB_DB_PORT:-55432}:5432"
+    volumes:
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - lab-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab -d lab"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  lab-db:

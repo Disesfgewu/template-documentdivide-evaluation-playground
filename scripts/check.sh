@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance)
+SUITES=(governance api api-db)
 scope=auto
 base=origin/main
 selected=()
@@ -23,9 +23,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# Map a changed path to the suite that covers it. Empty output = unmapped.
+# Map a changed path to the suite(s) that cover it (space-separated). Empty = unmapped.
 suite_for() {
   case "$1" in
+    services/api/*|tests/api/*) echo "api api-db";;
+    tests/api_db/*|deploy/*) echo api-db;;
     .github/*|scripts/*|tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -36,6 +38,17 @@ run_suite() {
     governance)
       python3 -m tools.governance.check_repo
       python3 -m tools.governance.run_tests tests/governance
+      ;;
+    api)
+      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api
+      ;;
+    api-db)
+      # Real PostgreSQL/pgvector only. Missing database = BLOCKED, never passed.
+      if [[ -z "${LAB_TEST_DATABASE_URL:-}" ]]; then
+        echo "BLOCKED: suite api-db needs LAB_TEST_DATABASE_URL (see docs/TESTING.md)" >&2
+        return 3
+      fi
+      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
       ;;
     *) echo "unknown suite: $1" >&2; return 2;;
   esac
@@ -53,7 +66,7 @@ elif [[ "$scope" == auto ]]; then
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
       s="$(suite_for "$f")"
-      if [[ -z "$s" ]]; then echo "unmapped path '$f' -> all suites"; all=1; else want[$s]=1; fi
+      if [[ -z "$s" ]]; then echo "unmapped path '$f' -> all suites"; all=1; else for w in $s; do want[$w]=1; done; fi
     done < <(git diff --name-only "$(git merge-base "$base" HEAD)"; git diff --name-only HEAD; git ls-files --others --exclude-standard)
     if (( all )); then selected=("${SUITES[@]}"); else selected=("${!want[@]}"); fi
     if (( ${#selected[@]} == 0 )); then
