@@ -25,7 +25,7 @@ WHERE e.topic = ANY(%s)
   )
 ORDER BY e.id
 LIMIT %s
-FOR UPDATE OF e SKIP LOCKED
+FOR NO KEY UPDATE OF e SKIP LOCKED
 """
 
 _CLAIM_CONSUMPTION_SQL = """
@@ -50,7 +50,10 @@ def consume(
     In a single transaction:
     1. Selects events whose ``topic`` is in ``topics``, whose ``event_id`` is not
        in ``skip_event_ids``, and that have not yet been consumed by ``consumer``,
-       ordered by ``outbox_events.id``, locked with ``FOR UPDATE OF e SKIP LOCKED``.
+       ordered by ``outbox_events.id``, locked with ``FOR NO KEY UPDATE OF e SKIP LOCKED``.
+       (NO KEY UPDATE, not UPDATE: it still excludes other consumers' locks
+       but does not block the KEY SHARE lock that inserting a consumption row
+       takes through its foreign key, which would otherwise deadlock.)
     2. For each selected event, claims consumption via
        ``INSERT INTO outbox_consumptions ... ON CONFLICT DO NOTHING RETURNING event_id``
        before invoking ``handler``. Only events whose insert returns a row are

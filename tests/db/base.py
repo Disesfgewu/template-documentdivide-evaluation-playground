@@ -43,6 +43,9 @@ class FreshDatabase(unittest.TestCase):
             c.execute(f'DROP DATABASE IF EXISTS "{cls.dbname}" WITH (FORCE)')
 
     def connect(self, **kw):
+        # Bounded waits: a lock or statement that hangs fails the test quickly
+        # instead of consuming the whole CI job timeout.
+        kw.setdefault("options", "-c lock_timeout=10s -c statement_timeout=60s")
         return psycopg.connect(self.url, **kw)
 
     def make_project(self, conn, role="owner"):

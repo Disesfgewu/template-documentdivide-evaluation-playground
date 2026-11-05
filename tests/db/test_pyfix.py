@@ -473,7 +473,7 @@ class TestPyFix(FreshDatabase):
             # Also if returned to queued when attempt == max_attempts, acquire still rejects
             with conn.transaction():
                 conn.execute(
-                    "UPDATE jobs SET lease_expires_at = now() + interval '60 seconds' WHERE id = %s",
+                    "UPDATE jobs SET lease_expires_at = now() + interval '60 seconds', row_version = row_version + 1 WHERE id = %s",
                     (job_id,),
                 )
             with self.assertRaises(jobs.LeaseLost):
