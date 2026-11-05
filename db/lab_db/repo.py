@@ -157,21 +157,55 @@ def record_change(conn: psycopg.Connection, ch: Change) -> uuid.UUID:
     return rv_id
 
 
-APP_TABLES_RW = ("projects", "actors", "project_members", "resource_versions", "operations",
-                 "lineage_edges", "artifacts", "idempotency_keys", "outbox_events")
-APP_TABLES_APPEND = ("audit_events",)
+APPEND_ONLY_TABLES = ("audit_events", "benchmark_transitions")
+READ_ONLY_TABLES = ("schema_migrations", "benchmark_transitions_allowed")
 
 
 def grant_app_privileges(conn: psycopg.Connection, role: str) -> None:
     """Run by the migration/owner role. The app role gets DML only (no DDL,
-    no TRUNCATE); audit is INSERT/SELECT only. Triggers still guard frozen
-    and audit rows against every role."""
+    no TRUNCATE); append-only tables are INSERT/SELECT; bookkeeping tables
+    are read-only. Triggers still guard frozen and audit rows for every role."""
     ident = sql.Identifier(role)
+    tables = [r[0] for r in conn.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")]
     with conn.transaction():
         conn.execute(sql.SQL("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {}").format(ident))
-        for t in APP_TABLES_RW:
-            conn.execute(sql.SQL("GRANT SELECT, INSERT, UPDATE ON {} TO {}").format(sql.Identifier(t), ident))
+        for t in tables:
+            if t in READ_ONLY_TABLES:
+                privs = "SELECT"
+            elif t in APPEND_ONLY_TABLES:
+                privs = "SELECT, INSERT"
+            else:
+                privs = "SELECT, INSERT, UPDATE"
+            conn.execute(sql.SQL("GRANT {} ON {} TO {}").format(sql.SQL(privs), sql.Identifier(t), ident))
         conn.execute(sql.SQL("GRANT DELETE ON artifacts TO {}").format(ident))  # staged clean-up only (trigger-guarded)
-        for t in APP_TABLES_APPEND:
-            conn.execute(sql.SQL("GRANT SELECT, INSERT ON {} TO {}").format(sql.Identifier(t), ident))
         conn.execute(sql.SQL("GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO {}").format(ident))
+
+
+class StaleVersion(Exception):
+    """row_version did not match: someone else changed the row (409)."""
+
+
+def transition_benchmark(conn: psycopg.Connection, benchmark_id: uuid.UUID, expected_row_version: int,
+                         to_status: str, reason: str, actor_id: uuid.UUID,
+                         compliance: Optional[str] = None) -> int:
+    """Optimistic-concurrency state change; the DB rejects illegal
+    transitions. Returns the new row_version."""
+    with conn.transaction():
+        cur = conn.execute("SELECT status, row_version FROM benchmark_revisions WHERE id = %s FOR UPDATE",
+                           (benchmark_id,)).fetchone()
+        if cur is None:
+            raise NotFound("benchmark")
+        from_status, version = cur
+        if version != expected_row_version:
+            raise StaleVersion(f"benchmark {benchmark_id} is at row_version {version}, not {expected_row_version}")
+        new_version = conn.execute(
+            "UPDATE benchmark_revisions SET status = %s, row_version = row_version + 1, "
+            "compliance = COALESCE(%s, compliance), "
+            "frozen_at = CASE WHEN %s::text = 'frozen' THEN now() ELSE frozen_at END "
+            "WHERE id = %s RETURNING row_version",
+            (to_status, compliance, to_status, benchmark_id)).fetchone()[0]
+        conn.execute("INSERT INTO benchmark_transitions (benchmark_id, from_status, to_status, row_version, reason, actor_id) "
+                     "VALUES (%s, %s, %s, %s, %s, %s)",
+                     (benchmark_id, from_status, to_status, new_version, reason, actor_id))
+    return new_version
