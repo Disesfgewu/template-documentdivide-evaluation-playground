@@ -41,6 +41,21 @@ class RegistryTests(unittest.TestCase):
         got = errs(lambda d: f01(d)["items"][0].update(generator="os"), reproduce=True)
         self.assertTrue(any("outside fixtures.generators" in e for e in got))
 
+    def test_malformed_entries_reported_not_crashing(self):
+        cases = {
+            "expected outside fixtures": lambda d: f01(d).update(expected="../package.json"),
+            "expected not a string": lambda d: f01(d).update(expected=123),
+            "args not a list": lambda d: f01(d)["items"][0].update(args=None),
+            "generator __init__": lambda d: f01(d)["items"][0].update(generator="fixtures.generators.__init__"),
+            "file escapes": lambda d: f01(d)["items"][0].update(generator=None) or f01(d)["items"][0].pop("generator")
+                            or f01(d)["items"][0].update(file="../../etc/passwd"),
+            "entry not a mapping": lambda d: d["fixtures"].insert(1, "junk"),
+            "bad review date": lambda d: f01(d)["golden"]["review"].update(date="yesterday"),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                self.assertTrue(errs(mutate, reproduce=True))
+
     def test_all_ids_required(self):
         self.assertTrue(errs(lambda d: d["fixtures"].pop()))
 
@@ -60,11 +75,14 @@ class F01Tests(unittest.TestCase):
                 self.assertEqual(len(reader.pages), want["page_count"])
                 self.assertEqual(target_counts(len(reader.pages)), (want["n_target"], want["q_min"]))
 
-    def test_pages_are_distinct(self):
-        reader = PdfReader(io.BytesIO(synthetic_pdf.build(21)), strict=True)
-        texts = [p.extract_text() for p in reader.pages]
-        self.assertEqual(len(set(texts)), 21)
-        self.assertIn("page 21", texts[20])
+    def test_every_registered_pdf_has_distinct_pages(self):
+        # SPEC 17.1: a large PDF must not be one page copied N times.
+        for item in DOC["fixtures"][0]["items"]:
+            with self.subTest(item["id"]):
+                reader = PdfReader(io.BytesIO(rc.item_bytes(item)), strict=True)
+                texts = [p.extract_text() for p in reader.pages]
+                self.assertEqual(len(set(texts)), len(texts))
+        self.assertIn("page 21", PdfReader(io.BytesIO(synthetic_pdf.build(21))).pages[20].extract_text())
 
     def test_deterministic_and_bounded(self):
         self.assertEqual(synthetic_pdf.build(3), synthetic_pdf.build(3))

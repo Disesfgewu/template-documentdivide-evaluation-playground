@@ -42,12 +42,35 @@ class TraceabilityTests(unittest.TestCase):
         self.assertTrue(any("requires evidence" in e for e in got))
         self.assertTrue(any("requires a note" in e for e in got))
 
-    def test_passed_needs_main_commit_and_run(self):
-        branch_only = [{"scope": "contract", "branch": "issue-4-contracts", "tests": ["x"]}]
+    def test_passed_needs_main_commit_run_and_tests(self):
+        branch_only = [{"scope": "contract", "branch": "issue-4-contracts",
+                        "tests": ["tests/governance/test_check_traceability.py"]}]
         got = errs(lambda d: d["tests"][0].update(status="passed", evidence=branch_only, note="n"))
         self.assertTrue(any("passed requires main evidence" in e for e in got))
-        main_ev = [{"branch": "main", "commit": "a" * 40, "run": "https://github.com/o/r/actions/runs/1"}]
-        self.assertEqual(errs(lambda d: d["tests"][0].update(status="passed", evidence=main_ev, note="n")), [])
+        run = "https://github.com/Disesfgewu/template-documentdivide-evaluation-playground/actions/runs/1"
+        good = [{"branch": "main", "commit": "ab" * 20, "run": run,
+                 "tests": ["tests/governance/test_check_traceability.py"]}]
+        self.assertEqual(errs(lambda d: d["tests"][0].update(status="passed", evidence=good, note="n")), [])
+
+    def test_fake_passed_evidence_rejected(self):
+        fakes = {
+            "all-zero commit": {"commit": "0" * 40},
+            "foreign run": {"run": "https://github.com/"},
+            "other repo run": {"run": "https://github.com/x/y/actions/runs/1"},
+            "no tests": {"tests": []},
+            "missing test file": {"tests": ["tests/nope/test_missing.py::T"]},
+        }
+        run = "https://github.com/Disesfgewu/template-documentdivide-evaluation-playground/actions/runs/1"
+        for label, change in fakes.items():
+            ev = {"branch": "main", "commit": "ab" * 20, "run": run,
+                  "tests": ["tests/governance/test_check_traceability.py"], **change}
+            with self.subTest(label):
+                self.assertTrue(errs(lambda d: d["tests"][0].update(status="passed", evidence=[ev], note="n")))
+
+    def test_non_mapping_evidence_and_basic_fields(self):
+        self.assertTrue(errs(lambda d: d["tests"][0].update(evidence=["junk"])))
+        self.assertTrue(errs(lambda d: d["tests"][0].update(title="")))
+        self.assertTrue(errs(lambda d: d["tests"][0].update(release_owner=14)))
 
     def test_owners(self):
         self.assertTrue(errs(lambda d: d["tests"][0].update(owners=[15])))

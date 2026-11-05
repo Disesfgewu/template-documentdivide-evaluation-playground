@@ -105,24 +105,69 @@ class BundleTests(unittest.TestCase):
         self.assertIn(("questions[q_004].ordinal", "duplicate_ordinal"), got)
 
     def test_cross_page_single_page_alternative_disqualifies(self):
-        # [[e18,e247],[e310]]: e310 alone supports the answer on one page.
-        raw = edit(lambda r: rec(r, "source_answers", "q_002")["evidence_sets"].append(
-            {"set_id": "s2", "evidence_ids": ["e310"]}))
-        self.assertEqual(problems(raw), [("source_answers[q_002].evidence_sets[s2]", "cross_page_single_page")])
+        # [[e18,e247],[e310]]: e310 alone supports every fact on one page.
+        def alt(r):
+            src = rec(r, "source_answers", "q_002")
+            src["evidence_sets"].append({"set_id": "s2", "evidence_ids": ["e310"]})
+            for fs in src["fact_support_sets"]:
+                fs["support_sets"].append(["e310"])
+        self.assertEqual(problems(edit(alt)), [
+            ("source_answers[q_002].evidence_sets[s2]", "cross_page_single_page"),
+            ("source_answers[q_002].fact_support_sets", "cross_page_single_page")])
 
     def test_cross_page_set_on_one_page_disqualifies(self):
         def same_page(r):
             for e in r["evidence"]:
                 if e["evidence_id"] == "e247":
                     e["regions"][0]["page_index"] = 17
-        self.assertEqual(problems(edit(same_page)),
-                         [("source_answers[q_002].evidence_sets[s1]", "cross_page_single_page")])
+        self.assertEqual(problems(edit(same_page)), [
+            ("source_answers[q_002].evidence_sets[s1]", "cross_page_single_page"),
+            ("source_answers[q_002].fact_support_sets", "cross_page_single_page")])
+
+    def test_single_page_via_fact_support_only(self):
+        # The declared set spans two pages, but each fact also has an
+        # alternative on page 300: one page can support the whole answer.
+        def alt(r):
+            for fs in rec(r, "source_answers", "q_002")["fact_support_sets"]:
+                fs["support_sets"].append(["e310"])
+        self.assertEqual(problems(edit(alt)),
+                         [("source_answers[q_002].fact_support_sets", "cross_page_single_page")])
+
+    def test_evidence_set_must_support_every_fact(self):
+        raw = edit(lambda r: rec(r, "source_answers", "q_002")["evidence_sets"].append(
+            {"set_id": "s2", "evidence_ids": ["e18", "e310"]}))
+        self.assertEqual(problems(raw), [("source_answers[q_002].evidence_sets[s2]", "set_misses_fact_support")])
+
+    def test_multiple_documents_rejected(self):
+        def other_doc(r):
+            for e in r["evidence"]:
+                if e["evidence_id"] == "e247":
+                    e["regions"][0].update(document_id="doc_002", document_sha256="b" * 64, page_index=17)
+        self.assertIn(("evidence", "multiple_documents"), problems(edit(other_doc)))
+
+    def test_chart_table_needs_visual_evidence(self):
+        def chart(r):
+            rec(r, "questions", "q_001")["quota_bucket"] = "chart_table"
+        self.assertEqual(problems(edit(chart)),
+                         [("source_answers[q_001].evidence_sets[s1]", "chart_table_without_visual_evidence")])
 
     def test_confusable_needs_distractor_and_distractor_not_gold(self):
         raw = edit(lambda r: rec(r, "source_answers", "q_003").update(distractors=[]))
         self.assertEqual(problems(raw), [("source_answers[q_003].distractors", "confusable_without_distractor")])
         raw = edit(lambda r: rec(r, "source_answers", "q_003")["distractors"][0].update(evidence_id="e6"))
         self.assertEqual(problems(raw), [("source_answers[q_003].distractors[e6]", "distractor_is_gold")])
+
+    def test_distractor_used_as_support_elsewhere_is_gold(self):
+        def via_fact_support(r):
+            rec(r, "source_answers", "q_003")["fact_support_sets"][0]["support_sets"].append(["e5"])
+        self.assertIn(("source_answers[q_003].distractors[e5]", "distractor_is_gold"), problems(edit(via_fact_support)))
+
+        def via_textual(r):
+            rec(r, "textual_answers", "q_003")["checks"] = [{
+                "check_id": "t1", "fact_id": "f1", "kind": "numeric", "expected": 3.0, "interval": None,
+                "unit": "year", "normalization_rule": None, "absolute_tolerance": 0.0,
+                "relative_tolerance": None, "precision": 0, "supporting_evidence_ids": ["e5"]}]
+        self.assertEqual(problems(edit(via_textual)), [("source_answers[q_003].distractors[e5]", "distractor_is_gold")])
 
     def test_evidence_key_must_match(self):
         q, s, t, src, ev = bundle()
@@ -131,17 +176,66 @@ class BundleTests(unittest.TestCase):
         self.assertIn(("evidence[e_other]", "evidence_key_mismatch"), got)
 
 
+class TextCheckTests(unittest.TestCase):
+    def check(self, **kw):
+        base = {"check_id": "t1", "fact_id": "f1", "kind": "numeric", "expected": 12.0, "interval": None,
+                "unit": "ms", "normalization_rule": None, "absolute_tolerance": None,
+                "relative_tolerance": None, "precision": None, "supporting_evidence_ids": ["e1"]}
+        base.update(kw)
+        return vj(bm.TextCheck, base)
+
+    def test_t99_point_boundaries(self):
+        c = self.check(absolute_tolerance=0.5, relative_tolerance=0.01)  # max(0.5, 0.12) = 0.5
+        self.assertTrue(c.numeric_matches(12.5))
+        self.assertTrue(c.numeric_matches(11.5))
+        self.assertFalse(c.numeric_matches(12.5001))
+        r = self.check(relative_tolerance=0.1)  # 1.2
+        self.assertTrue(r.numeric_matches(13.2 - 1e-9))
+        self.assertFalse(r.numeric_matches(13.3))
+        self.assertFalse(r.numeric_matches(float("nan")))
+
+    def test_t99_relative_tolerance_at_zero(self):
+        with self.assertRaises(ValidationError) as cm:
+            self.check(expected=0.0, relative_tolerance=0.05)
+        self.assertIn("relative tolerance vanishes at zero", str(cm.exception))
+        z = self.check(expected=0.0, absolute_tolerance=0.01, relative_tolerance=0.05)
+        self.assertTrue(z.numeric_matches(-0.01))
+        self.assertFalse(z.numeric_matches(0.0101))
+
+    def test_interval_is_not_widened(self):
+        c = self.check(expected=None, interval=[11.5, 12.5])
+        self.assertTrue(c.numeric_matches(11.5) and c.numeric_matches(12.5))
+        self.assertFalse(c.numeric_matches(12.5000001))
+        with self.assertRaises(ValidationError):
+            self.check(expected=None, interval=[11.5, 12.5], precision=1)
+
+    def test_numeric_matches_rejects_text_checks(self):
+        q = self.check(kind="quote", expected="x", unit=None)
+        with self.assertRaises(ValueError):
+            q.numeric_matches(1.0)
+
+
 class FormulaTests(unittest.TestCase):
-    def test_depth_limit(self):
+    def test_depth_limit_on_any_op(self):
         expr = {"ref": "a"}
-        for _ in range(bm.MAX_EXPR_DEPTH + 2):
+        for _ in range(bm.MAX_EXPR_DEPTH):
             expr = {"op": "neg", "args": [expr]}
+        with self.assertRaises(ValidationError) as cm:
+            bm.Op.model_validate_json(json.dumps(expr))   # Op on its own, not via Calculation
+        self.assertIn("deeper than", str(cm.exception))
+        ok = {"ref": "a"}
+        for _ in range(bm.MAX_EXPR_DEPTH - 1):
+            ok = {"op": "neg", "args": [ok]}
+        bm.Op.model_validate_json(json.dumps(ok))
+
+    def test_unused_operand_rejected(self):
         sem = copy.deepcopy(RAW["semantic_answers"][1])
-        sem["calculation"] = {"operands": [{"name": "a", "value": 1.0, "unit": None, "evidence_id": "e40"}],
-                              "formula": expr, "answer_unit": None}
+        sem["calculation"] = {"operands": [{"name": "a", "value": 1.0, "unit": None, "evidence_id": "e40"},
+                                           {"name": "b", "value": 9.0, "unit": None, "evidence_id": "e18"}],
+                              "formula": {"ref": "a"}, "answer_unit": None}
         with self.assertRaises(ValidationError) as cm:
             vj(SemanticAnswer, sem)
-        self.assertIn("deeper than", str(cm.exception))
+        self.assertIn("not used by the formula", str(cm.exception))
 
 
 class ManifestTests(unittest.TestCase):

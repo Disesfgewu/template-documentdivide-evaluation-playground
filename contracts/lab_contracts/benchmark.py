@@ -9,6 +9,7 @@ a caller can report every problem with its field path (T12/T13).
 """
 from __future__ import annotations
 
+import math
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
@@ -19,7 +20,7 @@ from pydantic import AwareDatetime, Discriminator, Field, StringConstraints, Tag
 from .base import Contract, FiniteFloat, ResourceId, Sha256
 from .base import check_unique as _unique
 from .method import Modality
-from .source import SourceRegion
+from .source import RegionKind, SourceRegion
 
 NonEmpty = Annotated[str, StringConstraints(min_length=1, max_length=8000)]
 Weight = Annotated[FiniteFloat, Field(gt=0)]
@@ -138,6 +139,10 @@ class Op(Contract):
 
     @model_validator(mode="after")
     def _arity(self):
+        # Checked on every node, so any Op (not only one inside Calculation)
+        # is bounded. Children are already validated, so their depth is known.
+        if 1 + max((_depth(a) for a in self.args), default=0) > MAX_EXPR_DEPTH:
+            raise ValueError(f"formula deeper than {MAX_EXPR_DEPTH}")
         n = len(self.args)
         if self.op in ("sub", "div") and n != 2:
             raise ValueError(f"{self.op} takes exactly 2 args")
@@ -146,6 +151,13 @@ class Op(Contract):
         if self.op in ("add", "mul", "min", "max") and n < 2:
             raise ValueError(f"{self.op} takes at least 2 args")
         return self
+
+
+MAX_EXPR_DEPTH = 16
+
+
+def _depth(e) -> int:
+    return 1 + max((_depth(a) for a in e.args), default=0) if isinstance(e, Op) else 1
 
 
 def _expr_tag(v) -> Optional[str]:
@@ -163,19 +175,15 @@ Expr = Annotated[Union[Annotated[Op, Tag("op")], Annotated[Ref, Tag("ref")], Ann
                  Discriminator(_expr_tag)]
 Op.model_rebuild()
 
-MAX_EXPR_DEPTH = 16
 
-
-def _refs(e: Expr, depth: int = 0) -> set[str]:
-    if depth > MAX_EXPR_DEPTH:
-        raise ValueError(f"formula deeper than {MAX_EXPR_DEPTH}")
+def _refs(e: Expr) -> set[str]:
     if isinstance(e, Ref):
         return {e.ref}
     if isinstance(e, Const):
         return set()
     out: set[str] = set()
     for a in e.args:
-        out |= _refs(a, depth + 1)
+        out |= _refs(a)
     return out
 
 
@@ -188,9 +196,14 @@ class Calculation(Contract):
     def _refs_resolve(self):
         names = [o.name for o in self.operands]
         _unique(names, "operand name")
-        missing = _refs(self.formula) - set(names)
+        used = _refs(self.formula)
+        missing = used - set(names)
         if missing:
             raise ValueError(f"formula references unknown operands: {sorted(missing)}")
+        unused = set(names) - used
+        if unused:
+            # An unused operand would attach unchecked evidence to the answer.
+            raise ValueError(f"operands not used by the formula: {sorted(unused)}")
         return self
 
 
@@ -245,12 +258,29 @@ class TextCheck(Contract):
                 lo, hi = self.interval
                 if not lo <= hi:
                     raise ValueError("interval requires low <= high")
-                if self.absolute_tolerance is not None or self.relative_tolerance is not None:
-                    raise ValueError("interval checks must not also carry tolerances")
+                if any(v is not None for v in (self.absolute_tolerance, self.relative_tolerance, self.precision)):
+                    raise ValueError("interval checks must not also carry tolerances or precision")
             elif self.absolute_tolerance is None and self.relative_tolerance is None:
                 raise ValueError("point numeric check requires absolute_tolerance or relative_tolerance")
+            elif self.expected == 0 and self.absolute_tolerance is None:
+                # rel_tol * |0| == 0: a relative tolerance alone would demand exact zero.
+                raise ValueError("expected 0 requires absolute_tolerance (relative tolerance vanishes at zero)")
         _unique(self.supporting_evidence_ids, "supporting_evidence_id")
         return self
+
+    def numeric_matches(self, actual: float) -> bool:
+        """SPEC 19.5, after unit conversion by the caller: point check
+        abs(actual-expected) <= max(abs_tol, rel_tol*abs(expected)); interval
+        check low <= actual <= high with no further widening."""
+        if self.kind != "numeric":
+            raise ValueError("numeric_matches applies to numeric checks only")
+        if not math.isfinite(actual):
+            return False
+        if self.interval is not None:
+            lo, hi = self.interval
+            return lo <= actual <= hi
+        tol = max(self.absolute_tolerance or 0.0, (self.relative_tolerance or 0.0) * abs(self.expected))
+        return abs(actual - self.expected) <= tol
 
 
 class TextualAnswer(Contract):
@@ -357,9 +387,15 @@ def validate_bundle(questions: list[Question], semantic: list[SemanticAnswer],
     """Join the four parts by question_id and check every cross reference.
     Input order is irrelevant. Empty list = consistent."""
     p: list[Problem] = []
+    docs: set[tuple[str, str]] = set()
     for key, unit in evidence.items():
         if key != unit.evidence_id:
             p.append(Problem(f"evidence[{key}]", "evidence_key_mismatch", unit.evidence_id))
+        docs |= {(r.document_id, r.document_sha256) for r in unit.regions}
+    if len(docs) > 1:
+        # v1 benchmarks are built from one PDF (SPEC 2, 19.4); pages of
+        # different documents must never count as "two pages".
+        p.append(Problem("evidence", "multiple_documents", f"{len(docs)} (document_id, sha256) pairs"))
     qs = _index(questions, "questions", p)
     parts = {"semantic_answers": _index(semantic, "semantic_answers", p),
              "textual_answers": _index(textual, "textual_answers", p),
@@ -417,13 +453,48 @@ def validate_bundle(questions: list[Question], semantic: list[SemanticAnswer],
             covered = {fs.fact_id for fs in src.fact_support_sets}
             for f in sorted(facts - covered):
                 p.append(Problem(f"{base}.fact_support_sets[{f}]", "fact_without_support", f))
+        # Every acceptable evidence set must carry, for each required fact, at
+        # least one of that fact's support alternatives (SPEC 16.2: a set
+        # "整組能支持所有必要事實").
+        support = {fs.fact_id: fs.support_sets for fs in src.fact_support_sets}
+        for s in src.evidence_sets:
+            for f in sorted(facts & set(support)):
+                if not any(set(alt) <= set(s.evidence_ids) for alt in support[f]):
+                    p.append(Problem(f"{base}.evidence_sets[{s.set_id}]", "set_misses_fact_support", f))
+
+        gold = {e for s in src.evidence_sets for e in s.evidence_ids}
+        gold |= {e for alts in support.values() for alt in alts for e in alt}
+        if txt:
+            gold |= {e for c in txt.checks for e in c.supporting_evidence_ids}
+        if sem and sem.calculation:
+            gold |= {o.evidence_id for o in sem.calculation.operands}
         for d in src.distractors:
             ev(f"{base}.distractors[{d.evidence_id}]", d.evidence_id)
-            if any(d.evidence_id in s.evidence_ids for s in src.evidence_sets):
+            if d.evidence_id in gold:
                 p.append(Problem(f"{base}.distractors[{d.evidence_id}]", "distractor_is_gold", d.evidence_id))
 
         if q.quota_bucket is QuotaBucket.confusable and not src.distractors:
             p.append(Problem(f"{base}.distractors", "confusable_without_distractor", qid))
+        if q.quota_bucket is QuotaBucket.chart_table:
+            # Contract-level floor only; the removal/necessity test is #10.
+            visual = {RegionKind.table, RegionKind.figure, RegionKind.image}
+            for s in src.evidence_sets:
+                kinds = {r.kind for e in s.evidence_ids if e in evidence for r in evidence[e].regions}
+                if not kinds & visual:
+                    p.append(Problem(f"{base}.evidence_sets[{s.set_id}]", "chart_table_without_visual_evidence", qid))
+        if q.quota_bucket is QuotaBucket.cross_page and sem and set(support) >= facts:
+            # A single page that supports every fact on its own also disqualifies.
+            def one_page_options(alts):
+                out = set()
+                for alt in alts:
+                    if all(e in evidence for e in alt):
+                        pages = set().union(*(evidence[e].pages() for e in alt))
+                        if len(pages) == 1:
+                            out |= pages
+                return out
+            common = set.intersection(*(one_page_options(support[f]) for f in facts)) if facts else set()
+            for doc, page in sorted(common):
+                p.append(Problem(f"{base}.fact_support_sets", "cross_page_single_page", f"page {page}"))
         if q.quota_bucket is QuotaBucket.cross_page:
             # Every acceptable set must need >= 2 physical pages; one single-page
             # alternative disqualifies the question from the cross_page bucket.

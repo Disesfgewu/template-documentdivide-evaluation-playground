@@ -99,7 +99,7 @@
   },
   "MetricResult.display_rounding.json": {
     "loc": "",
-    "message": "display_value must be raw_value rounded to 2 decimals",
+    "message": "display_value must be 100*numerator/denominator rounded half-up to 2 decimals",
     "type": "value_error"
   },
   "MetricResult.na_without_reason.json": {
@@ -160,7 +160,7 @@
   },
   "ParseManifest.reproducible_with_unknown.json": {
     "loc": "",
-    "message": "reproducible manifests must not contain unknown versions",
+    "message": "reproducible manifests must not contain unknown or floating (latest) versions",
     "type": "value_error"
   },
   "ParseRequest.duplicate_page.json": {
@@ -433,7 +433,7 @@
   },
   "TextualAnswer.interval_with_tolerance.json": {
     "loc": "checks.0",
-    "message": "interval checks must not also carry tolerances",
+    "message": "interval checks must not also carry tolerances or precision",
     "type": "value_error"
   },
   "TextualAnswer.inverted_interval.json": {

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from lab_contracts.parse import CAPABILITIES, CapabilityManifest, ParseRequest, ParseResult
+from lab_contracts.parse import CAPABILITIES, CapabilityManifest, ParseManifest, ParseRequest, ParseResult
 from lab_contracts.score import MetricResult, display
 
 EX = Path(__file__).resolve().parents[2] / "contracts" / "examples" / "valid"
@@ -14,6 +14,25 @@ def load(model, name, **upd):
     obj = json.loads((EX / f"{name}.json").read_text())
     obj.update(upd)
     return model.model_validate_json(json.dumps(obj))
+
+
+class ParseManifestTests(unittest.TestCase):
+    def manifest(self, **upd):
+        return load(ParseManifest, "ParseManifest.pinned_with_fallback", **upd)
+
+    def test_floating_or_case_variant_versions_are_not_reproducible(self):
+        self.manifest()
+        for v in ("latest", "Unknown", "UNKNOWN", " main ", "pkg@latest"):
+            with self.subTest(v=v), self.assertRaises(ValidationError):
+                self.manifest(package_or_service_version=v)
+
+    def test_unknown_allowed_when_not_reproducible(self):
+        m = self.manifest(package_or_service_version="unknown", reproducible=False)
+        self.assertFalse(m.reproducible)
+
+    def test_duplicate_languages_rejected(self):
+        with self.assertRaises(ValidationError):
+            self.manifest(ocr_languages=["en", "en"])
 
 
 class ParseContractTests(unittest.TestCase):
@@ -57,6 +76,27 @@ class ScoreContractTests(unittest.TestCase):
         self.assertEqual(display(12.345), "12.35")
         self.assertEqual(display(0.125), "0.13")
         self.assertEqual(display(100.0), "100.00")
+
+    def test_display_from_decimal_ratio_not_binary_float(self):
+        # 100 * 0.00435 is 0.43499999999999994 in binary; the display uses the
+        # decimal ratio 0.435 and shows 0.44.
+        raw = 100.0 * 0.00435 / 1.0
+        self.assertEqual(repr(raw), "0.43499999999999994")
+        m = metric(numerator=0.00435, denominator=1.0, raw_value=raw, display_value="0.44")
+        self.assertEqual(m.display_value, "0.44")
+        with self.assertRaises(ValidationError):
+            metric(numerator=0.00435, denominator=1.0, raw_value=raw, display_value="0.43")
+
+    def test_pending_error_carry_no_ratio_na_only_zero_denominator(self):
+        for status in ("pending", "error"):
+            with self.subTest(status=status), self.assertRaises(ValidationError):
+                metric(status=status, raw_value=None, display_value=None, numerator=0.0,
+                       denominator=10.0, reason_codes=["x"])
+        with self.assertRaises(ValidationError):
+            metric(status="not_applicable", raw_value=None, display_value=None, numerator=0.0,
+                   denominator=3.0, reason_codes=["x"])
+        metric(status="not_applicable", raw_value=None, display_value=None, numerator=0.0,
+               denominator=0.0, reason_codes=["no_applicable_checks"])
 
     def test_error_status_carries_no_number(self):
         with self.assertRaises(ValidationError):

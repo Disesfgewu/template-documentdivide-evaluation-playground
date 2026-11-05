@@ -1160,8 +1160,8 @@ tests:
   - scope: contract
     branch: issue-4-contracts
     tests:
-    - contracts/examples/invalid/TextualAnswer.*.json (tolerance/interval shape only)
-  note: '只有 TextCheck 結構規則（單點需容差、區間不可再加容差）；數值評分公式與換算在 #12。'
+    - tests/contracts/test_benchmark.py::TextCheckTests
+  note: '契約層：TextCheck 的單點/區間判定（含零值的相對誤差陷阱、區間不得再放寬）已測；單位換算與評分整合在 #12。'
 - id: T100
   title: OCR/VLM 衝突、估讀、雙軸及跨頁合格／錯誤案例
   owners:

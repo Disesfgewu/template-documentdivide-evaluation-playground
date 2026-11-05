@@ -4,7 +4,7 @@ and error never masquerade as zero (T43)."""
 from __future__ import annotations
 
 import math
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from typing import Annotated, Literal, Optional
 
 from pydantic import Field, StringConstraints, model_validator
@@ -23,6 +23,16 @@ def display(value: float) -> str:
     """Two decimals for display only (half-up on the shortest repr of the
     float, so 12.345 -> "12.35"); computation keeps full precision."""
     return str(Decimal(repr(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def display_ratio(numerator: float, denominator: float) -> str:
+    """Display value of 100*numerator/denominator computed in decimal, so a
+    binary artefact such as 100*0.12345 == 12.344999999999999 still shows
+    as "12.35"."""
+    with localcontext() as ctx:
+        ctx.prec = 50
+        exact = Decimal(repr(numerator)) * 100 / Decimal(repr(denominator))
+        return str(exact.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 class MetricResult(Contract):
@@ -48,12 +58,17 @@ class MetricResult(Contract):
             expected = 100.0 * self.numerator / self.denominator
             if not math.isclose(self.raw_value, expected, rel_tol=1e-9, abs_tol=1e-9):
                 raise ValueError("raw_value must equal 100 * numerator / denominator")
-            if self.display_value != display(self.raw_value):
-                raise ValueError("display_value must be raw_value rounded to 2 decimals")
+            if self.display_value != display_ratio(self.numerator, self.denominator):
+                raise ValueError("display_value must be 100*numerator/denominator rounded half-up to 2 decimals")
         else:
             # N/A, pending and error carry no number: never a substitute zero.
             if any(v is not None for v in (self.raw_value, self.display_value)):
                 raise ValueError(f"{self.status} must not carry raw_value/display_value")
+            if self.status in ("pending", "error") and (self.numerator, self.denominator) != (None, None):
+                raise ValueError(f"{self.status} must not carry numerator/denominator")
+            if self.status == "not_applicable" and self.denominator not in (None, 0):
+                # N/A means nothing applicable: an informative 0/0 at most.
+                raise ValueError("not_applicable allows only a zero (or null) denominator")
             if not self.reason_codes:
                 raise ValueError(f"{self.status} requires reason_codes")
         return self

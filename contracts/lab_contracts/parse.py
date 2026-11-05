@@ -11,6 +11,13 @@ from .base import Contract, FiniteFloat, ResourceId, Sha256
 from .base import check_unique as _unique
 
 UNKNOWN = "unknown"
+# Values that do not pin anything; matched case-insensitively.
+_UNPINNED = {"unknown", "latest", "unpinned", "main", "master", "head"}
+
+
+def _unpinned(v: str) -> bool:
+    v = v.strip().lower()
+    return v in _UNPINNED or v.endswith(("@unknown", "@latest"))
 # A version string, or the literal "unknown" when upstream does not disclose
 # it. Never invent one.
 Version = Annotated[str, StringConstraints(min_length=1, max_length=128)]
@@ -102,11 +109,14 @@ class ParseManifest(Contract):
         _unique(mapped, "mapped page_index")
         if set(mapped) != set(self.page_selection):
             raise ValueError("page_index_map must cover exactly the selected pages")
+        _unique(self.ocr_languages, "ocr_language")
+        _unique(self.postprocess_flags, "postprocess_flag")
+        _unique([m.name for m in self.model_revisions], "model_revisions name")
         if self.reproducible:
             versions = [self.package_or_service_version, self.output_schema]
             versions += [m.revision for m in self.model_revisions]
-            if UNKNOWN in versions:
-                raise ValueError("reproducible manifests must not contain unknown versions")
+            if any(_unpinned(v) for v in versions):
+                raise ValueError("reproducible manifests must not contain unknown or floating (latest) versions")
         return self
 
 
@@ -145,6 +155,8 @@ class ParseResult(Contract):
     @model_validator(mode="after")
     def _distinct(self):
         _unique([p.page_index for p in self.pages], "page_index")
+        _unique(self.raw_result_refs, "raw_result_ref")
+        _unique(self.normalized_evidence_refs, "normalized_evidence_ref")
         return self
 
     def check_against_request(self, req: ParseRequest) -> list[str]:

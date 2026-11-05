@@ -14,7 +14,7 @@
       "normalization_rule": null,
       "absolute_tolerance": null,
       "relative_tolerance": null,
-      "precision": 0,
+      "precision": null,
       "supporting_evidence_ids": [
         "e247"
       ]
