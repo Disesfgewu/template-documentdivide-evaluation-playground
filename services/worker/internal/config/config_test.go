@@ -59,6 +59,11 @@ func TestLoadRejects(t *testing.T) {
 		{"db without host", "LAB_DATABASE_URL", "postgresql:///lab", "must include host and database name"},
 		{"unparsable db", "LAB_DATABASE_URL", "postgresql://lab:pw@[::1/lab", "must be a valid URL"},
 		{"bad http addr", "LAB_WORKER_HTTP_ADDR", "8081", "LAB_WORKER_HTTP_ADDR: must be host:port"},
+		{"http port out of range", "LAB_WORKER_HTTP_ADDR", "127.0.0.1:99999", "port 1-65535"},
+		{"http port not numeric", "LAB_WORKER_HTTP_ADDR", "127.0.0.1:http", "port 1-65535"},
+		{"http port zero", "LAB_WORKER_HTTP_ADDR", "127.0.0.1:0", "port 1-65535"},
+		{"db port out of range", "LAB_DATABASE_URL", "postgresql://lab:pw@db.internal:70000/lab", "port must be 1-65535"},
+		{"db port with credentials in malformed host", "LAB_DATABASE_URL", "postgresql://lab:s3cret@db:5x/lab", "must be a valid URL"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
