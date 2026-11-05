@@ -203,6 +203,24 @@ class TextCheckTests(unittest.TestCase):
         self.assertTrue(z.numeric_matches(-0.01))
         self.assertFalse(z.numeric_matches(0.0101))
 
+    def test_t99_no_overflow_near_float_max(self):
+        # Exact error 2.7e308 > tolerance 2e308; float arithmetic overflowed
+        # both sides to inf and returned True.
+        c = self.check(expected=1e308, absolute_tolerance=0.0, relative_tolerance=2.0)
+        self.assertFalse(c.numeric_matches(-1.7e308))
+        self.assertTrue(c.numeric_matches(-1e308))            # error == tolerance (boundary)
+        self.assertTrue(c.numeric_matches(-0.9e308))          # inside
+        self.assertTrue(c.numeric_matches(1.7976931348623157e308))  # +max float, error < 2e308
+        self.assertFalse(c.numeric_matches(-1.7976931348623157e308))
+        for bad in (float("inf"), float("-inf"), float("nan")):
+            self.assertFalse(c.numeric_matches(bad))
+        n = self.check(expected=-1e308, absolute_tolerance=0.0, relative_tolerance=2.0)
+        self.assertTrue(n.numeric_matches(1e308))
+        self.assertFalse(n.numeric_matches(1.7e308))
+        a = self.check(expected=1.7976931348623157e308, absolute_tolerance=1.7976931348623157e308)
+        self.assertTrue(a.numeric_matches(0.0))
+        self.assertFalse(a.numeric_matches(-1e-300))
+
     def test_interval_is_not_widened(self):
         c = self.check(expected=None, interval=[11.5, 12.5])
         self.assertTrue(c.numeric_matches(11.5) and c.numeric_matches(12.5))
@@ -252,6 +270,39 @@ class ValidationRefTests(unittest.TestCase):
         raw = edit(lambda r: rec(r, "source_answers", "q_001").update(validation_refs=["v_003"]))
         self.assertEqual(problems(raw),
                          [("source_answers[q_001].validation_refs[v_003]", "validation_for_other_question")])
+
+    def test_validation_record_source_check_evidence_must_exist(self):
+        def bad(r):
+            r["validations"][0]["source_checks"] = [
+                {"evidence_id": "e18", "check": "source_exists", "passed": True},
+                {"evidence_id": "e_missing", "check": "source_exists", "passed": True}]
+        self.assertEqual(problems(edit(bad)),
+                         [("validations[v_001].source_checks[1].evidence_id", "unknown_evidence_id")])
+
+    def test_validation_record_question_must_exist(self):
+        # Unreferenced history is allowed, but its question_id must resolve.
+        def bad(r):
+            r["validations"][2]["question_id"] = "q_missing"
+            rec(r, "source_answers", "q_003")["validation_refs"] = []
+        self.assertEqual(problems(edit(bad)), [("validations[v_003].question_id", "unknown_question_id")])
+
+    def test_legal_source_checks_and_unreferenced_history_pass_in_any_order(self):
+        def ok(r):
+            r["validations"][0]["source_checks"] = [
+                {"evidence_id": "e247", "check": "source_exists", "passed": True},
+                {"evidence_id": "e18", "check": "quote_present", "passed": False}]
+            extra = copy.deepcopy(r["validations"][1])  # older needs_review for q_002, unreferenced
+            extra.update(validation_id="v_002_old", source_checks=[
+                {"evidence_id": "e5", "check": "source_exists", "passed": True}])
+            r["validations"].append(extra)
+        raw = edit(ok)
+        self.assertEqual(problems(raw), [])
+        for seed in range(5):
+            shuffled = copy.deepcopy(raw)
+            for part in ("questions", "validations", "evidence", "source_answers"):
+                random.Random(seed).shuffle(shuffled[part])
+            with self.subTest(seed=seed):
+                self.assertEqual(problems(shuffled), [])
 
 
 class FormulaTests(unittest.TestCase):

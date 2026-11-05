@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from fractions import Fraction
 from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Literal, Optional, Union
@@ -286,8 +287,13 @@ class TextCheck(Contract):
         if self.interval is not None:
             lo, hi = self.interval
             return lo <= actual <= hi
-        tol = max(self.absolute_tolerance or 0.0, (self.relative_tolerance or 0.0) * abs(self.expected))
-        return abs(actual - self.expected) <= tol
+        # Exact rational arithmetic: every finite float is a Fraction, so
+        # actual-expected and rel_tol*|expected| cannot overflow to inf the
+        # way float arithmetic does near 1.8e308 (inf <= inf would pass).
+        exp = Fraction(self.expected)
+        tol = max(Fraction(self.absolute_tolerance or 0),
+                  Fraction(self.relative_tolerance or 0) * abs(exp))
+        return abs(Fraction(actual) - exp) <= tol
 
 
 class TextualAnswer(Contract):
@@ -413,6 +419,17 @@ def validate_bundle(questions: list[Question], semantic: list[SemanticAnswer],
         # different documents must never count as "two pages".
         p.append(Problem("evidence", "multiple_documents", f"{len(docs)} (document_id, sha256) pairs"))
     qs = _index(questions, "questions", p)
+    # ValidationRecord -> question / evidence. Records not referenced by any
+    # source answer are legal history (e.g. an earlier needs_review), but
+    # their own references must still resolve.
+    for key in sorted(validations):
+        rec = validations[key]
+        if rec.question_id not in qs:
+            p.append(Problem(f"validations[{key}].question_id", "unknown_question_id", rec.question_id))
+        for i, sc in enumerate(rec.source_checks):
+            if sc.evidence_id not in evidence:
+                p.append(Problem(f"validations[{key}].source_checks[{i}].evidence_id",
+                                 "unknown_evidence_id", sc.evidence_id))
     parts = {"semantic_answers": _index(semantic, "semantic_answers", p),
              "textual_answers": _index(textual, "textual_answers", p),
              "source_answers": _index(source, "source_answers", p)}
