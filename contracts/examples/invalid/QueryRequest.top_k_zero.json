@@ -1,0 +1,14 @@
+{
+  "protocol_version": "1.0",
+  "request_id": "req_001",
+  "run_id": "run_001",
+  "question_id": "q_001",
+  "index_id": "idx_001",
+  "question": "依正式測試的高負載定義，哪個方案的 p99 延遲最低？",
+  "budget": {
+    "top_k": 0,
+    "max_evidence_tokens": 12000,
+    "max_visual_regions": 8,
+    "timeout_seconds": 180
+  }
+}

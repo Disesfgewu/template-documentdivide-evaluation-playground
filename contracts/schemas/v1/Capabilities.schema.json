@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "Modality": {
+      "enum": [
+        "text",
+        "table",
+        "image"
+      ],
+      "title": "Modality",
+      "type": "string"
+    }
+  },
+  "$id": "lab-contracts/v1/Capabilities.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "GET /v1/capabilities.",
+  "properties": {
+    "async_query": {
+      "title": "Async Query",
+      "type": "boolean"
+    },
+    "max_parallel_queries": {
+      "minimum": 1,
+      "title": "Max Parallel Queries",
+      "type": "integer"
+    },
+    "method_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Method Id",
+      "type": "string"
+    },
+    "multi_region": {
+      "title": "Multi Region",
+      "type": "boolean"
+    },
+    "protocol_version": {
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Revision",
+      "type": "string"
+    },
+    "supported_modalities": {
+      "items": {
+        "$ref": "#/$defs/Modality"
+      },
+      "minItems": 1,
+      "title": "Supported Modalities",
+      "type": "array"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "method_id",
+    "revision",
+    "supported_modalities",
+    "async_query",
+    "multi_region",
+    "max_parallel_queries"
+  ],
+  "title": "Capabilities",
+  "type": "object"
+}
