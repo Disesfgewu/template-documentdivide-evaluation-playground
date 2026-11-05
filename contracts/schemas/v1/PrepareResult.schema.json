@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "MethodRevisionRef": {
+      "additionalProperties": false,
+      "properties": {
+        "method_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Method Id",
+          "type": "string"
+        },
+        "revision": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method_id",
+        "revision"
+      ],
+      "title": "MethodRevisionRef",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/PrepareResult.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Terminal result of a succeeded prepare job.",
+  "properties": {
+    "document_hashes": {
+      "additionalProperties": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "maxLength": 128,
+        "minLength": 1
+      },
+      "title": "Document Hashes",
+      "type": "object"
+    },
+    "index_fingerprint": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Index Fingerprint",
+      "type": "string"
+    },
+    "index_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Index Id",
+      "type": "string"
+    },
+    "method_revision": {
+      "$ref": "#/$defs/MethodRevisionRef"
+    },
+    "stats": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stats"
+    },
+    "status": {
+      "const": "ready",
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "index_id",
+    "index_fingerprint",
+    "document_hashes",
+    "method_revision",
+    "status"
+  ],
+  "title": "PrepareResult",
+  "type": "object"
+}

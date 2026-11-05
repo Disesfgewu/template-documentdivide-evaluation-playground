@@ -1,0 +1,13 @@
+{
+  "index_id": "idx_001",
+  "index_fingerprint": "bm25:v1:bbbbbbbbbbbbbbbb",
+  "document_hashes": {},
+  "method_revision": {
+    "method_id": "m_bm25",
+    "revision": "r1"
+  },
+  "status": "ready",
+  "stats": {
+    "chunks": 1234
+  }
+}

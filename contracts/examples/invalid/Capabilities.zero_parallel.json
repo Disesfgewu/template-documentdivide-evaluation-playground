@@ -1,0 +1,12 @@
+{
+  "protocol_version": "1.0",
+  "method_id": "m_bm25",
+  "revision": "r1",
+  "supported_modalities": [
+    "text",
+    "table"
+  ],
+  "async_query": false,
+  "multi_region": true,
+  "max_parallel_queries": 0
+}
