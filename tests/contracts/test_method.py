@@ -35,15 +35,32 @@ def jsonl(*objs_or_raw):
 
 class QueryResponseTests(unittest.TestCase):
     def test_http_status_classes(self):
-        self.assertEqual(parse_query_response(b"{not json")[0], 400)
-        self.assertEqual(parse_query_response(b"\xff\xfe")[0], 400)
+        def status(body, req=None):
+            return parse_query_response(body, req)[0]
+        self.assertEqual(status(b"{not json"), 400)
+        self.assertEqual(status(b"\xff\xfe"), 400)                      # not UTF-8
+        self.assertEqual(status("{}".encode("utf-16")), 400)              # UTF-16 is not accepted
+        self.assertEqual(status(b"[" * 100_000), 400)                     # deep nesting, no crash
+        self.assertEqual(status(json.dumps(RESP).replace('"latency_ms": 1350', '"latency_ms": NaN').encode()), 400)
+        self.assertEqual(status(json.dumps(RESP).replace('"latency_ms": 1350', '"latency_ms": 1e999').encode()), 400)
+        dup = json.dumps(RESP)[:-1] + ', "status": "abstained"}'
+        self.assertEqual(status(dup.encode()), 400)                       # duplicate key
         bad = copy.deepcopy(RESP); bad["retrieved_hits"][1]["rank"] = 1
-        self.assertEqual(parse_query_response(json.dumps(bad).encode())[0], 422)
-        unknown = dict(RESP, score=1.0)
-        self.assertEqual(parse_query_response(json.dumps(unknown).encode())[0], 422)
-        code, model = parse_query_response(json.dumps(RESP).encode())
-        self.assertEqual(code, 200)
+        code, model, reasons = parse_query_response(json.dumps(bad).encode())
+        self.assertEqual((code, model, reasons), (422, None, ["schema_invalid"]))
+        self.assertEqual(status(json.dumps(dict(RESP, score=1.0)).encode()), 422)
+        with mock.patch.object(method, "MAX_QUERY_RESPONSE_BYTES", 100):
+            self.assertEqual(status(json.dumps(RESP).encode()), 413)
+        code, model, reasons = parse_query_response(json.dumps(RESP).encode())
+        self.assertEqual((code, reasons), (200, []))
         self.assertEqual(model.citations[1].hit_id, "h2")
+
+    def test_binding_enforced_when_request_given(self):
+        req = vj(QueryRequest, load("QueryRequest.spec_example"))
+        self.assertEqual(parse_query_response(json.dumps(RESP).encode(), req)[0], 200)
+        other = req.model_copy(update={"request_id": "req_999"})
+        self.assertEqual(parse_query_response(json.dumps(RESP).encode(), other)[:3:2],
+                         (422, ["request_id_mismatch"]))
 
     def test_binding_to_request(self):
         req = vj(QueryRequest, load("QueryRequest.spec_example"))
@@ -76,18 +93,23 @@ class QueryResponseTests(unittest.TestCase):
         r.update(retrieved_hits=[], citations=[])
         vj(QueryResponse, r)
 
-    def test_duplicate_claim_and_region_index(self):
+    def test_duplicate_claim_rejected_repeated_region_index_allowed(self):
         r = copy.deepcopy(RESP); r["answer"]["claims"][1]["claim_id"] = "c1"
-        with self.assertRaises(ValidationError):
+        with self.assertRaises(ValidationError) as cm:
             vj(QueryResponse, r)
+        self.assertIn("duplicate claim_id", str(cm.exception))
         r = copy.deepcopy(RESP); r["citations"][0]["region_indices"] = [0, 0]
-        with self.assertRaises(ValidationError):
-            vj(QueryResponse, r)
+        self.assertEqual(vj(QueryResponse, r).citations[0].region_indices, [0, 0])
 
     def test_limits(self):
         r = copy.deepcopy(RESP); r["answer"]["text"] = "x" * (method.MAX_ANSWER_CHARS + 1)
-        with self.assertRaises(ValidationError):
+        with self.assertRaises(ValidationError) as cm:
             vj(QueryResponse, r)
+        self.assertEqual(cm.exception.errors()[0]["type"], "string_too_long")
+        r = copy.deepcopy(RESP); r["retrieval_trace"] = [{}] * (method.MAX_TRACE_ENTRIES + 1)
+        with self.assertRaises(ValidationError) as cm:
+            vj(QueryResponse, r)
+        self.assertEqual(cm.exception.errors()[0]["type"], "too_long")
 
 
 class PrepareTests(unittest.TestCase):
@@ -112,40 +134,77 @@ class JobStatusTests(unittest.TestCase):
 
 
 class JsonlTests(unittest.TestCase):
+    def codes(self, body):
+        return [(r.status, r.code) for r, _ in parse_jsonl(body)]
+
     def test_lines_are_independent(self):
-        # T33: a bad line never pollutes the others.
+        # T33: a bad line never pollutes the others, and never crashes the batch.
         bad_rank = copy.deepcopy(LINE); bad_rank["response"]["retrieved_hits"][1]["rank"] = 1
         bad_rank["response"]["question_id"] = "q_002"
         q3 = copy.deepcopy(LINE); q3["response"]["question_id"] = "q_003"
-        results = parse_jsonl(jsonl(LINE, "{oops", bad_rank, q3))
+        nan = json.dumps(q3).replace('"latency_ms": 1350', '"latency_ms": NaN')
+        dup = json.dumps(q3)[:-1] + ', "run_id": "run_X"}'
+        results = parse_jsonl(jsonl(LINE, "{oops", bad_rank, "[" * 100_000, nan, dup, q3))
         self.assertEqual([(r.line, r.status, r.code) for r, _ in results], [
             (1, "accepted", None), (2, "rejected", "invalid_json"),
-            (3, "rejected", "schema_invalid"), (4, "accepted", None)])
+            (3, "rejected", "schema_invalid"), (4, "rejected", "invalid_json"),
+            (5, "rejected", "invalid_json"), (6, "rejected", "invalid_json"),
+            (7, "accepted", None)])
         self.assertIsInstance(results[0][1], SubmissionLine)
         self.assertIsNone(results[2][1])
 
-    def test_identical_resend_in_batch_is_idempotent_conflict_rejected(self):
+    def test_line_size_limit(self):
+        q2 = copy.deepcopy(LINE); q2["response"]["question_id"] = "q_002"
+        with mock.patch.object(method, "MAX_JSONL_LINE_BYTES", len(jsonl(LINE)) + 10):
+            q2["response"]["answer"]["text"] += "x" * 100
+            self.assertEqual(self.codes(jsonl(LINE, q2)), [("accepted", None), ("rejected", "line_too_large")])
+
+    def test_identical_resend_marked_conflict_rejected(self):
         changed = copy.deepcopy(LINE); changed["response"]["answer"]["text"] = "方案 A。"
         changed["response"]["answer"]["claims"] = []; changed["response"]["citations"] = []
         r = parse_jsonl(jsonl(LINE, LINE, changed))
-        self.assertEqual([x.status for x, _ in r], ["accepted", "accepted", "rejected"])
+        self.assertEqual([(x.status, x.code, x.duplicate_of) for x, _ in r],
+                         [("accepted", None, None), ("accepted", None, 1),
+                          ("rejected", "duplicate_in_batch", None)])
         self.assertEqual(r[0][0].payload_hash, r[1][0].payload_hash)
-        self.assertEqual(r[2][0].code, "duplicate_in_batch")
 
-    def test_payload_hash_is_canonical(self):
-        a = vj(SubmissionLine, LINE)
-        reordered = json.loads(json.dumps(LINE), object_pairs_hook=lambda p: dict(reversed(p)))
-        b = vj(SubmissionLine, reordered)
-        self.assertEqual(payload_hash(a), payload_hash(b))
-        self.assertRegex(payload_hash(a), r"^[0-9a-f]{64}$")
+    def test_batch_envelope_must_be_consistent(self):
+        other_run = copy.deepcopy(LINE); other_run["run_id"] = "run_002"
+        other_run["response"]["question_id"] = "q_002"
+        self.assertEqual(self.codes(jsonl(LINE, other_run)),
+                         [("accepted", None), ("rejected", "envelope_mismatch")])
+
+    def test_payload_hash_golden_vectors(self):
+        # Pinned: changing lab-c14n-1 must change CANONICAL_JSON_VERSION.
+        self.assertEqual(method.canonical_json({"b": 1.0, "a": [True, None, 0.5, "é"]}),
+                         '{"a":[true,null,0.5,"é"],"b":1}'.encode())
+        self.assertEqual(payload_hash({"b": 1, "a": 2}), payload_hash({"a": 2, "b": 1.0}))
+        self.assertEqual(payload_hash({"a": 1}),
+                         "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862")
+        self.assertNotEqual(payload_hash({"a": 1}), payload_hash({"a": 1.5}))
+        with self.assertRaises(ValueError):
+            method.canonical_json({"a": float("nan")})
+
+    def test_hash_is_of_raw_payload_not_model_dump(self):
+        # Omitting an optional field and sending null are different payloads;
+        # new optional model fields can never change an existing payload hash.
+        without = copy.deepcopy(LINE); without["response"].pop("telemetry")
+        with_null = copy.deepcopy(LINE); with_null["response"]["telemetry"] = None
+        r1 = parse_jsonl(jsonl(without))[0][0].payload_hash
+        r2 = parse_jsonl(jsonl(with_null))[0][0].payload_hash
+        self.assertEqual(r1, payload_hash(without))
+        self.assertNotEqual(r1, r2)
 
     def test_whole_batch_rejections(self):
+        bom = b"\xef\xbb\xbf" + jsonl(LINE)
         for body, status, code in ((b"\xff\xfe{}\n", 415, "invalid_encoding"),
-                                   ("﻿{}\n".encode(), 415, "invalid_encoding"),
-                                   (b"", 422, "empty_submission")):
-            with self.subTest(code=code), self.assertRaises(method.BatchRejected) as cm:
+                                   (bom, 415, "invalid_encoding"),
+                                   (b"", 422, "empty_submission"),
+                                   (b"\n\n \r\n", 422, "empty_submission")):
+            with self.subTest(code=code, body=body[:8]), self.assertRaises(method.BatchRejected) as cm:
                 parse_jsonl(body)
             self.assertEqual((cm.exception.http_status, cm.exception.code), (status, code))
+        self.assertEqual(self.codes(jsonl(LINE)), [("accepted", None)])  # same body without BOM
         with mock.patch.object(method, "MAX_JSONL_BYTES", 10), self.assertRaises(method.BatchRejected) as cm:
             parse_jsonl(jsonl(LINE))
         self.assertEqual(cm.exception.http_status, 413)
@@ -154,9 +213,9 @@ class JsonlTests(unittest.TestCase):
         self.assertEqual(cm.exception.code, "too_many_lines")
 
     def test_crlf_and_blank_line(self):
-        body = (json.dumps(LINE) + "\r\n\n").encode()
-        r = parse_jsonl(body)
-        self.assertEqual([(x.status, x.code) for x, _ in r], [("accepted", None), ("rejected", "invalid_json")])
+        q2 = copy.deepcopy(LINE); q2["response"]["question_id"] = "q_002"
+        body = (json.dumps(LINE) + "\r\n" + json.dumps(q2) + "\r\n\n").encode()
+        self.assertEqual(self.codes(body), [("accepted", None), ("accepted", None), ("rejected", "invalid_json")])
 
 
 if __name__ == "__main__":

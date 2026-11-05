@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import AwareDatetime, Field, StringConstraints, ValidationError, model_validator
+from pydantic import AfterValidator, AwareDatetime, Field, StringConstraints, ValidationError, model_validator
 
 from .api import ErrorBody
-from .base import Contract, ResourceId, Sha256
+from .base import Contract, ResourceId, Sha256, check_unique
 from .source import RegionKind, SourceRegion
 
 PROTOCOL_VERSION = "1.0"
@@ -33,20 +34,25 @@ MAX_CLAIMS = 200
 MAX_CITATIONS = 1_000
 MAX_JSONL_BYTES = 64 * 1024 * 1024
 MAX_JSONL_LINES = 10_000
+MAX_JSONL_LINE_BYTES = 4 * 1024 * 1024
+MAX_QUERY_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_TRACE_ENTRIES = 1_000
 
-ProtocolVersion = Annotated[str, StringConstraints(pattern=r"^[0-9]+\.[0-9]+$")]
+def _supported_version(v: str) -> str:
+    if v not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise ValueError(f"unsupported protocol_version (supported: {sorted(SUPPORTED_PROTOCOL_VERSIONS)})")
+    return v
+
+
+ProtocolVersion = Annotated[str, StringConstraints(pattern=r"^[0-9]+\.[0-9]+$"),
+                            AfterValidator(_supported_version)]
 NonNegInt = Annotated[int, Field(ge=0)]
 PosInt = Annotated[int, Field(ge=1)]
-Text = Annotated[str, StringConstraints(min_length=1)]
+# Non-empty and not whitespace-only.
+Text = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
 
 
-def _unique(values, what: str) -> None:
-    seen = set()
-    for v in values:
-        if v in seen:
-            shown = v.value if isinstance(v, Enum) else v
-            raise ValueError(f"duplicate {what}: {shown!r}")
-        seen.add(v)
+_unique = check_unique
 
 
 # --- 7.1 identity / capabilities -------------------------------------------------
@@ -165,9 +171,11 @@ class Hit(Contract):
     regions: Annotated[list[SourceRegion], Field(min_length=1, max_length=MAX_REGIONS_PER_HIT)]
 
     @model_validator(mode="after")
-    def _empty_content_needs_visual_region(self):
-        if self.content == "" and all(r.kind is RegionKind.text for r in self.regions):
-            raise ValueError("empty content requires at least one non-text (visual) region")
+    def _empty_content_needs_visual_regions(self):
+        # A "pure visual" hit: no text, and every region is non-text so LAB can
+        # re-crop it from the PDF. Whitespace-only content counts as empty.
+        if not self.content.strip() and any(r.kind is RegionKind.text for r in self.regions):
+            raise ValueError("empty content is only allowed when every region is non-text (visual)")
         return self
 
 
@@ -195,11 +203,11 @@ class QueryResponse(Contract):
     index_id: ResourceId
     status: Literal["answered", "abstained"]
     answer: Answer
-    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = None
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000, pattern=r"\S")]] = None
     retrieved_hits: Annotated[list[Hit], Field(max_length=MAX_HITS)]
     citations: Annotated[list[Citation], Field(max_length=MAX_CITATIONS)]
     telemetry: Optional[Telemetry] = None
-    retrieval_trace: Optional[list[dict[str, Any]]] = None
+    retrieval_trace: Optional[Annotated[list[dict[str, Any]], Field(max_length=MAX_TRACE_ENTRIES)]] = None
 
     @model_validator(mode="after")
     def _semantics(self):
@@ -226,7 +234,7 @@ class QueryResponse(Contract):
             hit = hits.get(cit.hit_id)
             if hit is None:
                 raise ValueError(f"citations[{i}].hit_id does not exist")
-            _unique(cit.region_indices, f"citations[{i}] region index")
+            # Repeated indices are allowed; the scorer de-duplicates (SPEC 16.5).
             if any(ix >= len(hit.regions) for ix in cit.region_indices):
                 raise ValueError(f"citations[{i}].region_indices out of range for hit")
         return self
@@ -284,25 +292,86 @@ class SubmissionLine(Contract):
 
 
 CANONICAL_JSON_VERSION = "lab-c14n-1"
+_MAX_SAFE_INT = 2 ** 53
+
+
+class StrictJSONError(ValueError):
+    """Body is not strict JSON: syntax, duplicate keys, NaN/Infinity, nesting."""
+
+
+def _reject_constant(name: str):
+    raise StrictJSONError(f"non-finite number {name}")
+
+
+def _finite_float(text: str) -> float:
+    v = float(text)
+    if not math.isfinite(v):  # e.g. 1e999 overflows to inf
+        raise StrictJSONError("number out of range")
+    return v
+
+
+def _no_duplicate_keys(pairs):
+    out = {}
+    for k, v in pairs:
+        if k in out:
+            raise StrictJSONError(f"duplicate key {k!r}")
+        out[k] = v
+    return out
+
+
+def strict_loads(text: str) -> Any:
+    """json.loads that rejects duplicate keys, NaN/Infinity and overflowing
+    numbers, and turns pathological nesting into StrictJSONError."""
+    try:
+        return json.loads(text, object_pairs_hook=_no_duplicate_keys,
+                          parse_constant=_reject_constant, parse_float=_finite_float)
+    except RecursionError:
+        raise StrictJSONError("nesting too deep") from None
+    except StrictJSONError:
+        raise
+    except ValueError as exc:
+        raise StrictJSONError(f"invalid JSON ({type(exc).__name__})") from None
+
+
+def _normalize(v: Any) -> Any:
+    if isinstance(v, bool) or v is None or isinstance(v, (int, str)):
+        return v
+    if isinstance(v, float):
+        # 1 and 1.0 are the same JSON number: integral floats hash as integers.
+        return int(v) if v.is_integer() and abs(v) < _MAX_SAFE_INT else v
+    if isinstance(v, list):
+        return [_normalize(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _normalize(x) for k, x in v.items()}
+    raise TypeError(f"not a JSON value: {type(v).__name__}")
 
 
 def canonical_json(value: Any) -> bytes:
-    """Locked canonicalization (lab-c14n-1): sorted keys, no whitespace,
-    UTF-8, non-finite numbers forbidden."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                      allow_nan=False).encode("utf-8")
+    """lab-c14n-1 (Python-defined, not RFC 8785 JCS): keys sorted by code
+    point, no whitespace, UTF-8, integral floats written as integers, other
+    floats as Python's shortest round-trip repr, non-finite numbers forbidden.
+    Changing any of this requires a new CANONICAL_JSON_VERSION."""
+    return json.dumps(_normalize(value), sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
-def payload_hash(model: Contract) -> str:
-    return hashlib.sha256(canonical_json(model.model_dump(mode="json"))).hexdigest()
+def payload_hash(raw_value: Any) -> str:
+    """Hash of the submitted JSON value exactly as sent (after strict parsing),
+    not of a model dump, so adding optional model fields never changes the
+    hash of an existing payload."""
+    return hashlib.sha256(canonical_json(raw_value)).hexdigest()
 
 
 class LineResult(Contract):
     line: PosInt
     status: Literal["accepted", "rejected"]
-    code: Optional[Literal["invalid_json", "schema_invalid", "duplicate_in_batch"]]
+    code: Optional[Literal["invalid_json", "line_too_large", "schema_invalid",
+                           "duplicate_in_batch", "envelope_mismatch"]]
     question_id: Optional[ResourceId]
     payload_hash: Optional[Sha256]
+    # Set on an identical resend inside the same batch: the earlier line that
+    # carries the same payload, so callers do not persist it twice.
+    duplicate_of: Optional[PosInt] = None
 
 
 class BatchRejected(Exception):
@@ -314,62 +383,94 @@ class BatchRejected(Exception):
         self.code = code
 
 
+_UTF8_BOM = "\ufeff"
+
+
+def _rejected(n: int, code: str, qid: Optional[str] = None, h: Optional[str] = None) -> LineResult:
+    return LineResult(line=n, status="rejected", code=code, question_id=qid, payload_hash=h)
+
+
 def parse_jsonl(body: bytes) -> list[tuple[LineResult, Optional[SubmissionLine]]]:
     """Validate an external submission. Each line is accepted or rejected on
-    its own (T33). Persisting, idempotency against stored payloads (same hash
-    -> same result, different hash -> 409) and the run lock are #5+."""
+    its own (T33); blank lines inside the body are rejected as invalid_json.
+    All accepted lines of one batch must share run/benchmark/method/document
+    binding. Persisting, idempotency against stored payloads (same hash ->
+    same result, different hash -> 409) and the run lock are #5+."""
     if len(body) > MAX_JSONL_BYTES:
         raise BatchRejected(413, "payload_too_large")
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
         raise BatchRejected(415, "invalid_encoding") from None
-    if text.startswith("﻿"):
+    if text.startswith(_UTF8_BOM):
         raise BatchRejected(415, "invalid_encoding")
-    lines = text.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    if not lines:
+    if not text.strip():
         raise BatchRejected(422, "empty_submission")
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
     if len(lines) > MAX_JSONL_LINES:
         raise BatchRejected(413, "too_many_lines")
 
     out: list[tuple[LineResult, Optional[SubmissionLine]]] = []
-    seen: dict[tuple[str, str], str] = {}
+    seen: dict[tuple[str, str], tuple[str, int]] = {}
+    envelope = None
     for n, raw in enumerate(lines, start=1):
         raw = raw.removesuffix("\r")
+        if len(raw.encode("utf-8")) > MAX_JSONL_LINE_BYTES:
+            out.append((_rejected(n, "line_too_large"), None))
+            continue
         try:
-            json.loads(raw)
-        except ValueError:
-            out.append((LineResult(line=n, status="rejected", code="invalid_json",
-                                   question_id=None, payload_hash=None), None))
+            value = strict_loads(raw)
+        except StrictJSONError:
+            out.append((_rejected(n, "invalid_json"), None))
             continue
         try:
             sub = SubmissionLine.model_validate_json(raw)
         except ValidationError:
-            out.append((LineResult(line=n, status="rejected", code="schema_invalid",
-                                   question_id=None, payload_hash=None), None))
+            out.append((_rejected(n, "schema_invalid"), None))
             continue
-        h = payload_hash(sub)
-        key = (sub.attempt_id, sub.response.question_id)
-        if key in seen and seen[key] != h:
-            out.append((LineResult(line=n, status="rejected", code="duplicate_in_batch",
-                                   question_id=sub.response.question_id, payload_hash=h), None))
+        qid = sub.response.question_id
+        h = payload_hash(value)
+        env = (sub.run_id, sub.benchmark_revision_id, sub.method_revision_id, sub.document_hashes)
+        if envelope is not None and env != envelope:
+            out.append((_rejected(n, "envelope_mismatch", qid, h), None))
             continue
-        seen[key] = h
-        out.append((LineResult(line=n, status="accepted", code=None,
-                               question_id=sub.response.question_id, payload_hash=h), sub))
+        key = (sub.attempt_id, qid)
+        if key in seen:
+            first_hash, first_line = seen[key]
+            if first_hash != h:
+                out.append((_rejected(n, "duplicate_in_batch", qid, h), None))
+                continue
+            out.append((LineResult(line=n, status="accepted", code=None, question_id=qid,
+                                   payload_hash=h, duplicate_of=first_line), sub))
+            continue
+        envelope = env
+        seen[key] = (h, n)
+        out.append((LineResult(line=n, status="accepted", code=None, question_id=qid,
+                               payload_hash=h), sub))
     return out
 
 
-def parse_query_response(body: bytes) -> tuple[int, Optional[QueryResponse]]:
-    """HTTP status a LAB endpoint returns for a method's query body:
-    400 not JSON, 422 schema/semantic error, 200 valid."""
+def parse_query_response(body: bytes, request: Optional[QueryRequest] = None
+                         ) -> tuple[int, Optional[QueryResponse], list[str]]:
+    """(HTTP status, model, reasons) for a method's query body:
+    413 too large, 400 not strict UTF-8 JSON, 422 schema/semantic error or a
+    response that does not echo the request identity, 200 valid."""
+    if len(body) > MAX_QUERY_RESPONSE_BYTES:
+        return 413, None, ["payload_too_large"]
     try:
-        json.loads(body)
-    except ValueError:
-        return 400, None
+        strict_loads(body.decode("utf-8"))
+    except UnicodeDecodeError:
+        return 400, None, ["invalid_encoding"]
+    except StrictJSONError:
+        return 400, None, ["invalid_json"]
     try:
-        return 200, QueryResponse.model_validate_json(body)
+        resp = QueryResponse.model_validate_json(body)
     except ValidationError:
-        return 422, None
+        return 422, None, ["schema_invalid"]
+    if request is not None:
+        mismatch = resp.check_binding(request)
+        if mismatch:
+            return 422, None, mismatch
+    return 200, resp, []

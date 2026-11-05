@@ -1,0 +1,34 @@
+{
+  "question_id": "q_002",
+  "evidence_sets": [
+    {
+      "set_id": "s1",
+      "evidence_ids": [
+        "e18",
+        "e247"
+      ]
+    }
+  ],
+  "fact_support_sets": [
+    {
+      "fact_id": "f1",
+      "support_sets": [
+        [
+          "e18"
+        ]
+      ]
+    },
+    {
+      "fact_id": "f2",
+      "support_sets": [
+        [
+          "e247"
+        ]
+      ]
+    }
+  ],
+  "distractors": [],
+  "validation_refs": [
+    "v_002"
+  ]
+}

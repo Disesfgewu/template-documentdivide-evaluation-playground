@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "RegionKind": {
+      "enum": [
+        "text",
+        "table",
+        "figure",
+        "image",
+        "formula",
+        "page"
+      ],
+      "title": "RegionKind",
+      "type": "string"
+    },
+    "SourceRegion": {
+      "additionalProperties": false,
+      "description": "A region on one physical PDF page. Origin top-left after applying page\nrotation, normalized to the visible CropBox.",
+      "properties": {
+        "bbox": {
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "ge": 0.0,
+              "le": 1.0,
+              "type": "number"
+            },
+            {
+              "ge": 0.0,
+              "le": 1.0,
+              "type": "number"
+            },
+            {
+              "ge": 0.0,
+              "le": 1.0,
+              "type": "number"
+            },
+            {
+              "ge": 0.0,
+              "le": 1.0,
+              "type": "number"
+            }
+          ],
+          "title": "Bbox",
+          "type": "array"
+        },
+        "document_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Document Id",
+          "type": "string"
+        },
+        "document_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Document Sha256",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RegionKind"
+        },
+        "page_index": {
+          "minimum": 0,
+          "title": "Page Index",
+          "type": "integer"
+        },
+        "page_label": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Label"
+        },
+        "quote": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Quote"
+        }
+      },
+      "required": [
+        "document_id",
+        "document_sha256",
+        "page_index",
+        "bbox",
+        "kind",
+        "quote"
+      ],
+      "title": "SourceRegion",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/EvidenceUnit.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "asset_refs": {
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Asset Refs",
+      "type": "array"
+    },
+    "evidence_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "extractor_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Extractor Revision",
+      "type": "string"
+    },
+    "normalized_content": {
+      "title": "Normalized Content",
+      "type": "string"
+    },
+    "ocr_confidence": {
+      "anyOf": [
+        {
+          "ge": 0.0,
+          "le": 1.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ocr Confidence"
+    },
+    "raw_content": {
+      "title": "Raw Content",
+      "type": "string"
+    },
+    "regions": {
+      "items": {
+        "$ref": "#/$defs/SourceRegion"
+      },
+      "minItems": 1,
+      "title": "Regions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "evidence_id",
+    "regions",
+    "raw_content",
+    "normalized_content",
+    "extractor_revision",
+    "ocr_confidence",
+    "asset_refs"
+  ],
+  "title": "EvidenceUnit",
+  "type": "object"
+}

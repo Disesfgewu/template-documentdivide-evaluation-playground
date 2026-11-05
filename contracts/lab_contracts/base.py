@@ -1,6 +1,7 @@
 """Base types shared by every contract (SPEC 16.1)."""
 import json
 import math
+from enum import Enum
 from typing import Annotated, Any
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints
@@ -40,3 +41,13 @@ class Contract(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
+
+
+def check_unique(values, what: str) -> None:
+    """Raise ValueError naming the first duplicate (enum members shown by value)."""
+    seen = set()
+    for v in values:
+        if v in seen:
+            shown = v.value if isinstance(v, Enum) else v
+            raise ValueError(f"duplicate {what}: {shown!r}")
+        seen.add(v)

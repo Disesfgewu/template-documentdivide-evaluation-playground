@@ -1,0 +1,11 @@
+{
+  "evidence_id": "e247",
+  "regions": [],
+  "raw_content": "正式高負載測試 p99：A=18 ms，B=12 ms，C=21 ms。",
+  "normalized_content": "正式高負載測試 p99：A=18 ms，B=12 ms，C=21 ms。",
+  "extractor_revision": "unstructured@0.1",
+  "ocr_confidence": null,
+  "asset_refs": [
+    "asset_e247"
+  ]
+}

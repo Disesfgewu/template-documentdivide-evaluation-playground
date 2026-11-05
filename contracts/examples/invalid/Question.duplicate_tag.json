@@ -1,0 +1,20 @@
+{
+  "question_id": "q_002",
+  "ordinal": 1,
+  "question_text": "依正式測試的高負載定義，哪個方案的 p99 延遲最低？",
+  "language": "zh-Hant",
+  "tags": [
+    "a",
+    "a"
+  ],
+  "quota_bucket": "cross_page",
+  "question_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+  "modality_requirements": [
+    "text",
+    "table"
+  ],
+  "reasoning_type": "cross_page_integration",
+  "visual_object_refs": [
+    "asset_e247"
+  ]
+}

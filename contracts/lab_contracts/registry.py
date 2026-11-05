@@ -1,4 +1,6 @@
 """Exported schema registry: name -> model. Adding a contract = add it here."""
+from .benchmark import (BenchmarkManifest, EvidenceUnit, Question, SemanticAnswer, SourceAnswer,
+                        TextualAnswer, ValidationRecord)
 from .api import ErrorResponse, Page, PageRequest
 from .method import (AsyncAccepted, Capabilities, JobStatus, PrepareRequest, PrepareResult,
                      QueryRequest, QueryResponse, SubmissionLine)
@@ -17,4 +19,11 @@ MODELS = {
     "AsyncAccepted": AsyncAccepted,
     "JobStatus": JobStatus,
     "SubmissionLine": SubmissionLine,
+    "Question": Question,
+    "SemanticAnswer": SemanticAnswer,
+    "TextualAnswer": TextualAnswer,
+    "SourceAnswer": SourceAnswer,
+    "EvidenceUnit": EvidenceUnit,
+    "ValidationRecord": ValidationRecord,
+    "BenchmarkManifest": BenchmarkManifest,
 }
