@@ -262,14 +262,9 @@
     "message": "ranks must be exactly 1..n without duplicates or gaps",
     "type": "value_error"
   },
-  "QueryResponse.empty_content_mixed_regions.json": {
-    "loc": "retrieved_hits.0",
-    "message": "empty content is only allowed when every region is non-text (visual)",
-    "type": "value_error"
-  },
   "QueryResponse.empty_text_hit.json": {
     "loc": "retrieved_hits.0",
-    "message": "empty content is only allowed when every region is non-text (visual)",
+    "message": "empty content requires at least one visual region (image/figure/table/page/formula)",
     "type": "value_error"
   },
   "QueryResponse.hit_without_regions.json": {

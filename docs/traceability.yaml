@@ -1393,11 +1393,15 @@ acceptance:
   note: null
 - id: A18
   title: 嘗試讀取 gold
-  owners: []
+  owners:
+  - 5
+  - 11
+  - 14
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
 - id: A19
   title: bbox、頁碼或文件 hash 錯誤
   owners:
@@ -1416,88 +1420,129 @@ acceptance:
   note: null
 - id: A21
   title: 分數血緣查詢
-  owners: []
+  owners:
+  - 5
+  - 6
+  - 12
+  - 13
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
 - id: A22
   title: audit/outbox 寫入故障
-  owners: []
+  owners:
+  - 5
+  - 14
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
 - id: A23
   title: 外部呼叫後中斷
-  owners: []
+  owners:
+  - 6
+  - 14
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 6
 - id: A24
   title: 跨服務執行
-  owners: []
+  owners:
+  - 6
+  - 13
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 6
 - id: A25
   title: 修改凍結結果
-  owners: []
+  owners:
+  - 5
+  - 10
+  - 12
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
 - id: A26
   title: Log 查詢與匯出
-  owners: []
+  owners:
+  - 6
+  - 13
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 6
 - id: A27
   title: collector 中斷及重送
-  owners: []
+  owners:
+  - 6
+  - 14
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 6
 - id: A28
   title: log 含敏感內容
-  owners: []
+  owners:
+  - 5
+  - 6
+  - 14
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
 - id: A29
   title: 備份還原
-  owners: []
+  owners:
+  - 14
+  - 5
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 14
 - id: A30
   title: 清理 DEBUG
-  owners: []
+  owners:
+  - 14
+  - 6
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 14
 - id: A31
   title: artifact 提交中斷
-  owners: []
+  owners:
+  - 5
+  - 14
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
 - id: A32
   title: 快取命中
-  owners: []
+  owners:
+  - 10
+  - 5
+  - 6
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 10
 - id: A33
   title: graph checkpoint 失敗後重啟
   owners:
@@ -1572,11 +1617,15 @@ acceptance:
   note: null
 - id: A42
   title: 建置與實際整合
-  owners: []
+  owners:
+  - 3
+  - 6
+  - 11
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 3
 - id: A43
   title: Unstructured／MinerU 均有固定版 adapter 與真解析證據
   owners:
@@ -1620,8 +1669,12 @@ acceptance:
   note: null
 - id: A48
   title: 真 parser＋vision／DB 流程及資源用量可重現
-  owners: []
+  owners:
+  - 14
+  - 8
+  - 9
   release_owner: 15
   status: not_started
   evidence: []
-  note: 'unassigned：Issue #2–#14 都沒有列出此項，只有 #15 發布驗收涵蓋；已請 PM 指派。'
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 14

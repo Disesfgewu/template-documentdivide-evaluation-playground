@@ -105,6 +105,7 @@
       },
       "Citation": {
         "additionalProperties": false,
+        "description": "region_indices may repeat (PM #4 Q1): accepted as submitted, and\n``normalized_region_indices`` gives the de-duplicated order-preserving\nform scorers must use, so repeats never add coverage or dilute errors.\nThe payload hash is always computed over the original submission.",
         "properties": {
           "claim_id": {
             "maxLength": 128,
