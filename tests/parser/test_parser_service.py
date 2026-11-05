@@ -35,6 +35,17 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cli.main(["check-config"]), 1)
         self.assertEqual(cli.main([]), 2)
 
+    def test_errors_never_echo_values(self):
+        marker = "synthetic-value-zz"
+        env = {"LAB_PARSER_ENV": f"staging-{marker}", "LAB_PARSER_ARTIFACT_ROOT": f"rel/{marker}"}
+        with mock.patch.dict(os.environ, env, clear=True), self.assertRaises(ConfigError) as cm:
+            load_settings()
+        msg = str(cm.exception)
+        self.assertNotIn(marker, msg)
+        self.assertIn("LAB_PARSER_ENV: is not an allowed value", msg)
+        self.assertIn("LAB_PARSER_ARTIFACT_ROOT: must be an absolute path", msg)
+        self.assertIsNone(cm.exception.__cause__)
+
 
 class EndpointTests(unittest.TestCase):
     def test_health_and_ready(self):
