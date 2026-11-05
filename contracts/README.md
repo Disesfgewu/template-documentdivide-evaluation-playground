@@ -72,4 +72,6 @@ scripts/check.sh --scope contracts
   - partial、blocked 必須附證據與說明；passed 必須附 main 上的 commit 與 CI run。
   - 契約層測試最多只能讓項目成為 partial。
 
-尚未完成（後續增量）：OpenAPI 匯出、fixture registry（帶 hash 與手核 golden）、submission/scoring。
+Fixture registry 見 `fixtures/registry.yaml`、`docs/TESTING.md`。
+
+尚未完成（後續增量）：OpenAPI 匯出、F02–F12 fixtures、F01 素材充分版本、submission/scoring。

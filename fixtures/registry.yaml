@@ -1,0 +1,148 @@
+_about: 'Fixture registry（SPEC 17.1、19.8）。status: planned | partial | available。partial/available 必須列出 license、items（產生器＋參數＋sha256 或固定檔＋sha256）、expected 與 golden 來源。golden.origin 只能是 human、script 或 spec_table，不得由待測模型產生。二進位檔由產生器重建，不提交。'
+fixtures:
+- id: F01
+  title: 1/19/20/21/500/600 頁 PDF，包含素材充分及不足版本
+  status: partial
+  license: 合成資料，由本 repo 的 fixtures/generators/synthetic_pdf.py 產生（repo LICENSE）
+  items:
+  - id: F01.pages_1
+    generator: fixtures.generators.synthetic_pdf
+    args:
+    - 1
+    sha256: 109f3cd5d16e59b752f01e3d83e5e54b4088e33052da19caf3fcbc53fa927851
+  - id: F01.pages_19
+    generator: fixtures.generators.synthetic_pdf
+    args:
+    - 19
+    sha256: 871a74c6521461741d85f61b253b5d6dab126503ed9c12db17b3acee7d389010
+  - id: F01.pages_20
+    generator: fixtures.generators.synthetic_pdf
+    args:
+    - 20
+    sha256: 05e844bb0816f053e4e2e6a7be7e8323dd1523a940b160cf4efe093c88a7b527
+  - id: F01.pages_21
+    generator: fixtures.generators.synthetic_pdf
+    args:
+    - 21
+    sha256: 30e226f78c3f8a317940bb2ce329cfa27dc99438ff1f46ad3ec52155d3ce9d42
+  - id: F01.pages_500
+    generator: fixtures.generators.synthetic_pdf
+    args:
+    - 500
+    sha256: bd5d02b111e98e49a67ef0acb57220057f6bf373a30ee7c297e81709c82c312a
+  - id: F01.pages_600
+    generator: fixtures.generators.synthetic_pdf
+    args:
+    - 600
+    sha256: d931ad08a5cd531b36e14c12ce5411ceda80bf2ab0e6e3b147b64e59e50b90ad
+  expected: fixtures/F01/expected.json
+  golden:
+    origin: spec_table
+    review:
+      human: false
+      by: coding-agent
+      date: '2026-11-05'
+      method: expected.json 由 SPEC T14 表格手抄；頁數另以 pypdf 獨立讀回確認
+      note: 尚待人工覆核
+  missing:
+  - '素材充分版本（需含圖表、跨頁與相似段落的真實內容；屬 #7/#10）'
+  - 目前只有純文字的「素材不足」版本
+- id: F02
+  title: 掃描/文字混合、雙欄、旋轉 90/180/270、不同 CropBox、印刷頁碼、中英文 Unicode
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F03
+  title: 跨頁表、合併 cell、重複 header、圖例、單位、圖說無法獨立答題的圖表
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F04
+  title: 相鄰/遠距/跨章節證據、相似段落不同年份/條件、有效替代來源
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F05
+  title: 空/假/損壞/加密/超限 PDF、文件內含指令注入測試字串
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F06
+  title: 手算可驗證答案與 hit/citation，錯頁/錯單位/空答案/重複/預算邊界
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F07
+  title: 已知向量、同維度異模型、錯維度、零/非有限值、tie、跨專案資料
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F08
+  title: 舊資料庫快照、frozen 資料、原始 log/journal/seal、缺失及損壞 session
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F09
+  title: 兩種切割方法、同步/非同步 adapter、等價 JSONL 與上游錯誤
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F10
+  title: 人工核對的柱/線/散點、雙軸、log、倍率、誤差棒、低解析度、多子圖、圖例缺失、向量繪圖、照片與流程圖（SPEC 19.8）
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F11
+  title: 跨批次續表、跨頁斷裂 cell、合併 header、同模板異年份、重複圖號跨章節、遠距條件/例外（SPEC 19.8）
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立
+- id: F12
+  title: 兩工具鎖版原始輸出、enrichment 前後文字、缺座標/缺資產、未知 schema 與受控 parser 失敗（SPEC 19.8）
+  status: planned
+  license: null
+  items: []
+  expected: null
+  golden: null
+  missing:
+  - 尚未建立

@@ -14,6 +14,7 @@ scripts/check.sh --scope all     # 全部 suite（main push / 發布 gate 使用
 - `parser`：parser service 設定、`/healthz`、`/readyz`、`/v1/capabilities`（不宣稱 adapter 可用），需 `pip install -r services/parser/requirements.lock`。
 - `web`：React 前端（`web/`）的 `npm ci`（lockfile 鎖版，`engine-strict`）、vitest、`tsc` 型別檢查與 production build，需 Node.js 22.12 以上。沒有 node/npm 時印 `BLOCKED` 並以 exit 3 失敗。
 - `contracts`：`contracts/` 版本化資料契約（pydantic 模型）。驗證合法與非法範例，並檢查 `schemas/v1` 和模型沒有漂移。需 `pip install -r contracts/requirements.lock`。詳見 `contracts/README.md`。
+- `fixtures`：`fixtures/registry.yaml` 登錄 F01–F12。partial/available 的項目會由產生器重建，並比對固定的 sha256；golden 來源不得是模型輸出；available 必須有人工覆核紀錄。F01 目前有 1/19/20/21/500/600 頁的合成 PDF，只有純文字的素材不足版本，並以 pypdf 讀回頁數驗證 T14。
 - `governance` 也會跑 `tools.governance.check_traceability`：`docs/traceability.yaml` 必須涵蓋 SPEC 全部 R/T/A 編號；status 只能是 not_started、partial、blocked、passed；passed 必須有 main commit 與 CI run 證據。
 - `governance`（必要檔、PR/Issue templates、workflow 無空 job/`continue-on-error`/`|| true`、CODEOWNERS 身份核實、相對連結、密鑰樣式掃描、branch 清理判定）。後續 Issue 新增應用程式 suite 時需在 `scripts/check.sh` 註冊並對應路徑。
 - 本文件不代表 T01–T104 已執行；各 PR 驗證表須列實際指令、SHA 與結果。

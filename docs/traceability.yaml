@@ -401,7 +401,11 @@ tests:
     branch: issue-4-contracts
     tests:
     - tests/contracts/test_benchmark.py::TargetCountTests.test_t14_table
-  note: 'N/Q 計算（U）已測；配額整合（I）在 #10。'
+  - scope: fixture
+    branch: issue-4-contracts
+    tests:
+    - tests/fixtures/test_registry.py::F01Tests.test_t14_from_generated_pdfs
+  note: 'N/Q 計算（U）已測，並以 F01 合成 PDF（pypdf 讀回頁數）對照 SPEC 表格；配額整合（I）在 #10。'
 - id: T15
   title: 同題多 tags、重複題灌配額
   owners:

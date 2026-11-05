@@ -4,3 +4,5 @@ __pycache__/
 .lab-artifacts/
 web/node_modules/
 web/dist/
+# Generated fixture binaries are reproduced from fixtures/registry.yaml, never committed.
+fixtures/**/*.pdf
