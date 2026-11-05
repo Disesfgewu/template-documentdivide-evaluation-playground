@@ -113,7 +113,9 @@ CREATE TABLE artifacts (
     tombstoned_at   timestamptz,
     tombstone_reason text,
     UNIQUE (project_id, id),
-    UNIQUE (object_key, object_version),
+    -- Content-addressed objects may be shared by several projects; each
+    -- project registers its own row (its own retention and permissions).
+    UNIQUE (project_id, object_key, object_version),
     CHECK (state <> 'staged' OR (committed_at IS NULL AND tombstoned_at IS NULL)),
     CHECK (state = 'staged' OR committed_at IS NOT NULL),
     CHECK ((state = 'tombstoned') = (tombstoned_at IS NOT NULL)),

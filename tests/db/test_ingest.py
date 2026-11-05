@@ -221,6 +221,10 @@ class IngestDocumentTests(FreshDatabase):
                 pages=pages,
             )
             self.assertNotEqual(doc_id_1, doc_id_2)
+            # Same bytes in the same project reuse one committed artifact row.
+            arts = conn.execute("SELECT artifact_id FROM document_versions WHERE id = ANY(%s)",
+                                ([doc_id_1, doc_id_2],)).fetchall()
+            self.assertEqual(len({a[0] for a in arts}), 1)
 
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
@@ -277,7 +281,7 @@ class IngestDocumentTests(FreshDatabase):
                     )
                     self.assertEqual(cur.fetchone()["cnt"], 0, f"expected 0 rows in {table}")
 
-                cur.execute("SELECT count(*) AS cnt FROM pages")
+                cur.execute("SELECT count(*) AS cnt FROM pages p JOIN document_versions dv ON dv.id = p.document_version_id WHERE dv.project_id = %s", (project_id,))
                 self.assertEqual(cur.fetchone()["cnt"], 0)
 
                 cur.execute(
@@ -493,7 +497,7 @@ class IngestDocumentTests(FreshDatabase):
                     )
                     self.assertEqual(cur.fetchone()["cnt"], 0, f"expected 0 rows in {table}")
 
-                cur.execute("SELECT count(*) AS cnt FROM pages")
+                cur.execute("SELECT count(*) AS cnt FROM pages p JOIN document_versions dv ON dv.id = p.document_version_id WHERE dv.project_id = %s", (project_id,))
                 self.assertEqual(cur.fetchone()["cnt"], 0)
 
     def test_pages_write_failure_rolls_back_resource_and_document_version(self) -> None:
@@ -558,7 +562,7 @@ class IngestDocumentTests(FreshDatabase):
                     )
                     self.assertEqual(cur.fetchone()["cnt"], 0, f"expected 0 rows in {table}")
 
-                cur.execute("SELECT count(*) AS cnt FROM pages")
+                cur.execute("SELECT count(*) AS cnt FROM pages p JOIN document_versions dv ON dv.id = p.document_version_id WHERE dv.project_id = %s", (project_id,))
                 self.assertEqual(cur.fetchone()["cnt"], 0)
 
                 cur.execute(

@@ -130,8 +130,27 @@ def store_and_register(
     mime: str,
     retention: str = "restricted",
 ) -> uuid.UUID:
-    """Write ``data`` to ``store``, stage in DB, verify on disk, and commit."""
+    """Write ``data`` to ``store``, stage in DB, verify on disk, and commit.
+
+    Idempotent per project: the same bytes already committed in this
+    project return the existing artifact row (content-addressed key)."""
     stored = store.put(data)
+    existing = conn.execute(
+        "SELECT id, state::text, sha256 FROM artifacts "
+        "WHERE project_id = %s AND object_key = %s AND object_version = %s",
+        (project_id, stored.object_key, stored.object_version),
+    ).fetchone()
+    if existing is not None:
+        art_id, state, sha = existing
+        if sha != stored.sha256:
+            raise StorageCorruption(f"artifact {art_id} registered with a different sha256")
+        if state == "committed":
+            return art_id
+        if state == "staged":
+            observed_sha256, observed_size = store.verify(stored.object_key)
+            commit(conn, art_id, observed_sha256, observed_size)
+            return art_id
+        raise ValueError(f"artifact {art_id} is {state}; register new bytes instead")
     artifact_id = stage(
         conn,
         project_id,

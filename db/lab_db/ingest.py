@@ -135,27 +135,12 @@ def _record_rejection(
             "VALUES (%s, %s, 'document.import', %s, 'failed')",
             (op_id, project_id, actor_id),
         )
-        id_col = conn.execute(
-            "SELECT data_type, column_default, is_identity "
-            "FROM information_schema.columns "
-            "WHERE table_schema = 'public' "
-            "AND table_name = 'audit_events' "
-            "AND column_name = 'id'"
-        ).fetchone()
-        if id_col is not None and id_col[0] == "uuid" and id_col[1] is None and id_col[2] == "NO":
-            conn.execute(
-                "INSERT INTO audit_events "
-                "(id, project_id, actor_id, operation_id, action, resource_type, resource_id, outcome, reason) "
-                "VALUES (%s, %s, %s, %s, 'document.rejected', 'document_version', NULL, 'failed', %s)",
-                (uuid.uuid4(), project_id, actor_id, op_id, reason),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO audit_events "
-                "(project_id, actor_id, operation_id, action, resource_type, resource_id, outcome, reason) "
-                "VALUES (%s, %s, %s, 'document.rejected', 'document_version', NULL, 'failed', %s)",
-                (project_id, actor_id, op_id, reason),
-            )
+        conn.execute(
+            "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, "
+            "reason, outcome, operation_id) "
+            "VALUES (%s, %s, %s, 'document.rejected', 'document_version', NULL, %s, 'failed', %s)",
+            (uuid.uuid4(), project_id, actor_id, reason, op_id),
+        )
 
 
 def _insert_pages(
