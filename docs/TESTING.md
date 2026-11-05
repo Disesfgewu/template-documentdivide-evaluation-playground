@@ -15,7 +15,7 @@ scripts/check.sh --scope all     # 全部 suite（main push / 發布 gate 使用
 
 ```bash
 python3 -m tools.governance.branch_cleanup --repo Disesfgewu/template-documentdivide-evaluation-playground --pr <N>            # dry run
-python3 -m tools.governance.branch_cleanup --repo Disesfgewu/template-documentdivide-evaluation-playground --pr <N> --execute  # 刪除前重查
+python3 -m tools.governance.branch_cleanup --repo Disesfgewu/template-documentdivide-evaluation-playground --pr <N> --execute  # SHA lease 刪除（git push --force-with-lease），刪後以 ls-remote 與 API 驗證；失敗回 cleanup_pending（exit 2）
 ```
 
 僅當 PR merged、同 repo、非 default/main/protected、目前 branch head 等於該 PR head、且無其他 open PR 以其為 head/base 時才刪除；否則輸出 `cleanup_pending` 與原因，exit 2。
