@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts fixtures db)
+SUITES=(governance api api-db worker parser web contracts fixtures db db-unit)
 scope=auto
 base=origin/main
 selected=()
@@ -35,7 +35,9 @@ suite_for_base() {
     web/*) echo web;;
     contracts/*|tests/contracts/*) echo "contracts fixtures";;
     fixtures/*|tests/fixtures/*) echo fixtures;;
-    db/*|tests/db/*) echo db;;
+    db/*) echo "db db-unit";;
+    tests/db/*) echo db;;
+    tests/dbunit/*) echo db-unit;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -73,6 +75,10 @@ run_suite() {
         return 3
       fi
       (cd web && node --version && npm ci && npm test && npm run build)
+      ;;
+    db-unit)
+      # lab_db code that needs no database (e.g. export, redaction).
+      PYTHONPATH=db python3 -m tools.governance.run_tests tests/dbunit
       ;;
     db)
       # Migrations, constraints, transactions on real PostgreSQL. Missing DB = BLOCKED.
