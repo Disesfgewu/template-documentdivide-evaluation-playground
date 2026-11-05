@@ -1,0 +1,25 @@
+{
+  "$id": "lab-contracts/v1/AsyncAccepted.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "202 body for prepare and async query.",
+  "properties": {
+    "job_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Job Id",
+      "type": "string"
+    },
+    "poll_after_ms": {
+      "minimum": 0,
+      "title": "Poll After Ms",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "job_id",
+    "poll_after_ms"
+  ],
+  "title": "AsyncAccepted",
+  "type": "object"
+}

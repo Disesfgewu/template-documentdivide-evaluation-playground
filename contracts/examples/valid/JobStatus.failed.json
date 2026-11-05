@@ -1,0 +1,13 @@
+{
+  "job_id": "job_3",
+  "kind": "query",
+  "status": "failed",
+  "progress": 0.4,
+  "error": {
+    "code": "upstream_timeout",
+    "message": "parser timed out",
+    "retryable": true,
+    "request_id": "req_p1",
+    "details": {}
+  }
+}

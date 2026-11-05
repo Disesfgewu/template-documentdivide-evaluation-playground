@@ -5,8 +5,10 @@ from pathlib import Path
 
 from . import SCHEMA_VERSION
 from .registry import MODELS
+from . import openapi
 
 OUT = Path(__file__).resolve().parent.parent / "schemas" / SCHEMA_VERSION
+OPENAPI = Path(__file__).resolve().parent.parent / "openapi" / "method-service.v1.json"
 
 
 def render(name, model) -> str:
@@ -19,6 +21,13 @@ def render(name, model) -> str:
 def main(argv) -> int:
     check = "--check" in argv[1:]
     expected = {f"{n}.schema.json": render(n, m) for n, m in MODELS.items()}
+    openapi_text = json.dumps(openapi.build(), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    if check and (not OPENAPI.is_file() or OPENAPI.read_text() != openapi_text):
+        print(f"openapi drift (run python -m lab_contracts.export): {OPENAPI.name}", file=sys.stderr)
+        return 1
+    if not check:
+        OPENAPI.parent.mkdir(parents=True, exist_ok=True)
+        OPENAPI.write_text(openapi_text)
     if check:
         actual = {p.name for p in OUT.glob("*.schema.json")}
         bad = sorted(set(expected) ^ actual)
