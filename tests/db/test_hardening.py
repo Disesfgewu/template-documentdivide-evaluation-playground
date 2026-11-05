@@ -935,7 +935,9 @@ class TestIntegrityHardening(FreshDatabase):
                     ("queued", "running", 10, "unspecified"),
                     ("running", "running", 20, "takeover"),
                     ("running", "queued", 20, "takeover"),
-                    ("queued", "running", 21, "takeover"),
+                    # Separate transaction without its own reason: the
+                    # previous transaction-local reason must not leak.
+                    ("queued", "running", 21, "unspecified"),
                 ],
             )
 

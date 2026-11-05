@@ -11,7 +11,7 @@ import uuid
 
 import psycopg
 
-from .artifacts import ArtifactError, commit
+from .artifacts import ArtifactError, InvalidState, commit
 
 _OBJECT_KEY_RE = re.compile(r"\Asha256/([0-9a-f]{2})/([0-9a-f]{64})\Z")
 
@@ -141,73 +141,58 @@ def store_and_register(
     mime: str,
     retention: str = "restricted",
 ) -> uuid.UUID:
-    """Write ``data`` to ``store``, stage in DB via atomic upsert, verify on disk, and commit.
+    """Write ``data`` to ``store``, register it as staged, verify on disk, commit.
 
-    Idempotent per project when ``mime`` and ``retention`` match: the same bytes
-    already committed in this project return the existing artifact row.
+    Two phases: the staged row is registered (race-free upsert) in its own
+    transaction, then verified and committed under a row lock. A checksum
+    mismatch therefore leaves the staged row in place for grace-period GC
+    instead of an untracked file. Idempotent per project when ``mime`` and
+    ``retention`` match; a mismatch raises instead of silently downgrading.
     """
     stored = store.put(data)
-    candidate_id = uuid.uuid4()
     with conn.transaction():
-        inserted = conn.execute(
+        conn.execute(
             """
-            INSERT INTO artifacts (
-                id, project_id, object_key, object_version,
-                sha256, size_bytes, mime, state, retention
-            )
+            INSERT INTO artifacts (id, project_id, object_key, object_version,
+                                   sha256, size_bytes, mime, state, retention)
             VALUES (%s, %s, %s, %s, %s, %s, %s, 'staged', %s)
             ON CONFLICT (project_id, object_key, object_version) DO NOTHING
-            RETURNING id
             """,
-            (
-                candidate_id,
-                project_id,
-                stored.object_key,
-                stored.object_version,
-                stored.sha256,
-                stored.size_bytes,
-                mime,
-                retention,
-            ),
-        ).fetchone()
-
-        if inserted is not None:
-            art_id = inserted[0]
-            observed_sha256, observed_size = store.verify(stored.object_key)
-            commit(conn, art_id, observed_sha256, observed_size)
-            return art_id
-
-        existing = conn.execute(
+            (uuid.uuid4(), project_id, stored.object_key, stored.object_version,
+             stored.sha256, stored.size_bytes, mime, retention),
+        )
+    with conn.transaction():
+        row = conn.execute(
             """
-            SELECT id, state::text, sha256, mime, retention
-            FROM artifacts
+            SELECT id, state::text, sha256, mime, retention FROM artifacts
             WHERE project_id = %s AND object_key = %s AND object_version = %s
             FOR UPDATE
             """,
             (project_id, stored.object_key, stored.object_version),
         ).fetchone()
-        if existing is None:
+        if row is None:
             raise StorageCorruption(
-                f"concurrent artifact row disappeared for ({project_id}, {stored.object_key}, {stored.object_version})"
-            )
-
-        art_id, state, sha, existing_mime, existing_retention = existing
+                f"artifact row for ({project_id}, {stored.object_key}) disappeared after registration")
+        art_id, state, sha, existing_mime, existing_retention = row
         if sha != stored.sha256:
-            raise StorageCorruption(
-                f"artifact {art_id} registered with a different sha256"
-            )
+            raise StorageCorruption(f"artifact {art_id} registered with a different sha256")
         if existing_mime != mime:
-            raise ValueError(
-                f"artifact {art_id} mime mismatch: existing {existing_mime!r} != requested {mime!r}"
-            )
+            raise ValueError(f"artifact {art_id} mime mismatch: existing {existing_mime!r} != requested {mime!r}")
         if existing_retention != retention:
             raise ValueError(
-                f"artifact {art_id} retention mismatch: existing {existing_retention!r} != requested {retention!r}"
-            )
+                f"artifact {art_id} retention mismatch: existing {existing_retention!r} != requested {retention!r}")
         if state == "committed":
             return art_id
-        if state == "staged":
-            observed_sha256, observed_size = store.verify(stored.object_key)
-            commit(conn, art_id, observed_sha256, observed_size)
-            return art_id
-        raise ValueError(f"artifact {art_id} is {state}; register new bytes instead")
+        if state != "staged":
+            raise ValueError(f"artifact {art_id} is {state}; register new bytes instead")
+    # Verify outside the lock-holding transaction's error path: a mismatch
+    # must not roll back the staged registration above.
+    observed_sha256, observed_size = store.verify(stored.object_key)
+    try:
+        commit(conn, art_id, observed_sha256, observed_size)
+    except InvalidState:
+        # A concurrent caller committed the same row first: that is success.
+        state = conn.execute("SELECT state::text FROM artifacts WHERE id = %s", (art_id,)).fetchone()[0]
+        if state != "committed":
+            raise
+    return art_id

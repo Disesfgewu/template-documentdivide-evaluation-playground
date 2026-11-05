@@ -656,8 +656,9 @@ class TestParseVisualSchema(FreshDatabase):
                     (deriv_id,),
                 )
 
-            # Invalid: deleting the sole input of a verified derivation
-            with self.assertRaises(errors.CheckViolation):
+            # Invalid: deleting the sole input of a verified derivation. Since
+            # 0007 derivation inputs are append-only, so the stronger guard fires.
+            with self.assertRaises(errors.IntegrityConstraintViolation):
                 with conn.transaction():
                     conn.execute(
                         "DELETE FROM derivation_inputs WHERE id = %s",

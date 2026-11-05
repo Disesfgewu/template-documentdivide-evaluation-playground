@@ -20,38 +20,12 @@ class TestPyFix(FreshDatabase):
     # Helpers
     # ------------------------------------------------------------------
     def _insert_operation(self, conn, project_id: uuid.UUID) -> uuid.UUID:
+        """A succeeded operation owned by one of the project's members."""
         op_id = uuid.uuid4()
-        cols = {
-            r[0]
-            for r in conn.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'operations'
-                """
-            ).fetchall()
-        }
-        values: dict[str, object] = {
-            "id": op_id,
-            "project_id": project_id,
-        }
-        optional_defaults: dict[str, object] = {
-            "kind": "test.op",
-            "operation_name": "test.op",
-            "idempotency_scope": "test.scope",
-            "idempotency_key": f"key-{op_id}",
-            "request_hash": h(f"req-{op_id}"),
-            "status": "succeeded",
-        }
-        for k, v in optional_defaults.items():
-            if k in cols:
-                values[k] = v
-        col_names = ", ".join(values.keys())
-        placeholders = ", ".join(["%s"] * len(values))
-        conn.execute(
-            f"INSERT INTO operations ({col_names}) VALUES ({placeholders})",
-            tuple(values.values()),
-        )
+        actor = conn.execute("SELECT actor_id FROM project_members WHERE project_id = %s LIMIT 1",
+                             (project_id,)).fetchone()[0]
+        conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
+                     "VALUES (%s, %s, 'test.op', %s, 'succeeded', now())", (op_id, project_id, actor))
         return op_id
 
     def _insert_outbox_event(
@@ -222,6 +196,9 @@ class TestPyFix(FreshDatabase):
             )
 
             with conn.transaction():
+                # created_at is immutable for the application (0007); simulate age
+                # by skipping triggers in this setup transaction only.
+                conn.execute("SET LOCAL session_replication_role = replica")
                 conn.execute(
                     "UPDATE artifacts SET created_at = %s WHERE id = ANY(%s)",
                     (old_ts, [del_id, hold_id, dyn_ref_id, race_ref_id]),
@@ -472,7 +449,8 @@ class TestPyFix(FreshDatabase):
             # Expire lease1 and take over: attempt becomes 2 (which equals max_attempts=2)
             with conn.transaction():
                 conn.execute(
-                    "UPDATE jobs SET lease_expires_at = now() - interval '10 seconds' WHERE id = %s",
+                    "UPDATE jobs SET lease_expires_at = now() - interval '10 seconds', "
+                    "row_version = row_version + 1 WHERE id = %s",
                     (job_id,),
                 )
             lease2 = jobs.acquire(conn, proj_a, job_id, "worker-2", ttl_seconds=60)
@@ -485,7 +463,8 @@ class TestPyFix(FreshDatabase):
             # Expire lease2: attempt is now 2 == max_attempts, so another takeover must be rejected!
             with conn.transaction():
                 conn.execute(
-                    "UPDATE jobs SET lease_expires_at = now() - interval '10 seconds' WHERE id = %s",
+                    "UPDATE jobs SET lease_expires_at = now() - interval '10 seconds', "
+                    "row_version = row_version + 1 WHERE id = %s",
                     (job_id,),
                 )
             with self.assertRaises(jobs.LeaseUnavailable):

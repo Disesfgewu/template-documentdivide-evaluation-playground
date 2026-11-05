@@ -105,8 +105,11 @@ class TestArtifactLifecycleAndGC(FreshDatabase):
             # 5. Expired staged artifact referenced by node_operations -> should be kept
             ref_staged_id, _, _ = self._stage_sample(conn, project_id, "referenced-staged")
 
-            # Backdate created_at on staged rows before committing/referencing
+            # Backdate created_at on staged rows before committing/referencing.
+            # created_at is immutable for the application (0007); test setup
+            # simulates elapsed time by skipping triggers in this transaction only.
             with conn.transaction():
+                conn.execute("SET LOCAL session_replication_role = replica")
                 conn.execute(
                     """
                     UPDATE artifacts
