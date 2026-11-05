@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -103,8 +104,8 @@ func Load(getenv func(string) string) (Config, error) {
 	c.HTTPAddr = getenv("LAB_WORKER_HTTP_ADDR")
 	if c.HTTPAddr == "" {
 		c.HTTPAddr = DefaultHTTPAddr
-	} else if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
-		add("LAB_WORKER_HTTP_ADDR", "must be host:port")
+	} else if _, port, err := net.SplitHostPort(c.HTTPAddr); err != nil || !validPort(port) {
+		add("LAB_WORKER_HTTP_ADDR", "must be host:port with port 1-65535")
 	}
 
 	if len(problems) > 0 {
@@ -120,6 +121,9 @@ func checkPostgresURL(raw string) string {
 	if err != nil {
 		return "must be a valid URL"
 	}
+	if p := u.Port(); p != "" && !validPort(p) {
+		return "port must be 1-65535"
+	}
 	if u.Scheme != "postgresql" && u.Scheme != "postgres" {
 		// SQLite or other stores must not stand in for PostgreSQL (SPEC §16).
 		return "must be a postgresql:// URL"
@@ -128,4 +132,10 @@ func checkPostgresURL(raw string) string {
 		return "must include host and database name"
 	}
 	return ""
+}
+
+// validPort reports whether p is a decimal TCP port in 1..65535.
+func validPort(p string) bool {
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 1 && n <= 65535 && strconv.Itoa(n) == p
 }
