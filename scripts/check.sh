@@ -26,9 +26,11 @@ done
 # Map a changed path to the suite(s) that cover it (space-separated). Empty = unmapped.
 suite_for() {
   case "$1" in
+    # Shared test/CI infrastructure affects every suite.
+    .github/*|scripts/*|tools/governance/run_tests.py) echo "${SUITES[*]}";;
     services/api/*|tests/api/*) echo "api api-db";;
     tests/api_db/*|deploy/*) echo api-db;;
-    .github/*|scripts/*|tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
+    tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
 }
@@ -53,6 +55,12 @@ run_suite() {
     *) echo "unknown suite: $1" >&2; return 2;;
   esac
 }
+
+if [[ -n "${CHECK_SH_PRINT_SUITE_FOR:-}" ]]; then
+  # Test hook: print the suites mapped to each path argument, one line each.
+  for f in $CHECK_SH_PRINT_SUITE_FOR; do echo "$f: $(suite_for "$f")"; done
+  exit 0
+fi
 
 if [[ "$scope" == all ]]; then
   selected=("${SUITES[@]}")

@@ -21,14 +21,21 @@ class CheckResult:
 Check = Callable[[], CheckResult]
 
 
+def connect(settings: Settings) -> psycopg.Connection:
+    """Open a connection whose connect *and* statements are time-bounded."""
+    timeout_s = settings.db_connect_timeout_s
+    return psycopg.connect(
+        settings.database_url.get_secret_value(),
+        connect_timeout=max(1, int(timeout_s)),
+        options=f"-c statement_timeout={int(timeout_s * 1000)}",
+        autocommit=True,
+    )
+
+
 def database_check(settings: Settings) -> Check:
     def run() -> CheckResult:
         try:
-            with psycopg.connect(
-                settings.database_url.get_secret_value(),
-                connect_timeout=max(1, int(settings.db_connect_timeout_s)),
-                autocommit=True,
-            ) as conn:
+            with connect(settings) as conn:
                 row = conn.execute(
                     "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
                 ).fetchone()

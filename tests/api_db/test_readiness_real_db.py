@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from lab_api.config import load_settings
 from lab_api.main import create_app
+from lab_api.readiness import connect
 
 ADMIN_URL = os.environ.get("LAB_TEST_DATABASE_URL", "")
 
@@ -32,28 +33,32 @@ class RealDatabaseReadinessTests(unittest.TestCase):
         suffix = uuid.uuid4().hex[:10]
         cls.with_vec = f"lab_ready_vec_{suffix}"
         cls.without_vec = f"lab_ready_novec_{suffix}"
+        # Registered first so a failure later in setUpClass still drops both.
+        cls.addClassCleanup(cls._drop_databases)
         with psycopg.connect(ADMIN_URL, autocommit=True) as c:
             c.execute(f'CREATE DATABASE "{cls.with_vec}"')
             c.execute(f'CREATE DATABASE "{cls.without_vec}"')
         with psycopg.connect(with_db(ADMIN_URL, cls.with_vec), autocommit=True) as c:
             c.execute("CREATE EXTENSION vector")
         cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
 
     @classmethod
-    def tearDownClass(cls):
-        cls.tmp.cleanup()
+    def _drop_databases(cls):
         with psycopg.connect(ADMIN_URL, autocommit=True) as c:
             for db in (cls.with_vec, cls.without_vec):
                 c.execute(f'DROP DATABASE IF EXISTS "{db}" WITH (FORCE)')
 
-    def readyz(self, db_name):
-        env = {
+    def env(self, db_name):
+        return {
             "LAB_ENV": "test",
             "LAB_PROVIDER_MODE": "mock",
             "LAB_DATABASE_URL": with_db(ADMIN_URL, db_name),
             "LAB_ARTIFACT_ROOT": self.tmp.name,
         }
-        with mock.patch.dict(os.environ, env, clear=True):
+
+    def readyz(self, db_name):
+        with mock.patch.dict(os.environ, self.env(db_name), clear=True):
             return TestClient(create_app(load_settings())).get("/readyz")
 
     def test_ready_with_pgvector(self):
@@ -71,6 +76,15 @@ class RealDatabaseReadinessTests(unittest.TestCase):
         r = self.readyz(self.without_vec)
         self.assertEqual(r.status_code, 503)
         self.assertIn("not installed", r.json()["checks"]["database"]["detail"])
+
+    def test_statements_are_time_bounded(self):
+        env = {**self.env(self.with_vec), "LAB_DB_CONNECT_TIMEOUT_S": "1.5"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            s = load_settings()
+        with connect(s) as c:
+            self.assertEqual(c.execute("SHOW statement_timeout").fetchone()[0], "1500ms")
+            with self.assertRaises(psycopg.errors.QueryCanceled):
+                c.execute("SELECT pg_sleep(5)")
 
     def test_not_ready_for_missing_database(self):
         r = self.readyz("lab_ready_missing_" + uuid.uuid4().hex[:8])
