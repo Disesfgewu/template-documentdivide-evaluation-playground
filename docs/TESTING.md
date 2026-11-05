@@ -14,6 +14,7 @@ scripts/check.sh --scope all     # 全部 suite（main push / 發布 gate 使用
 - `parser`：parser service 設定、`/healthz`、`/readyz`、`/v1/capabilities`（不宣稱 adapter 可用），需 `pip install -r services/parser/requirements.lock`。
 - `web`：React 前端（`web/`）的 `npm ci`（lockfile 鎖版，`engine-strict`）、vitest、`tsc` 型別檢查與 production build，需 Node.js 22.12 以上。沒有 node/npm 時印 `BLOCKED` 並以 exit 3 失敗。
 - `contracts`：基礎資料契約（`contracts/`）的合法/非法範例（非法範例必須只因所標示的原因被拒）、schema 漂移檢查、以獨立的 `jsonschema` 驗證匯出的 schema，以及 #21 關閉條件逐項列出的正反例。需要 `pip install -r contracts/requirements.lock -r requirements-dev.txt`。
+- `scoring`：`scoring/lab_scoring` 規則式評分核心（SPEC 16.5），以精確分數計算；`tests/scoring` 用 F06 的 SPEC 向量與暴力格點面積交叉核對。只用標準函式庫與 contracts，不需 DB 或 provider。
 - `governance`（必要檔、PR/Issue templates、workflow 無空 job/`continue-on-error`/`|| true`、CODEOWNERS 身份核實、相對連結、密鑰樣式掃描、branch 清理判定）。後續 Issue 新增應用程式 suite 時需在 `scripts/check.sh` 註冊並對應路徑。
 - 本文件不代表 T01–T104 已執行；各 PR 驗證表須列實際指令、SHA 與結果。
 

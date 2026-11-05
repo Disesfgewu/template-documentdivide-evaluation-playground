@@ -3,9 +3,9 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
-    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "scoring"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "scoring"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "scoring"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
@@ -14,9 +14,11 @@ PATHS = {
     "services/worker/cmd/lab-worker/main.go": {"worker"},
     "services/worker/go.mod": {"worker"},
     "docs/TESTING.md": {"governance"},
-    "contracts/lab_contracts/source.py": {"contracts"},
-    "contracts/README.md": {"contracts", "governance"},
-    "tests/contracts/test_foundation.py": {"contracts"},
+    "contracts/lab_contracts/source.py": {"contracts", "scoring"},
+    "contracts/README.md": {"contracts", "scoring", "governance"},
+    "tests/contracts/test_foundation.py": {"contracts", "scoring"},
+    "scoring/lab_scoring/rules.py": {"scoring"},
+    "tests/scoring/test_cross_checks.py": {"scoring"},
     "web/src/App.tsx": {"web"},
     "web/package-lock.json": {"web"},
     "web/README.md": {"web", "governance"},
