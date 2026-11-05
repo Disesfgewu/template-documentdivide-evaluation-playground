@@ -147,13 +147,23 @@ fixtures:
   - 掃描影像內含的注入文字
 - id: F06
   title: 手算可驗證答案與 hit/citation，錯頁/錯單位/空答案/重複/預算邊界
-  status: planned
-  license: null
-  items: []
-  expected: null
-  golden: null
+  status: partial
+  license: 由 SPEC v0.1 表格數值手寫的 JSON 測試向量（repo LICENSE）
+  items:
+  - id: F06.vectors
+    file: fixtures/F06/vectors.json
+    sha256: 45842eacb516300c1078d8b13d1943015d11c0f9aa01de44be535383c66d3664
+  expected: fixtures/F06/expected.json
+  golden:
+    origin: spec_table
+    review:
+      human: false
+      by: coding-agent
+      date: '2026-11-05'
+      method: 數值只取自 SPEC T37/T38/T39/T42，測試再以 16.5 公式獨立重算
+      note: 尚待人工覆核
   missing:
-  - 尚未建立
+  - 'hit/citation 的實際回應、錯頁、錯單位、空答案、重複引用與預算邊界（T40–T42 的完整情境，需 #12 的評分輸入格式）'
 - id: F07
   title: 已知向量、同維度異模型、錯維度、零/非有限值、tie、跨專案資料
   status: planned

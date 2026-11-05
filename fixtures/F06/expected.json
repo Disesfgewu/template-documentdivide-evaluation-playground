@@ -1,0 +1,18 @@
+{
+  "_source": "copied from fixtures/F06/vectors.json (SPEC T37/T38/T39/T42)",
+  "items": {
+    "F06.vectors": {
+      "vectors": [
+        "F06.T37.duplicate_hit_counts_once",
+        "F06.T37.hit_a",
+        "F06.T37.hit_a_b",
+        "F06.T37.hit_c",
+        "F06.T38.no_partial_rubric",
+        "F06.T38.weighted_half",
+        "F06.T39.no_checks",
+        "F06.T39.ratio",
+        "F06.T42.abstain_answer_zero"
+      ]
+    }
+  }
+}
