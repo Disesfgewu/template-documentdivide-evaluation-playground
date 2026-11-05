@@ -30,6 +30,9 @@ jobs:
         with:
           go-version-file: services/worker/go.mod
           cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.4"
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-dev.txt -r services/api/requirements.lock -r services/parser/requirements.lock
       - name: Start PostgreSQL + pgvector (deploy/compose.dev.yml)

@@ -3,9 +3,9 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser"},
-    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
@@ -14,6 +14,8 @@ PATHS = {
     "services/worker/cmd/lab-worker/main.go": {"worker"},
     "services/worker/go.mod": {"worker"},
     "docs/TESTING.md": {"governance"},
+    "web/src/App.tsx": {"web"},
+    "web/package-lock.json": {"web"},
     "services/parser/lab_parser/main.py": {"parser"},
     "tests/parser/test_parser_service.py": {"parser"},
     "unknown/file.go": set(),  # unmapped -> check.sh runs all suites

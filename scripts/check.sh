@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser)
+SUITES=(governance api api-db worker parser web)
 scope=auto
 base=origin/main
 selected=()
@@ -32,6 +32,7 @@ suite_for() {
     tests/api_db/*|deploy/*) echo api-db;;
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
+    web/*) echo web;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -53,6 +54,14 @@ run_suite() {
         return 3
       fi
       PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
+      ;;
+    web)
+      # React frontend: locked install, unit tests, type check, production build.
+      if ! command -v npm >/dev/null 2>&1; then
+        echo "BLOCKED: suite web needs Node.js/npm (see web/package.json engines)" >&2
+        return 3
+      fi
+      (cd web && node --version && npm ci && npm test && npm run build)
       ;;
     parser)
       PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
