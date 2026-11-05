@@ -1,6 +1,6 @@
 # lab_contracts — 版本化資料契約（基礎）
 
-#21：SPEC 4.1、16.1、16.4 的基礎型別、SourceRegion、錯誤格式與分頁。#23：SPEC 5、16.2、19.5 的四部分題庫契約（`benchmark.py`）。方法接入協定、parser、評分等契約在 #4 的後續子任務。
+#21：SPEC 4.1、16.1、16.4 的基礎型別、SourceRegion、錯誤格式與分頁。#23：SPEC 5、16.2、19.5 的四部分題庫契約（`benchmark.py`）。#25：SPEC 7、16.3、16.6 的方法接入協定與 JSONL 提交（`method.py`）、method-service OpenAPI（`openapi.py`）。parser、評分、fixture registry、traceability 在 #4 的後續子任務。
 
 ## 來源與產生
 
@@ -78,6 +78,40 @@ scripts/check.sh --scope contracts
 | `confusable_without_distractor.json` | confusable 題沒有 distractor | 報錯 |
 | `distractor_used_as_gold_support.json` | distractor 混進 gold | 報錯 |
 
+## 方法接入協定（#25，`lab_contracts/method.py`）
+
+- **模型**：`Capabilities`、`PrepareRequest`／`PrepareResult`、`QueryRequest`、`QueryResponse`、`AsyncAccepted`、`JobStatus`、JSONL `SubmissionLine`。HTTP 方法服務與外部 JSONL 提交共用同一個 `QueryResponse` schema。
+- **協定版本**：`protocol_version` 只接受 `SUPPORTED_PROTOCOL_VERSIONS`（目前 `1.0`），未知版本回 422。
+- **`QueryResponse`**：
+  - `answered` 需要非空 `answer.text`；`abstained` 需要 `reason`、空的 text 與 `claims=[]`，可以保留 hits。
+  - `hit_id`、`claim_id` 單題內唯一；rank 必須剛好是 1..n，不能重複或跳號。
+  - citation 的 claim、hit、region index 都必須存在，越界就拒絕。
+  - 重複的 `region_indices`（PM #4 Q1）：接受；`normalized_region_indices` 會保留原順序並去重，評分端必須用它，所以重複不會增加 coverage，也不會稀釋錯誤引用。payload hash 一律用原始提交計算。
+  - 空的 `content`（PM #4 Q3）：只要至少有一個可從原 PDF 重新裁切的視覺 region（image、figure、table、page、formula），就可以同時附上必要的文字 region（圖說、條件）。只有空白 content 加上 text region 會被拒。這是結構規則，**不代表幾何位置已在語意上支持答案**（#9、#12）。
+  - 結構合法、但 hash 錯誤或頁碼超出範圍的 region **不會**讓整份回應被拒；回應會保留，由評分端標成 `invalid_region`（T35），不冒稱來源有效。
+  - telemetry 可以省略；提供時每個 key 都必填，未知值用 null（0 只代表確認為零）。
+  - HTTP 綁定：`check_binding` 比對 request_id、question_id、index_id。`PrepareResult.check_against_request` 比對文件 hash 與 method revision。
+- **`JobStatus`**：只有 succeeded 帶 result，而且型別必須符合 kind；failed 必須帶 error，其他狀態不能帶。
+- **嚴格 JSON（`strict_loads`）**：拒絕語法錯誤、重複 key、NaN/Infinity、溢位成 inf 的數字；過深的巢狀會轉成 `StrictJSONError`，不會讓 `RecursionError` 往外丟。
+- **`parse_query_response(body, request=None)`**：超過 16 MiB → 413；非 UTF-8 或不是嚴格 JSON → 400；schema 或語意錯誤 → 422；有傳入 request 但身分不符 → 422；合法 → 200。
+- **`parse_jsonl(body)`**（SPEC 16.6：最多 100 行、16 MiB）：
+  - 整批拒絕：過大或行數超過上限 → 413；非 UTF-8 或含 BOM → 415；沒有內容或只有空白 → 422。
+  - 其他情況逐行判斷（T33），壞的一行不會吞掉合法的行。逐行錯誤碼：`invalid_json`（含批內空行）、`line_too_large`、`schema_invalid`、`envelope_mismatch`（同一批的 run、benchmark、method、document_hashes 必須一致）、`duplicate_in_batch`。
+  - 同一批內同一 attempt＋question 的重送：payload 相同時接受，並以 `duplicate_of` 標出第一次出現的行，避免重複寫入；payload 不同時拒絕。
+- **canonical payload hash（`lab-c14n-1`）**：
+  - hash 是對**實際傳送的 JSON 值**（經嚴格解析）計算，不是對 model dump 計算，所以日後新增選填欄位不會改變既有 payload 的 hash。
+  - 規則由 Python 定義，不是 RFC 8785 JCS：key 依 code point 排序、無空白、UTF-8（不跳脫非 ASCII）、整數值的浮點數寫成整數（`1.0` 與 `1` 相同）、其他浮點數用最短的 round-trip 表示、禁止非有限數字。字串不做 Unicode 正規化，所以 NFC 與 NFD 會得到不同的 hash。
+  - 以黃金向量測試固定（`test_method.py`）。改任何規則都必須升級 `CANONICAL_JSON_VERSION`。
+- **上限**：見 `method.py` 頂部的常數（文件數、問題與答案長度、hits、regions、claims、citations、trace）。測試直接引用這些常數，不另外放寬。
+- **OpenAPI**：`openapi/method-service.v1.json` 精確列出 SPEC 7.2 的 5 個端點，包含 200/202、錯誤與 job 結構。由模型產生，`lab_contracts.export --check` 會檢查漂移。這是**契約文件**，不代表已有可呼叫的正式方法服務。
+
+### 尚未包含（runtime，後續 Issue）
+
+- 跨批次的冪等（相同 hash 回相同結果、不同 hash 回 409）、每行一個交易、finalize 與 run lock：#5、#11。
+- late、cancel、deadline 的實際執行，以及 job 狀態轉移：#6、#11。
+- region 是否命中 gold、`invalid_region` 標記與評分：#12。
+- 方法獨立性、gold 隔離（A18）等整合 gate：#5、#11、#14。目前不標 passed。
+
 ## required、null、empty 的區別
 
 - **必填且可為 null**（`quote`、`next_cursor`）：缺少這個欄位是 `missing` 錯誤；明確給 null 是合法的。
@@ -102,6 +136,7 @@ scripts/check.sh --scope contracts
 - 和文件相關的檢查（hash、頁數），由 `check_against_document` 處理。
 - 題庫的所有跨欄位、跨物件規則：公式 AST 的參數數量、深度與引用；TextCheck 的形狀；`validate_bundle` 與 manifest 的配額規則。
 - Question 的 `ordinal` 是 strict integer：JSON Schema 的 `integer` 會接受 `3.0`。
+- 方法協定的跨欄位規則：answered／abstained、rank 1..n、ID 唯一、citation 引用、空 content 需要視覺 region、JobStatus 的終態、支援的 protocol 版本；嚴格 JSON、JSONL 批次規則與 payload hash。
 
 `tests/contracts/test_schema_validation.py` 用獨立的 `jsonschema` 驗證器確認兩件事：匯出的 schema 接受所有合法範例，也拒絕所有純結構性的非法範例。上面列出的規則只由 pydantic 檢查。
 

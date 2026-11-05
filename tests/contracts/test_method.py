@@ -209,6 +209,28 @@ class JsonlTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             method.canonical_json({"a": float("nan")})
 
+    def test_payload_hash_equivalent_and_distinct_inputs(self):
+        self.assertEqual(method.CANONICAL_JSON_VERSION, "lab-c14n-1")
+        # Formatting (whitespace, key order) of the transmitted text does not matter.
+        compact = method.strict_loads('{"a":[1,2],"b":"x"}')
+        spaced = method.strict_loads('{ "b" : "x",\n  "a" : [ 1 , 2 ] }')
+        self.assertEqual(payload_hash(compact), payload_hash(spaced))
+        # Escaped and literal non-ASCII text is the same JSON string.
+        self.assertEqual(payload_hash(method.strict_loads('{"a":"\\u00e9"}')),
+                         payload_hash(method.strict_loads('{"a":"é"}')))
+        # No Unicode normalization: NFC and NFD are different payloads.
+        self.assertNotEqual(payload_hash({"a": "é"}), payload_hash({"a": "é"}))
+        # Different content never collides with these near-equivalents.
+        for a, b in (({"a": None}, {}), ({"a": [1, 2]}, {"a": [2, 1]}), ({"a": "1"}, {"a": 1}),
+                     ({"a": True}, {"a": 1}), ({"a": 0}, {"a": False})):
+            with self.subTest(a=a, b=b):
+                self.assertNotEqual(payload_hash(a), payload_hash(b))
+        with self.assertRaises(TypeError):
+            method.canonical_json({"a": {1, 2}})
+        for text in ('{"a":NaN}', '{"a":Infinity}', '{"a":1e999}', '{"a":1,"a":1}'):
+            with self.subTest(text=text), self.assertRaises(method.StrictJSONError):
+                method.strict_loads(text)
+
     def test_hash_is_of_raw_payload_not_model_dump(self):
         # Omitting an optional field and sending null are different payloads;
         # new optional model fields can never change an existing payload hash.
