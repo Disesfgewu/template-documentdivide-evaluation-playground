@@ -770,9 +770,13 @@ tests:
   owners:
   - 5
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_availability.py
+  note: 黑箱方法標 declared_only、artifact tombstoned/遺失/損毀標 unavailable 並附原因；遮罩造成的 partial 可見性與 UI/API 呈現（#13）尚未完成。
 - id: T53
   title: 錯 space/維度、NaN、零向量
   owners:
