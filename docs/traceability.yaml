@@ -746,9 +746,13 @@ tests:
   - 5
   - 14
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_upgrade.py
+  note: 在 0003 寫入 frozen 題庫、提交與已發布評分，升級到 head 後 10 張表內容指紋不變、約束仍生效；F08 正式舊庫快照與 log/journal 升級尚未建立。
 - id: T51
   title: 從分數開 lineage 與 PDF
   owners:
