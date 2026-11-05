@@ -24,7 +24,8 @@ class JobFixture:
     def status(self):
         return self.c.execute("SELECT status::text FROM jobs WHERE id = %s", (self.job,)).fetchone()[0]
 
-    def thread(self, tid="t-1", rev="wf@1"):
+    def thread(self, tid=None, rev="wf@1"):
+        tid = tid or f"t-{uuid.uuid4().hex[:12]}"
         with self.c.transaction():
             self.c.execute("INSERT INTO graph_threads (thread_id, project_id, job_id, workflow_revision) "
                            "VALUES (%s, %s, %s, %s)", (tid, self.p, self.job, rev))
