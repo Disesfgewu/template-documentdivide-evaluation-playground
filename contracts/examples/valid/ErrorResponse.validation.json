@@ -1,0 +1,1 @@
+{"error": {"code": "invalid_region", "message": "bbox must have positive area", "retryable": false, "request_id": "req-2", "details": {"field": "bbox"}}}

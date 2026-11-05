@@ -1,0 +1,69 @@
+{
+  "ErrorResponse.empty_request_id.json": {
+    "loc": "error.request_id",
+    "type": "string_too_short"
+  },
+  "ErrorResponse.missing_retryable.json": {
+    "loc": "error.retryable",
+    "type": "missing"
+  },
+  "ErrorResponse.retryable_string.json": {
+    "loc": "error.retryable",
+    "type": "bool_type"
+  },
+  "PageRequest.over_max.json": {
+    "loc": "page_size",
+    "type": "less_than_equal"
+  },
+  "PageRequest.zero.json": {
+    "loc": "page_size",
+    "type": "greater_than_equal"
+  },
+  "SourceRegion.bbox_out_of_unit.json": {
+    "loc": "bbox.2",
+    "type": "less_than_equal"
+  },
+  "SourceRegion.missing_quote.json": {
+    "loc": "quote",
+    "type": "missing"
+  },
+  "SourceRegion.page_index_float.json": {
+    "loc": "page_index",
+    "type": "int_type"
+  },
+  "SourceRegion.page_index_string.json": {
+    "loc": "page_index",
+    "type": "int_type"
+  },
+  "SourceRegion.page_kind_partial_bbox.json": {
+    "loc": "",
+    "message": "kind=page requires bbox [0,0,1,1]",
+    "type": "value_error"
+  },
+  "SourceRegion.unknown_field.json": {
+    "loc": "score",
+    "type": "extra_forbidden"
+  },
+  "SourceRegion.unknown_kind.json": {
+    "loc": "kind",
+    "type": "enum"
+  },
+  "SourceRegion.uppercase_hash.json": {
+    "loc": "document_sha256",
+    "type": "string_pattern_mismatch"
+  },
+  "SourceRegion.zero_area.json": {
+    "loc": "",
+    "message": "bbox must satisfy x0 < x1 and y0 < y1 (positive area)",
+    "type": "value_error"
+  },
+  "SourceRegionPage.items_exceed_page_size.json": {
+    "loc": "",
+    "message": "items longer than page_size",
+    "type": "value_error"
+  },
+  "SourceRegionPage.missing_next_cursor.json": {
+    "loc": "next_cursor",
+    "type": "missing"
+  }
+}

@@ -1,0 +1,6 @@
+# Contracts package runtime deps (same pins as services/api/requirements.lock).
+annotated-types==0.8.0
+pydantic==2.14.2
+pydantic_core==2.50.2
+typing-inspection==0.4.5
+typing_extensions==4.16.0
