@@ -310,9 +310,13 @@ tests:
   - 4
   - 7
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: fixture
+    branch: issue-4-contracts
+    tests:
+    - tests/fixtures/test_layout.py::F02LayoutTests
+  note: '只有 F02 fixture 與獨立的 PDFium 渲染基準（旋轉 0/90/180/270、CropBox，誤差 ≤0.005）；LAB 實際的座標正規化與預覽往返在 #7。'
 - id: T06
   title: F02 掃描及混合頁核對指定事實
   owners:

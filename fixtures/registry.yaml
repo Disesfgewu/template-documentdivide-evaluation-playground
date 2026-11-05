@@ -49,13 +49,26 @@ fixtures:
   - 目前只有純文字的「素材不足」版本
 - id: F02
   title: 掃描/文字混合、雙欄、旋轉 90/180/270、不同 CropBox、印刷頁碼、中英文 Unicode
-  status: planned
-  license: null
-  items: []
-  expected: null
-  golden: null
+  status: partial
+  license: 合成資料，由本 repo 的 fixtures/generators/layout_pdf.py 產生（repo LICENSE）
+  items:
+  - id: F02.layout_mix
+    generator: fixtures.generators.layout_pdf
+    args: []
+    sha256: 21784abcba1d35d9b8cd5b97015e62db81c6cb1bdac7631ffe73c39e7e64c5b5
+  expected: fixtures/F02/expected.json
+  golden:
+    origin: script
+    review:
+      human: false
+      by: coding-agent
+      date: '2026-11-05'
+      method: 旋轉 0/90/180/270 與 CropBox 的 bbox 由手推公式計算，並以 PDFium 實際渲染獨立比對（誤差 < 1e-6）
+      note: 尚待人工覆核
   missing:
-  - 尚未建立
+  - '掃描頁與文字/掃描混合頁（需 OCR 與影像，屬 #7/#8）'
+  - 中英文 Unicode（需嵌入 CJK 字型）
+  - 真實雙欄排版的閱讀順序（目前只有兩個欄位標記框）
 - id: F03
   title: 跨頁表、合併 cell、重複 header、圖例、單位、圖說無法獨立答題的圖表
   status: planned
