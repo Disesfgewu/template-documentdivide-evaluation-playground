@@ -3,5 +3,6 @@ fastapi==0.162.0
 pydantic-settings==2.16.2
 uvicorn==0.54.0
 pypdf==6.21.1
+pypdfium2==5.14.0
 # test-only
 httpx==0.28.1
