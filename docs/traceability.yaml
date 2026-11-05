@@ -706,18 +706,26 @@ tests:
   owners:
   - 5
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_constraints.py::ProjectIsolationTests
+  note: 真 PostgreSQL：跨專案、重複 revision、缺引用皆由約束拒絕且無孤兒列；其他資料表類型的 FK 隨後續 migration 擴充。
 - id: T48
   title: 20 個同 key 請求及異 body
   owners:
   - 5
   - 14
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_transactions.py::IdempotencyTests
+  note: 真 PostgreSQL：20 個並行同 key 只產生 1 個邏輯操作、異 body 回 IdempotencyConflict(409)；API 層尚未接上。
 - id: T49
   title: audit/outbox SQL 故障
   owners:
@@ -725,9 +733,13 @@ tests:
   - 6
   - 14
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_transactions.py::AtomicChangeTests
+  note: 真 PostgreSQL：audit/outbox 失敗時業務變更一併回滾，修正後可重送；outbox 消費端尚未實作。
 - id: T50
   title: F08 舊 DB 升級並查資料
   owners:
@@ -742,9 +754,13 @@ tests:
   owners:
   - 5
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_lineage.py
+  note: lineage 有界查詢（深度、節點上限、重訪、環）；從分數一路追到 PDF 的完整路徑需要後續的 lineage 寫入點。
 - id: T52
   title: 黑箱提交/遮罩/artifact 遺失
   owners:
@@ -899,9 +915,15 @@ tests:
   - 6
   - 14
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_jobs_logs.py::RedactionTests
+    - tests/dbunit/test_redaction.py
+    - tests/dbunit/test_export.py
+  note: log 寫入與匯出前遮罩；API/export 端點尚未實作。
 - id: T70
   title: 所有角色逐端點及跨 project ID
   owners:
@@ -917,9 +939,14 @@ tests:
   - 5
   - 14
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_constraints.py::ImmutabilityTests
+    - tests/db/test_transactions.py::AppRoleTests
+  note: frozen/audit 對所有角色由 trigger 阻擋、應用角色無 DDL；受控刪除流程（tombstone＋audit）尚缺 API。
 - id: T72
   title: 指令注入 PDF/答案、未授權 endpoint、CSV 公式
   owners:
@@ -993,9 +1020,13 @@ tests:
   - 5
   - 14
   release_owner: 15
-  status: not_started
-  evidence: []
-  note: null
+  status: partial
+  evidence:
+  - scope: db-integration
+    branch: issue-5-db
+    tests:
+    - tests/db/test_artifact_gc.py
+  note: staged 孤兒回收只刪過期且未被引用者；debug log 到期清理尚未實作。
 - id: T81
   title: 500/600 頁、兩方法、重啟一次
   owners:
