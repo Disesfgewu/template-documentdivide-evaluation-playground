@@ -14,12 +14,27 @@ describe("fetchApiStatus", () => {
     expect(s.kind).toBe("ready");
   });
   it("maps 503 not_ready", async () => {
-    const s = await fetchApiStatus(json(503, { status: "not_ready", provider_mode: "mock", checks: {} }));
+    const s = await fetchApiStatus(json(503, { status: "not_ready", provider_mode: "mock", checks: { database: { ok: false, detail: "down" } } }));
     expect(s.kind).toBe("not_ready");
+  });
+  it("never shows ready when a check failed or no checks exist", async () => {
+    const failing = { status: "ready", provider_mode: "mock", checks: { database: { ok: false, detail: "down" } } };
+    expect((await fetchApiStatus(json(200, failing))).kind).toBe("error");
+    expect((await fetchApiStatus(json(200, { status: "ready", provider_mode: "mock", checks: {} }))).kind).toBe("error");
+  });
+  it("null body and malformed checks are errors, not exceptions", async () => {
+    expect((await fetchApiStatus(json(200, null))).kind).toBe("error");
+    expect((await fetchApiStatus(json(200, { status: "ready", provider_mode: "mock", checks: { db: "ok" } }))).kind).toBe("error");
+    expect((await fetchApiStatus(json(200, { status: "ready", provider_mode: "mock", checks: [] }))).kind).toBe("error");
+  });
+  it("times out a hanging request", async () => {
+    const hang = ((_u: unknown, init?: RequestInit) =>
+      new Promise<Response>((_r, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))))) as typeof fetch;
+    expect((await fetchApiStatus(hang, 20)).kind).toBe("error");
   });
   it("rejects a 200 that claims not_ready and a 503 that claims ready", async () => {
     expect((await fetchApiStatus(json(200, { status: "not_ready", provider_mode: "mock", checks: {} }))).kind).toBe("error");
-    expect((await fetchApiStatus(json(503, { status: "ready", provider_mode: "mock", checks: {} }))).kind).toBe("error");
+    expect((await fetchApiStatus(json(503, { status: "ready", provider_mode: "mock", checks: { d: { ok: false, detail: "x" } } }))).kind).toBe("error");
   });
   it("network failure and non-JSON are errors, never ready", async () => {
     const down = (async () => { throw new TypeError("fail"); }) as typeof fetch;
@@ -33,6 +48,10 @@ describe("App", () => {
   it("shows loading first", () => {
     render(<App load={() => new Promise<ApiStatus>(() => {})} />);
     expect(screen.getByRole("status").textContent).toContain("檢查中");
+  });
+  it("a rejected loader becomes an error, not an endless loading state", async () => {
+    render(<App load={() => Promise.reject(new Error("boom"))} />);
+    expect((await screen.findByRole("alert")).textContent).toContain("錯誤");
   });
   it("shows error state", async () => {
     render(<App load={async () => ({ kind: "error", message: "無法連線到 LAB API" })} />);

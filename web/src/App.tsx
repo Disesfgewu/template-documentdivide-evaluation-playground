@@ -6,7 +6,11 @@ export function App({ load = fetchApiStatus }: { load?: () => Promise<ApiStatus>
 
   useEffect(() => {
     let alive = true;
-    load().then((s) => alive && setStatus(s));
+    load()
+      .catch((): ApiStatus => ({ kind: "error", message: "讀取狀態時發生錯誤" }))
+      .then((s) => {
+        if (alive) setStatus(s);
+      });
     return () => {
       alive = false;
     };

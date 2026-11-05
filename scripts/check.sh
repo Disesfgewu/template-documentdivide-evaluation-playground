@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Map a changed path to the suite(s) that cover it (space-separated). Empty = unmapped.
-suite_for() {
+suite_for_base() {
   case "$1" in
     # Shared test/CI infrastructure affects every suite.
     .github/*|scripts/*|tools/governance/run_tests.py) echo "${SUITES[*]}";;
@@ -36,6 +36,13 @@ suite_for() {
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
+}
+
+# Markdown anywhere is also covered by governance (relative-link checks).
+suite_for() {
+  local s; s="$(suite_for_base "$1")"
+  if [[ "$1" == *.md && -n "$s" && " $s " != *" governance "* ]]; then s="$s governance"; fi
+  echo "$s"
 }
 
 run_suite() {
@@ -57,7 +64,7 @@ run_suite() {
       ;;
     web)
       # React frontend: locked install, unit tests, type check, production build.
-      if ! command -v npm >/dev/null 2>&1; then
+      if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         echo "BLOCKED: suite web needs Node.js/npm (see web/package.json engines)" >&2
         return 3
       fi

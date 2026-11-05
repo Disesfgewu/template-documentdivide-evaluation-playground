@@ -16,6 +16,8 @@ PATHS = {
     "docs/TESTING.md": {"governance"},
     "web/src/App.tsx": {"web"},
     "web/package-lock.json": {"web"},
+    "web/README.md": {"web", "governance"},
+    "services/parser/README.md": {"parser", "governance"},
     "services/parser/lab_parser/main.py": {"parser"},
     "tests/parser/test_parser_service.py": {"parser"},
     "unknown/file.go": set(),  # unmapped -> check.sh runs all suites
