@@ -3,9 +3,9 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web"},
-    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
@@ -14,6 +14,9 @@ PATHS = {
     "services/worker/cmd/lab-worker/main.go": {"worker"},
     "services/worker/go.mod": {"worker"},
     "docs/TESTING.md": {"governance"},
+    "contracts/lab_contracts/source.py": {"contracts"},
+    "contracts/README.md": {"contracts", "governance"},
+    "tests/contracts/test_foundation.py": {"contracts"},
     "web/src/App.tsx": {"web"},
     "web/package-lock.json": {"web"},
     "web/README.md": {"web", "governance"},

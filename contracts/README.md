@@ -1,0 +1,73 @@
+# lab_contracts — 版本化資料契約（基礎）
+
+#21 範圍：SPEC 4.1、16.1、16.4 的基礎型別、SourceRegion、錯誤格式與分頁。四部分 benchmark、方法接入協定、parser、評分等契約在 #4 的後續子任務。
+
+## 來源與產生
+
+以 pydantic v2 模型為準（`lab_contracts/`）。`schemas/v1/*.schema.json`（JSON Schema 2020-12）由模型產生，不可手改：
+
+```bash
+pip install -r contracts/requirements.lock -r requirements-dev.txt
+PYTHONPATH=contracts python3 -m lab_contracts.export          # 重新產生
+PYTHONPATH=contracts python3 -m lab_contracts.export --check  # CI：有漂移就失敗
+scripts/check.sh --scope contracts
+```
+
+## 內容
+
+- **基本型別**：
+  - `ResourceId`：1–128 字元的不透明字串，不解析其中意義。
+  - `Sha256`：剛好 64 位小寫 hex。
+  - `FiniteFloat`：拒絕 NaN 和 ±Infinity。
+  - `Attributes`：必須能序列化成 JSON（不能含 set、物件、NaN），UTF-8 JSON 編碼後不超過 4096 bytes。
+- **`SourceRegion`**：
+  - `page_index`：0 起算的 JSON integer；`"3"`、`3.0`、`true` 都會被拒絕。
+  - `bbox`：在 [0,1] 範圍內，且 x0<x1、y0<y1（正面積）；座標以套用旋轉後的可見 CropBox 為準，左上角為原點。
+  - `kind=page` 必須是 [0,0,1,1]。
+  - `quote` 必填，但可以是 null。
+  - hash 不符或頁碼超出範圍時，由 `check_against_document` 回傳原因，**不丟例外**。SPEC 16.3 規定這種來源要保存為 `invalid_region`，不能因此抹掉獨立的答案。
+- **`ErrorResponse`**：code、message、retryable、request_id、details，以及可選的 retry_after。
+- **`PageRequest`**：預設 50，範圍 1–200。
+- **`Page`**：items 數量不能超過 page_size；`next_cursor` 必填，最後一頁為 null，空字串不合法。
+  - cursor 必須綁定 filter/order，HTTP status 的對應規則在後續 API 實作。**這裡沒有實作，也不宣稱已完成。**
+
+## required、null、empty 的區別
+
+- **必填且可為 null**（`quote`、`next_cursor`）：缺少這個欄位是 `missing` 錯誤；明確給 null 是合法的。
+- **選填**（`page_label`、`retry_after`、`cursor`）：可以省略，省略時為 null。
+- **必要的非空陣列**：不能用 `[]` 代替，例如之後契約裡的 `evidence_sets`。
+- **可以為空的集合**：使用 `[]`。
+- **未知數值**：用 null 表示，0 只代表確認為零。
+
+## 嚴格模式與不可變的範圍
+
+所有模型都是 `extra="forbid"`、`strict=True`、`frozen=True`：
+- 頂層未知欄位會被拒絕（API 回 422）。
+- 不做型別轉換。
+- **`frozen` 只阻擋對模型屬性重新賦值**。巢狀的 dict 和 list（例如 `details`、`attributes`）仍然是一般的 Python 物件，可以被修改，請把它們當成唯讀使用。
+
+## JSON Schema 無法表達、只由 runtime validator 檢查的規則
+
+- bbox 的 x0<x1、y0<y1，以及 `kind=page` 必須是整頁。
+- `Page` 的 items 數量不能超過 page_size。
+- `Attributes` 的大小上限，以及「必須能序列化成 JSON」。
+- strict integer：JSON Schema 的 `integer` 會接受 `3.0`。
+- 和文件相關的檢查（hash、頁數），由 `check_against_document` 處理。
+
+`tests/contracts/test_schema_validation.py` 用獨立的 `jsonschema` 驗證器確認兩件事：匯出的 schema 接受所有合法範例，也拒絕所有純結構性的非法範例。上面列出的規則只由 pydantic 檢查。
+
+## 範例
+
+`examples/valid` 與 `examples/invalid` 以 `<Schema>.<case>.json` 命名，每個 schema 至少要有一個合法範例和一個非法範例。
+
+非法範例必須**只**產生一個錯誤，而且錯誤類型、位置（value_error 另外比對訊息）要和 `examples/expected_invalid.json` 一致，避免範例因為無關的錯誤而「剛好」被拒。
+
+## 版本與相容策略
+
+- schema 版本是 `SCHEMA_VERSION = "v1"`，輸出到 `schemas/v1/`。
+- 以下變更必須升級版本（v2），舊版本的檔案保留：
+  - 新增必填欄位、改變欄位語意。
+  - 收緊既有限制，例如縮小範圍或改變 enum。
+  - 刪除欄位。
+- 在同一版本內，只允許新增選填欄位，或不改變既有合法輸入的修正。
+- 擴充的值放在 `attributes`，不能用來覆寫核心語意。

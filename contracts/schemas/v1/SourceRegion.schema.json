@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "RegionKind": {
+      "enum": [
+        "text",
+        "table",
+        "figure",
+        "image",
+        "formula",
+        "page"
+      ],
+      "title": "RegionKind",
+      "type": "string"
+    }
+  },
+  "$id": "lab-contracts/v1/SourceRegion.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A region on one physical PDF page. Origin top-left after applying page\nrotation, normalized to the visible CropBox.",
+  "properties": {
+    "bbox": {
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        }
+      ],
+      "title": "Bbox",
+      "type": "array"
+    },
+    "document_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Document Id",
+      "type": "string"
+    },
+    "document_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Document Sha256",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/RegionKind"
+    },
+    "page_index": {
+      "minimum": 0,
+      "title": "Page Index",
+      "type": "integer"
+    },
+    "page_label": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Page Label"
+    },
+    "quote": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Quote"
+    }
+  },
+  "required": [
+    "document_id",
+    "document_sha256",
+    "page_index",
+    "bbox",
+    "kind",
+    "quote"
+  ],
+  "title": "SourceRegion",
+  "type": "object"
+}
