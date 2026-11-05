@@ -16,6 +16,7 @@ class Availability:
 def _check_artifact(
     state: str,
     object_key: str,
+    expected_sha256: str,
     store: LocalArtifactStore | None,
 ) -> list[str]:
     reasons: list[str] = []
@@ -23,11 +24,15 @@ def _check_artifact(
         reasons.append("artifact_tombstoned")
     if store is not None:
         try:
-            store.verify(object_key)
+            actual_sha256, _size = store.verify(object_key)
         except StorageCorruption:
             reasons.append("artifact_corrupt")
         except (FileNotFoundError, OSError):
             reasons.append("artifact_missing")
+        else:
+            # verify() reports what is on disk; comparing is the caller's job.
+            if actual_sha256 != expected_sha256:
+                reasons.append("artifact_corrupt")
     return reasons
 
 
@@ -52,7 +57,8 @@ def describe(
                mr.visibility,
                a.id AS artifact_id,
                a.state AS artifact_state,
-               a.object_key
+               a.object_key,
+               a.sha256 AS artifact_sha256
           FROM resource_versions rv
           LEFT JOIN method_revisions mr
                  ON mr.project_id = rv.project_id
@@ -78,9 +84,9 @@ def describe(
     for rid in resource_ids:
         if rid in out:
             continue
-        _, mr_visibility, artifact_id, artifact_state, object_key = by_id[rid]
+        _, mr_visibility, artifact_id, artifact_state, object_key, artifact_sha256 = by_id[rid]
         if artifact_id is not None:
-            reasons = _check_artifact(artifact_state, object_key, store)
+            reasons = _check_artifact(artifact_state, object_key, artifact_sha256, store)
             if reasons:
                 out[rid] = Availability("unavailable", tuple(reasons))
             else:
@@ -106,6 +112,7 @@ def describe_submission(
         """
         SELECT a.state,
                a.object_key,
+               a.sha256,
                mr.visibility
           FROM submissions s
           JOIN runs r
@@ -125,8 +132,8 @@ def describe_submission(
     if row is None:
         raise LookupError(f"submission not found in project: {submission_id}")
 
-    artifact_state, object_key, mr_visibility = row
-    artifact_reasons = _check_artifact(artifact_state, object_key, store)
+    artifact_state, object_key, artifact_sha256, mr_visibility = row
+    artifact_reasons = _check_artifact(artifact_state, object_key, artifact_sha256, store)
     reasons = list(artifact_reasons)
     if mr_visibility == "declared_only":
         reasons.append("method_internals_not_observed")
