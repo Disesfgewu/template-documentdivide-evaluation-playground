@@ -1,0 +1,29 @@
+name: 缺陷 / Bug
+description: 可重現的錯誤，需附重現步驟、實際與預期結果。
+title: "[BUG] "
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: 重現步驟
+      description: 指令、commit SHA、fixture/profile。不要貼密鑰、原始客戶 PDF 或 provider payload。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 預期結果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 實際結果
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: 影響的 SPEC R/T/A
+    validations:
+      required: false

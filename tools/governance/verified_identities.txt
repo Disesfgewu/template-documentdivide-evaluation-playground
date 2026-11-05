@@ -1,0 +1,3 @@
+# GitHub logins verified to exist and hold access to this repository.
+# Add an entry only after verifying it with the GitHub API; record date/method.
+Disesfgewu  # repo owner, verified 2026-11-05 via `gh api repos/Disesfgewu/template-documentdivide-evaluation-playground`

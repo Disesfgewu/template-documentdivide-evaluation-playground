@@ -1,0 +1,6 @@
+# Only identities verified to exist and hold repository access may be listed.
+# Disesfgewu: repository owner (verified via GitHub API on 2026-11-05).
+# NOTE: "Require review from Code Owners" must NOT be enabled while the PR
+# author and the only code owner are the same account (self-approval is not
+# a valid independent review; see docs/DEVELOPMENT.md).
+* @Disesfgewu
