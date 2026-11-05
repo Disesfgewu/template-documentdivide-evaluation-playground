@@ -3,9 +3,9 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web"},
-    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
@@ -20,6 +20,10 @@ PATHS = {
     "services/parser/README.md": {"parser", "governance"},
     "services/parser/lab_parser/main.py": {"parser"},
     "tests/parser/test_parser_service.py": {"parser"},
+    "contracts/lab_contracts/source.py": {"contracts"},
+    "contracts/examples/valid/SourceRegion.text.json": {"contracts"},
+    "contracts/README.md": {"contracts", "governance"},
+    "tests/contracts/test_contracts.py": {"contracts"},
     "unknown/file.go": set(),  # unmapped -> check.sh runs all suites
 }
 

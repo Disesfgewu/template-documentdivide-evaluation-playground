@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web)
+SUITES=(governance api api-db worker parser web contracts)
 scope=auto
 base=origin/main
 selected=()
@@ -33,6 +33,7 @@ suite_for_base() {
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
     web/*) echo web;;
+    contracts/*|tests/contracts/*) echo contracts;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -69,6 +70,10 @@ run_suite() {
         return 3
       fi
       (cd web && node --version && npm ci && npm test && npm run build)
+      ;;
+    contracts)
+      # Versioned data contracts: examples, negative cases, schema drift.
+      PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/contracts
       ;;
     parser)
       PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
