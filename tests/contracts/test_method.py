@@ -212,6 +212,18 @@ class JsonlTests(unittest.TestCase):
             parse_jsonl(jsonl(LINE, LINE))
         self.assertEqual(cm.exception.code, "too_many_lines")
 
+    def test_spec_16_6_batch_limits(self):
+        self.assertEqual((method.MAX_JSONL_LINES, method.MAX_JSONL_BYTES), (100, 16 * 1024 * 1024))
+        self.assertEqual(method.MAX_QUERY_RESPONSE_BYTES, 16 * 1024 * 1024)
+        lines = []
+        for i in range(101):
+            x = copy.deepcopy(LINE); x["response"]["question_id"] = f"q_{i:03d}"
+            lines.append(x)
+        with self.assertRaises(method.BatchRejected) as cm:
+            parse_jsonl(jsonl(*lines))
+        self.assertEqual((cm.exception.http_status, cm.exception.code), (413, "too_many_lines"))
+        self.assertEqual(len(parse_jsonl(jsonl(*lines[:100]))), 100)
+
     def test_crlf_and_blank_line(self):
         q2 = copy.deepcopy(LINE); q2["response"]["question_id"] = "q_002"
         body = (json.dumps(LINE) + "\r\n" + json.dumps(q2) + "\r\n\n").encode()
