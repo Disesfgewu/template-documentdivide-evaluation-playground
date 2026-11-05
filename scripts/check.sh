@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts)
+SUITES=(governance api api-db worker parser web contracts scoring)
 scope=auto
 base=origin/main
 selected=()
@@ -32,7 +32,8 @@ suite_for_base() {
     tests/api_db/*|deploy/*) echo api-db;;
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
-    contracts/*|tests/contracts/*) echo contracts;;
+    contracts/*|tests/contracts/*) echo "contracts scoring";;
+    scoring/*|tests/scoring/*|fixtures/F06/*) echo scoring;;
     web/*) echo web;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
@@ -74,6 +75,10 @@ run_suite() {
     contracts)
       # Versioned data contracts: examples, negative cases, schema drift.
       PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/contracts
+      ;;
+    scoring)
+      # Rule-based scorer (SPEC 16.5): exact fractions, cross-checked with F06.
+      PYTHONPATH=contracts:scoring python3 -m tools.governance.run_tests tests/scoring
       ;;
     parser)
       PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
