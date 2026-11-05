@@ -1,0 +1,8 @@
+{
+  "job_id": "job_1",
+  "kind": "prepare",
+  "status": "succeeded",
+  "progress": 1.0,
+  "result": null,
+  "error": null
+}

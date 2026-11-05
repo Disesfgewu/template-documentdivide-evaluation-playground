@@ -38,11 +38,24 @@ class ExampleTests(unittest.TestCase):
             with self.subTest(f.name):
                 model.model_validate_json(f.read_text())
 
-    def test_invalid_examples_rejected(self):
-        for f, model in self._examples("invalid"):
-            with self.subTest(f.name):
-                with self.assertRaises(ValidationError):
-                    model.model_validate_json(f.read_text())
+    def test_invalid_examples_rejected_for_the_stated_reason(self):
+        # Each invalid example must fail with exactly one error, and it must be
+        # the one it was written to test (not some incidental mistake).
+        expected = json.loads((EXAMPLES / "expected_invalid.json").read_text())
+        files = {f.name: model for f, model in self._examples("invalid")}
+        self.assertEqual(set(expected), set(files), "expected_invalid.json out of sync")
+        for name, model in files.items():
+            with self.subTest(name):
+                with self.assertRaises(ValidationError) as cm:
+                    model.model_validate_json((EXAMPLES / "invalid" / name).read_text())
+                errs = cm.exception.errors()
+                self.assertEqual(len(errs), 1, errs)
+                (err,) = errs
+                want = expected[name]
+                self.assertEqual(err["type"], want["type"])
+                self.assertEqual(".".join(map(str, err["loc"])), want["loc"])
+                if "message" in want:
+                    self.assertEqual(str(err["ctx"]["error"]), want["message"])
 
     def test_every_schema_has_both_kinds(self):
         for kind in ("valid", "invalid"):

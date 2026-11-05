@@ -1,0 +1,84 @@
+{
+  "protocol_version": "1.0",
+  "request_id": "req_001",
+  "question_id": "q_001",
+  "index_id": "idx_001",
+  "status": "answered",
+  "answer": {
+    "text": "高負載定義為負載至少 80%。方案 B 的 p99 延遲最低，為 12 ms。",
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "高負載定義為負載至少 80%。"
+      },
+      {
+        "claim_id": "c2",
+        "text": "方案 B 的 p99 延遲最低，為 12 ms。"
+      }
+    ]
+  },
+  "retrieved_hits": [
+    {
+      "hit_id": "h1",
+      "rank": 1,
+      "content": "正式測試將負載至少 80% 定義為高負載。",
+      "regions": [
+        {
+          "document_id": "doc_001",
+          "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "page_index": 17,
+          "bbox": [
+            0.1,
+            0.2,
+            0.9,
+            0.3
+          ],
+          "kind": "text",
+          "quote": "正式測試將負載至少 80% 定義為高負載。"
+        }
+      ]
+    },
+    {
+      "hit_id": "h2",
+      "rank": 2,
+      "content": "正式高負載測試 p99，A=18 ms，B=12 ms，C=21 ms。",
+      "regions": [
+        {
+          "document_id": "doc_001",
+          "document_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "page_index": 246,
+          "bbox": [
+            0.1,
+            0.3,
+            0.9,
+            0.7
+          ],
+          "kind": "table",
+          "quote": null
+        }
+      ]
+    }
+  ],
+  "citations": [
+    {
+      "claim_id": "c1",
+      "hit_id": "h1",
+      "region_indices": [
+        0
+      ]
+    },
+    {
+      "claim_id": "c2",
+      "hit_id": "h2",
+      "region_indices": [
+        0
+      ]
+    }
+  ],
+  "telemetry": {
+    "latency_ms": 1350,
+    "retrieval_calls": 2,
+    "input_tokens": 2000,
+    "output_tokens": 120
+  }
+}

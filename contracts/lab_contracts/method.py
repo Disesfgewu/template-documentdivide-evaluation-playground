@@ -1,0 +1,375 @@
+"""Method / agent integration protocol (SPEC 7.1-7.3, 16.3).
+
+HTTP method services and external JSONL submissions share one query response
+schema. Structural problems raise ValidationError (API: 422); a body that is
+not JSON at all is 400 (see ``parse_query_response``). Source regions that are
+structurally valid but point at a wrong page/hash are *not* rejected here:
+they are kept and flagged invalid_region by the scorer (SPEC 16.3, T35).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from enum import Enum
+from typing import Annotated, Any, Literal, Optional, Union
+
+from pydantic import AwareDatetime, Field, StringConstraints, ValidationError, model_validator
+
+from .api import ErrorBody
+from .base import Contract, ResourceId, Sha256
+from .source import RegionKind, SourceRegion
+
+PROTOCOL_VERSION = "1.0"
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION})
+
+# Input limits (bounded so a single request cannot exhaust memory/cost).
+MAX_DOCUMENTS_PER_PREPARE = 100
+MAX_QUESTION_CHARS = 8_000
+MAX_ANSWER_CHARS = 32_000
+MAX_HIT_CONTENT_CHARS = 32_000
+MAX_HITS = 200
+MAX_REGIONS_PER_HIT = 64
+MAX_CLAIMS = 200
+MAX_CITATIONS = 1_000
+MAX_JSONL_BYTES = 64 * 1024 * 1024
+MAX_JSONL_LINES = 10_000
+
+ProtocolVersion = Annotated[str, StringConstraints(pattern=r"^[0-9]+\.[0-9]+$")]
+NonNegInt = Annotated[int, Field(ge=0)]
+PosInt = Annotated[int, Field(ge=1)]
+Text = Annotated[str, StringConstraints(min_length=1)]
+
+
+def _unique(values, what: str) -> None:
+    seen = set()
+    for v in values:
+        if v in seen:
+            shown = v.value if isinstance(v, Enum) else v
+            raise ValueError(f"duplicate {what}: {shown!r}")
+        seen.add(v)
+
+
+# --- 7.1 identity / capabilities -------------------------------------------------
+
+class Modality(str, Enum):
+    text = "text"
+    table = "table"
+    image = "image"
+
+
+class MethodRevisionRef(Contract):
+    method_id: ResourceId
+    revision: ResourceId
+
+
+class Capabilities(Contract):
+    """GET /v1/capabilities."""
+
+    protocol_version: ProtocolVersion
+    method_id: ResourceId
+    revision: ResourceId
+    supported_modalities: Annotated[list[Modality], Field(min_length=1)]
+    async_query: bool
+    multi_region: bool
+    max_parallel_queries: PosInt
+
+    @model_validator(mode="after")
+    def _distinct(self):
+        _unique(self.supported_modalities, "modality")
+        return self
+
+
+# --- prepare ---------------------------------------------------------------------
+
+class PrepareDocument(Contract):
+    document_id: ResourceId
+    sha256: Sha256  # of the raw PDF bytes; the method verifies after download
+    page_count: PosInt
+    pdf_url: Annotated[str, StringConstraints(pattern=r"^https?://", max_length=4096)]
+    url_expires_at: AwareDatetime
+
+
+class PrepareRequest(Contract):
+    """POST /v1/prepare -> 202 AsyncAccepted."""
+
+    protocol_version: ProtocolVersion
+    request_id: ResourceId
+    documents: Annotated[list[PrepareDocument], Field(min_length=1, max_length=MAX_DOCUMENTS_PER_PREPARE)]
+    method_revision: MethodRevisionRef
+    config: dict[str, Any]
+    config_hash: Sha256
+
+    @model_validator(mode="after")
+    def _distinct_documents(self):
+        _unique([d.document_id for d in self.documents], "document_id")
+        return self
+
+
+class PrepareResult(Contract):
+    """Terminal result of a succeeded prepare job."""
+
+    index_id: ResourceId
+    index_fingerprint: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+    document_hashes: Annotated[dict[ResourceId, Sha256], Field(min_length=1)]
+    method_revision: MethodRevisionRef
+    status: Literal["ready"]
+    stats: Optional[dict[str, Any]] = None
+
+    def check_against_request(self, req: PrepareRequest) -> list[str]:
+        """Reasons the result does not match the prepare request (empty = ok)."""
+        reasons = []
+        expected = {d.document_id: d.sha256 for d in req.documents}
+        if self.document_hashes != expected:
+            reasons.append("document_hashes_mismatch")
+        if self.method_revision != req.method_revision:
+            reasons.append("method_revision_mismatch")
+        return reasons
+
+
+# --- query -----------------------------------------------------------------------
+
+class QueryBudget(Contract):
+    top_k: PosInt
+    max_evidence_tokens: PosInt
+    max_visual_regions: NonNegInt
+    timeout_seconds: PosInt
+
+
+class QueryRequest(Contract):
+    """POST /v1/query -> 200 QueryResponse or 202 AsyncAccepted."""
+
+    protocol_version: ProtocolVersion
+    request_id: ResourceId
+    run_id: ResourceId
+    question_id: ResourceId
+    index_id: ResourceId
+    question: Annotated[str, StringConstraints(min_length=1, max_length=MAX_QUESTION_CHARS)]
+    budget: QueryBudget
+
+
+class Claim(Contract):
+    claim_id: ResourceId
+    text: Text
+
+
+class Answer(Contract):
+    text: Annotated[str, StringConstraints(max_length=MAX_ANSWER_CHARS)]
+    claims: Annotated[list[Claim], Field(max_length=MAX_CLAIMS)]
+
+
+class Hit(Contract):
+    hit_id: ResourceId
+    rank: PosInt
+    # May be "" only for a pure visual hit; LAB re-crops from the original PDF.
+    content: Annotated[str, StringConstraints(max_length=MAX_HIT_CONTENT_CHARS)]
+    regions: Annotated[list[SourceRegion], Field(min_length=1, max_length=MAX_REGIONS_PER_HIT)]
+
+    @model_validator(mode="after")
+    def _empty_content_needs_visual_region(self):
+        if self.content == "" and all(r.kind is RegionKind.text for r in self.regions):
+            raise ValueError("empty content requires at least one non-text (visual) region")
+        return self
+
+
+class Citation(Contract):
+    claim_id: ResourceId
+    hit_id: ResourceId
+    region_indices: Annotated[list[NonNegInt], Field(min_length=1)]
+
+
+class Telemetry(Contract):
+    """Method self-report. Every key is required; unknown values are null
+    (0 means a confirmed zero, SPEC 16.1)."""
+
+    latency_ms: Optional[NonNegInt]
+    retrieval_calls: Optional[NonNegInt]
+    model_calls: Optional[NonNegInt]
+    input_tokens: Optional[NonNegInt]
+    output_tokens: Optional[NonNegInt]
+
+
+class QueryResponse(Contract):
+    protocol_version: ProtocolVersion
+    request_id: ResourceId
+    question_id: ResourceId
+    index_id: ResourceId
+    status: Literal["answered", "abstained"]
+    answer: Answer
+    reason: Optional[Annotated[str, StringConstraints(min_length=1, max_length=2000)]] = None
+    retrieved_hits: Annotated[list[Hit], Field(max_length=MAX_HITS)]
+    citations: Annotated[list[Citation], Field(max_length=MAX_CITATIONS)]
+    telemetry: Optional[Telemetry] = None
+    retrieval_trace: Optional[list[dict[str, Any]]] = None
+
+    @model_validator(mode="after")
+    def _semantics(self):
+        if self.status == "answered":
+            if not self.answer.text.strip():
+                raise ValueError("answered requires non-empty answer.text")
+        else:
+            if self.reason is None:
+                raise ValueError("abstained requires reason")
+            if self.answer.text != "" or self.answer.claims:
+                raise ValueError("abstained requires empty answer.text and claims=[]")
+
+        _unique([c.claim_id for c in self.answer.claims], "claim_id")
+        _unique([h.hit_id for h in self.retrieved_hits], "hit_id")
+        ranks = sorted(h.rank for h in self.retrieved_hits)
+        if ranks != list(range(1, len(ranks) + 1)):
+            raise ValueError("ranks must be exactly 1..n without duplicates or gaps")
+
+        claims = {c.claim_id for c in self.answer.claims}
+        hits = {h.hit_id: h for h in self.retrieved_hits}
+        for i, cit in enumerate(self.citations):
+            if cit.claim_id not in claims:
+                raise ValueError(f"citations[{i}].claim_id does not exist")
+            hit = hits.get(cit.hit_id)
+            if hit is None:
+                raise ValueError(f"citations[{i}].hit_id does not exist")
+            _unique(cit.region_indices, f"citations[{i}] region index")
+            if any(ix >= len(hit.regions) for ix in cit.region_indices):
+                raise ValueError(f"citations[{i}].region_indices out of range for hit")
+        return self
+
+    def check_binding(self, req: QueryRequest) -> list[str]:
+        """HTTP responses must echo the request identity (SPEC 16.3)."""
+        return [f"{f}_mismatch" for f in ("request_id", "question_id", "index_id")
+                if getattr(self, f) != getattr(req, f)]
+
+
+# --- async jobs ------------------------------------------------------------------
+
+class AsyncAccepted(Contract):
+    """202 body for prepare and async query."""
+
+    job_id: ResourceId
+    poll_after_ms: NonNegInt
+
+
+class JobStatus(Contract):
+    """GET /v1/jobs/{job_id}. Only succeeded carries a terminal result;
+    failed carries error. HTTP 200 only means the lookup itself succeeded."""
+
+    job_id: ResourceId
+    kind: Literal["prepare", "query"]
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    progress: Optional[Annotated[float, Field(ge=0.0, le=1.0)]]
+    result: Optional[Union[PrepareResult, QueryResponse]] = None
+    error: Optional[ErrorBody] = None
+
+    @model_validator(mode="after")
+    def _terminal(self):
+        if self.status == "succeeded":
+            if self.result is None:
+                raise ValueError("succeeded requires result")
+            want = PrepareResult if self.kind == "prepare" else QueryResponse
+            if not isinstance(self.result, want):
+                raise ValueError(f"{self.kind} job result must be {want.__name__}")
+        elif self.result is not None:
+            raise ValueError("only succeeded jobs carry result")
+        if (self.status == "failed") != (self.error is not None):
+            raise ValueError("error is required for failed and forbidden otherwise")
+        return self
+
+
+# --- 7.3 external JSONL submission ------------------------------------------------
+
+class SubmissionLine(Contract):
+    run_id: ResourceId
+    attempt_id: ResourceId
+    benchmark_revision_id: ResourceId
+    method_revision_id: ResourceId
+    document_hashes: Annotated[dict[ResourceId, Sha256], Field(min_length=1)]
+    response: QueryResponse
+
+
+CANONICAL_JSON_VERSION = "lab-c14n-1"
+
+
+def canonical_json(value: Any) -> bytes:
+    """Locked canonicalization (lab-c14n-1): sorted keys, no whitespace,
+    UTF-8, non-finite numbers forbidden."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False).encode("utf-8")
+
+
+def payload_hash(model: Contract) -> str:
+    return hashlib.sha256(canonical_json(model.model_dump(mode="json"))).hexdigest()
+
+
+class LineResult(Contract):
+    line: PosInt
+    status: Literal["accepted", "rejected"]
+    code: Optional[Literal["invalid_json", "schema_invalid", "duplicate_in_batch"]]
+    question_id: Optional[ResourceId]
+    payload_hash: Optional[Sha256]
+
+
+class BatchRejected(Exception):
+    """The whole JSONL body is rejected (bad encoding or size; SPEC 16.3)."""
+
+    def __init__(self, http_status: int, code: str):
+        super().__init__(code)
+        self.http_status = http_status
+        self.code = code
+
+
+def parse_jsonl(body: bytes) -> list[tuple[LineResult, Optional[SubmissionLine]]]:
+    """Validate an external submission. Each line is accepted or rejected on
+    its own (T33). Persisting, idempotency against stored payloads (same hash
+    -> same result, different hash -> 409) and the run lock are #5+."""
+    if len(body) > MAX_JSONL_BYTES:
+        raise BatchRejected(413, "payload_too_large")
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise BatchRejected(415, "invalid_encoding") from None
+    if text.startswith("﻿"):
+        raise BatchRejected(415, "invalid_encoding")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    if not lines:
+        raise BatchRejected(422, "empty_submission")
+    if len(lines) > MAX_JSONL_LINES:
+        raise BatchRejected(413, "too_many_lines")
+
+    out: list[tuple[LineResult, Optional[SubmissionLine]]] = []
+    seen: dict[tuple[str, str], str] = {}
+    for n, raw in enumerate(lines, start=1):
+        raw = raw.removesuffix("\r")
+        try:
+            json.loads(raw)
+        except ValueError:
+            out.append((LineResult(line=n, status="rejected", code="invalid_json",
+                                   question_id=None, payload_hash=None), None))
+            continue
+        try:
+            sub = SubmissionLine.model_validate_json(raw)
+        except ValidationError:
+            out.append((LineResult(line=n, status="rejected", code="schema_invalid",
+                                   question_id=None, payload_hash=None), None))
+            continue
+        h = payload_hash(sub)
+        key = (sub.attempt_id, sub.response.question_id)
+        if key in seen and seen[key] != h:
+            out.append((LineResult(line=n, status="rejected", code="duplicate_in_batch",
+                                   question_id=sub.response.question_id, payload_hash=h), None))
+            continue
+        seen[key] = h
+        out.append((LineResult(line=n, status="accepted", code=None,
+                               question_id=sub.response.question_id, payload_hash=h), sub))
+    return out
+
+
+def parse_query_response(body: bytes) -> tuple[int, Optional[QueryResponse]]:
+    """HTTP status a LAB endpoint returns for a method's query body:
+    400 not JSON, 422 schema/semantic error, 200 valid."""
+    try:
+        json.loads(body)
+    except ValueError:
+        return 400, None
+    try:
+        return 200, QueryResponse.model_validate_json(body)
+    except ValidationError:
+        return 422, None
