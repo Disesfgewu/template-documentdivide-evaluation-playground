@@ -72,6 +72,8 @@ scripts/check.sh --scope contracts
   - partial、blocked 必須附證據與說明；passed 必須附 main 上的 commit 與 CI run。
   - 契約層測試最多只能讓項目成為 partial。
 
+- OpenAPI：`contracts/openapi/method-service.v1.json` 是 SPEC 7.2 方法服務的 5 個端點，由模型產生，CI 檢查漂移。另外用獨立的 `jsonschema` 驗證器確認：匯出的 schema 接受所有合法範例，也拒絕所有純結構性的非法範例。例外：JSON Schema 的 `integer` 接受 `3.0`，只有 pydantic strict 模式會拒絕；跨欄位規則也只在模型驗證器中。
+
 Fixture registry 見 `fixtures/registry.yaml`、`docs/TESTING.md`。
 
 尚未完成（後續增量）：OpenAPI 匯出、F02–F12 fixtures、F01 素材充分版本、submission/scoring。

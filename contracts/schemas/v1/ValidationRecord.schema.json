@@ -36,8 +36,8 @@
     "confidence": {
       "anyOf": [
         {
-          "ge": 0.0,
-          "le": 1.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
           "type": "number"
         },
         {

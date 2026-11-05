@@ -89,7 +89,7 @@
           "type": "string"
         },
         "weight": {
-          "gt": 0,
+          "exclusiveMinimum": 0,
           "title": "Weight",
           "type": "number"
         }

@@ -67,8 +67,8 @@
           "type": "integer"
         },
         "max_megapixels": {
-          "gt": 0,
-          "le": 16,
+          "exclusiveMinimum": 0,
+          "maximum": 16,
           "title": "Max Megapixels",
           "type": "number"
         }
@@ -94,7 +94,7 @@
     "cost_usd": {
       "anyOf": [
         {
-          "ge": 0,
+          "minimum": 0,
           "type": "number"
         },
         {

@@ -6,7 +6,7 @@
     "denominator": {
       "anyOf": [
         {
-          "ge": 0.0,
+          "minimum": 0.0,
           "type": "number"
         },
         {
@@ -50,7 +50,7 @@
     "numerator": {
       "anyOf": [
         {
-          "ge": 0.0,
+          "minimum": 0.0,
           "type": "number"
         },
         {
@@ -68,8 +68,8 @@
     "raw_value": {
       "anyOf": [
         {
-          "ge": 0.0,
-          "le": 100.0,
+          "maximum": 100.0,
+          "minimum": 0.0,
           "type": "number"
         },
         {
