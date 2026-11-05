@@ -1,0 +1,92 @@
+{
+  "$defs": {
+    "QueryBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "max_evidence_tokens": {
+          "minimum": 1,
+          "title": "Max Evidence Tokens",
+          "type": "integer"
+        },
+        "max_visual_regions": {
+          "minimum": 0,
+          "title": "Max Visual Regions",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "top_k": {
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "top_k",
+        "max_evidence_tokens",
+        "max_visual_regions",
+        "timeout_seconds"
+      ],
+      "title": "QueryBudget",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/QueryRequest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "POST /v1/query -> 200 QueryResponse or 202 AsyncAccepted.",
+  "properties": {
+    "budget": {
+      "$ref": "#/$defs/QueryBudget"
+    },
+    "index_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Index Id",
+      "type": "string"
+    },
+    "protocol_version": {
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "question": {
+      "maxLength": 8000,
+      "minLength": 1,
+      "title": "Question",
+      "type": "string"
+    },
+    "question_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Question Id",
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Request Id",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "request_id",
+    "run_id",
+    "question_id",
+    "index_id",
+    "question",
+    "budget"
+  ],
+  "title": "QueryRequest",
+  "type": "object"
+}

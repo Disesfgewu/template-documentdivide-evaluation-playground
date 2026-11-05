@@ -1,0 +1,117 @@
+{
+  "$defs": {
+    "MethodRevisionRef": {
+      "additionalProperties": false,
+      "properties": {
+        "method_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Method Id",
+          "type": "string"
+        },
+        "revision": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method_id",
+        "revision"
+      ],
+      "title": "MethodRevisionRef",
+      "type": "object"
+    },
+    "PrepareDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Document Id",
+          "type": "string"
+        },
+        "page_count": {
+          "minimum": 1,
+          "title": "Page Count",
+          "type": "integer"
+        },
+        "pdf_url": {
+          "maxLength": 4096,
+          "pattern": "^https?://",
+          "title": "Pdf Url",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "url_expires_at": {
+          "format": "date-time",
+          "title": "Url Expires At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "document_id",
+        "sha256",
+        "page_count",
+        "pdf_url",
+        "url_expires_at"
+      ],
+      "title": "PrepareDocument",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/PrepareRequest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "POST /v1/prepare -> 202 AsyncAccepted.",
+  "properties": {
+    "config": {
+      "additionalProperties": true,
+      "title": "Config",
+      "type": "object"
+    },
+    "config_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Config Hash",
+      "type": "string"
+    },
+    "documents": {
+      "items": {
+        "$ref": "#/$defs/PrepareDocument"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Documents",
+      "type": "array"
+    },
+    "method_revision": {
+      "$ref": "#/$defs/MethodRevisionRef"
+    },
+    "protocol_version": {
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "title": "Protocol Version",
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Request Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "request_id",
+    "documents",
+    "method_revision",
+    "config",
+    "config_hash"
+  ],
+  "title": "PrepareRequest",
+  "type": "object"
+}

@@ -1,0 +1,1141 @@
+{
+  "components": {
+    "schemas": {
+      "Answer": {
+        "additionalProperties": false,
+        "properties": {
+          "claims": {
+            "items": {
+              "$ref": "#/components/schemas/Claim"
+            },
+            "maxItems": 200,
+            "title": "Claims",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 32000,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "claims"
+        ],
+        "title": "Answer",
+        "type": "object"
+      },
+      "AsyncAccepted": {
+        "additionalProperties": false,
+        "description": "202 body for prepare and async query.",
+        "properties": {
+          "job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Job Id",
+            "type": "string"
+          },
+          "poll_after_ms": {
+            "minimum": 0,
+            "title": "Poll After Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "poll_after_ms"
+        ],
+        "title": "AsyncAccepted",
+        "type": "object"
+      },
+      "Capabilities": {
+        "additionalProperties": false,
+        "description": "GET /v1/capabilities.",
+        "properties": {
+          "async_query": {
+            "title": "Async Query",
+            "type": "boolean"
+          },
+          "max_parallel_queries": {
+            "minimum": 1,
+            "title": "Max Parallel Queries",
+            "type": "integer"
+          },
+          "method_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Method Id",
+            "type": "string"
+          },
+          "multi_region": {
+            "title": "Multi Region",
+            "type": "boolean"
+          },
+          "protocol_version": {
+            "pattern": "^[0-9]+\\.[0-9]+$",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "revision": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Revision",
+            "type": "string"
+          },
+          "supported_modalities": {
+            "items": {
+              "$ref": "#/components/schemas/Modality"
+            },
+            "minItems": 1,
+            "title": "Supported Modalities",
+            "type": "array"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "method_id",
+          "revision",
+          "supported_modalities",
+          "async_query",
+          "multi_region",
+          "max_parallel_queries"
+        ],
+        "title": "Capabilities",
+        "type": "object"
+      },
+      "Citation": {
+        "additionalProperties": false,
+        "description": "region_indices may repeat (PM #4 Q1): accepted as submitted, and\n``normalized_region_indices`` gives the de-duplicated order-preserving\nform scorers must use, so repeats never add coverage or dilute errors.\nThe payload hash is always computed over the original submission.",
+        "properties": {
+          "claim_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "hit_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Hit Id",
+            "type": "string"
+          },
+          "region_indices": {
+            "items": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minItems": 1,
+            "title": "Region Indices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "claim_id",
+          "hit_id",
+          "region_indices"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "Claim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "text": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "text"
+        ],
+        "title": "Claim",
+        "type": "object"
+      },
+      "ErrorBody": {
+        "additionalProperties": false,
+        "description": "Every non-2xx response and every failed job's `error`. Must not carry\ncredentials or gold content; details is a bounded, typed-free object.",
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retry_after": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Retry After"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "request_id",
+          "details"
+        ],
+        "title": "ErrorBody",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "Hit": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "maxLength": 32000,
+            "title": "Content",
+            "type": "string"
+          },
+          "hit_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Hit Id",
+            "type": "string"
+          },
+          "rank": {
+            "minimum": 1,
+            "title": "Rank",
+            "type": "integer"
+          },
+          "regions": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRegion"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Regions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "hit_id",
+          "rank",
+          "content",
+          "regions"
+        ],
+        "title": "Hit",
+        "type": "object"
+      },
+      "JobStatus": {
+        "additionalProperties": false,
+        "description": "GET /v1/jobs/{job_id}. Only succeeded carries a terminal result;\nfailed carries error. HTTP 200 only means the lookup itself succeeded.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Job Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "prepare",
+              "query"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrepareResult"
+              },
+              {
+                "$ref": "#/components/schemas/QueryResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Result"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "kind",
+          "status",
+          "progress"
+        ],
+        "title": "JobStatus",
+        "type": "object"
+      },
+      "MethodRevisionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "method_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Method Id",
+            "type": "string"
+          },
+          "revision": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "method_id",
+          "revision"
+        ],
+        "title": "MethodRevisionRef",
+        "type": "object"
+      },
+      "Modality": {
+        "enum": [
+          "text",
+          "table",
+          "image"
+        ],
+        "title": "Modality",
+        "type": "string"
+      },
+      "PrepareDocument": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Document Id",
+            "type": "string"
+          },
+          "page_count": {
+            "minimum": 1,
+            "title": "Page Count",
+            "type": "integer"
+          },
+          "pdf_url": {
+            "maxLength": 4096,
+            "pattern": "^https?://",
+            "title": "Pdf Url",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "url_expires_at": {
+            "format": "date-time",
+            "title": "Url Expires At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id",
+          "sha256",
+          "page_count",
+          "pdf_url",
+          "url_expires_at"
+        ],
+        "title": "PrepareDocument",
+        "type": "object"
+      },
+      "PrepareRequest": {
+        "additionalProperties": false,
+        "description": "POST /v1/prepare -> 202 AsyncAccepted.",
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "config_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Config Hash",
+            "type": "string"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/PrepareDocument"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Documents",
+            "type": "array"
+          },
+          "method_revision": {
+            "$ref": "#/components/schemas/MethodRevisionRef"
+          },
+          "protocol_version": {
+            "pattern": "^[0-9]+\\.[0-9]+$",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "request_id",
+          "documents",
+          "method_revision",
+          "config",
+          "config_hash"
+        ],
+        "title": "PrepareRequest",
+        "type": "object"
+      },
+      "PrepareResult": {
+        "additionalProperties": false,
+        "description": "Terminal result of a succeeded prepare job.",
+        "properties": {
+          "document_hashes": {
+            "additionalProperties": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "minProperties": 1,
+            "propertyNames": {
+              "maxLength": 128,
+              "minLength": 1
+            },
+            "title": "Document Hashes",
+            "type": "object"
+          },
+          "index_fingerprint": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Index Fingerprint",
+            "type": "string"
+          },
+          "index_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Index Id",
+            "type": "string"
+          },
+          "method_revision": {
+            "$ref": "#/components/schemas/MethodRevisionRef"
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Stats"
+          },
+          "status": {
+            "const": "ready",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index_id",
+          "index_fingerprint",
+          "document_hashes",
+          "method_revision",
+          "status"
+        ],
+        "title": "PrepareResult",
+        "type": "object"
+      },
+      "QueryBudget": {
+        "additionalProperties": false,
+        "properties": {
+          "max_evidence_tokens": {
+            "minimum": 1,
+            "title": "Max Evidence Tokens",
+            "type": "integer"
+          },
+          "max_visual_regions": {
+            "minimum": 0,
+            "title": "Max Visual Regions",
+            "type": "integer"
+          },
+          "timeout_seconds": {
+            "minimum": 1,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          },
+          "top_k": {
+            "minimum": 1,
+            "title": "Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "top_k",
+          "max_evidence_tokens",
+          "max_visual_regions",
+          "timeout_seconds"
+        ],
+        "title": "QueryBudget",
+        "type": "object"
+      },
+      "QueryRequest": {
+        "additionalProperties": false,
+        "description": "POST /v1/query -> 200 QueryResponse or 202 AsyncAccepted.",
+        "properties": {
+          "budget": {
+            "$ref": "#/components/schemas/QueryBudget"
+          },
+          "index_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Index Id",
+            "type": "string"
+          },
+          "protocol_version": {
+            "pattern": "^[0-9]+\\.[0-9]+$",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "question": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "question_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Question Id",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "run_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "request_id",
+          "run_id",
+          "question_id",
+          "index_id",
+          "question",
+          "budget"
+        ],
+        "title": "QueryRequest",
+        "type": "object"
+      },
+      "QueryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "$ref": "#/components/schemas/Answer"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/Citation"
+            },
+            "maxItems": 1000,
+            "title": "Citations",
+            "type": "array"
+          },
+          "index_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Index Id",
+            "type": "string"
+          },
+          "protocol_version": {
+            "pattern": "^[0-9]+\\.[0-9]+$",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "question_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Question Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retrieval_trace": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "maxItems": 1000,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Retrieval Trace"
+          },
+          "retrieved_hits": {
+            "items": {
+              "$ref": "#/components/schemas/Hit"
+            },
+            "maxItems": 200,
+            "title": "Retrieved Hits",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "answered",
+              "abstained"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "telemetry": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Telemetry"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "protocol_version",
+          "request_id",
+          "question_id",
+          "index_id",
+          "status",
+          "answer",
+          "retrieved_hits",
+          "citations"
+        ],
+        "title": "QueryResponse",
+        "type": "object"
+      },
+      "RegionKind": {
+        "enum": [
+          "text",
+          "table",
+          "figure",
+          "image",
+          "formula",
+          "page"
+        ],
+        "title": "RegionKind",
+        "type": "string"
+      },
+      "SourceRegion": {
+        "additionalProperties": false,
+        "description": "A region on one physical PDF page. Origin top-left after applying page\nrotation, normalized to the visible CropBox.",
+        "properties": {
+          "bbox": {
+            "maxItems": 4,
+            "minItems": 4,
+            "prefixItems": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              }
+            ],
+            "title": "Bbox",
+            "type": "array"
+          },
+          "document_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Document Id",
+            "type": "string"
+          },
+          "document_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Document Sha256",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RegionKind"
+          },
+          "page_index": {
+            "minimum": 0,
+            "title": "Page Index",
+            "type": "integer"
+          },
+          "page_label": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Page Label"
+          },
+          "quote": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote"
+          }
+        },
+        "required": [
+          "document_id",
+          "document_sha256",
+          "page_index",
+          "bbox",
+          "kind",
+          "quote"
+        ],
+        "title": "SourceRegion",
+        "type": "object"
+      },
+      "Telemetry": {
+        "additionalProperties": false,
+        "description": "Method self-report. Every key is required; unknown values are null\n(0 means a confirmed zero, SPEC 16.1).",
+        "properties": {
+          "input_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "model_calls": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Calls"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "retrieval_calls": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Calls"
+          }
+        },
+        "required": [
+          "latency_ms",
+          "retrieval_calls",
+          "model_calls",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "title": "Telemetry",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Implemented by participant methods; called by LAB (SPEC 7.2, 16.3).",
+    "title": "LAB method service protocol",
+    "version": "1.0"
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "getCapabilities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            },
+            "description": "Protocol version and capabilities"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{job_id}": {
+      "get": {
+        "operationId": "getJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Lookup succeeded (the job itself may have failed)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unknown job"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{job_id}/cancel": {
+      "post": {
+        "operationId": "cancelJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Cancellation requested; poll the job for its final status"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unknown job"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Illegal state transition"
+          }
+        }
+      }
+    },
+    "/v1/prepare": {
+      "post": {
+        "operationId": "prepare",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrepareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AsyncAccepted"
+                }
+              }
+            },
+            "description": "Index build accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body is not strict UTF-8 JSON"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Schema or semantic error"
+          }
+        }
+      }
+    },
+    "/v1/query": {
+      "post": {
+        "operationId": "query",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            },
+            "description": "Synchronous answer"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AsyncAccepted"
+                }
+              }
+            },
+            "description": "Asynchronous query accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body is not strict UTF-8 JSON"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Schema or semantic error"
+          }
+        }
+      }
+    }
+  }
+}
