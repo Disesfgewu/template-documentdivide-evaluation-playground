@@ -84,10 +84,12 @@ def main(argv):
     if len(args) != 1:
         print("usage: run_tests.py <start_dir> [--fail-on-skip]", file=sys.stderr)
         return 2
+    # Read before running: tests may change the environment.
+    report_dir = os.environ.get("LAB_TEST_REPORT_DIR")
     suite = unittest.defaultTestLoader.discover(args[0], top_level_dir=".")
     result = unittest.TextTestRunner(verbosity=2, resultclass=RecordingResult).run(suite)
-    if os.environ.get("LAB_TEST_REPORT_DIR"):
-        write_report(args[0], result.outcomes, os.environ["LAB_TEST_REPORT_DIR"])
+    if report_dir:
+        write_report(args[0], result.outcomes, report_dir)
     if result.testsRun == 0:
         print(f"FAIL: no tests discovered in {args[0]}", file=sys.stderr)
         return 1

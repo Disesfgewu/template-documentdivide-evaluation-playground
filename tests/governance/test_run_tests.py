@@ -4,6 +4,7 @@ import os
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 from tools.governance import run_tests
 
@@ -23,7 +24,9 @@ class RunTestsTests(unittest.TestCase):
                     f.write(textwrap.dedent(body))
             os.chdir(d)
             try:
-                with contextlib.redirect_stderr(io.StringIO()):
+                # Nested runs must not write into the outer run's CI report.
+                with contextlib.redirect_stderr(io.StringIO()), \
+                        mock.patch.dict(os.environ, {"LAB_TEST_REPORT_DIR": ""}):
                     return run_tests.main(["run_tests.py", os.path.basename(pkg), *flags])
             finally:
                 os.chdir(cwd)
@@ -51,13 +54,15 @@ class RunTestsTests(unittest.TestCase):
             with open(os.path.join(pkg, "test_a.py"), "w") as f:
                 f.write(body)
             os.chdir(d)
-            os.environ["LAB_TEST_REPORT_DIR"] = out
             try:
-                with contextlib.redirect_stderr(io.StringIO()):
+                # patch.dict restores the outer value: CI's own report dir
+                # must survive this test (it was deleted once, losing the
+                # governance report from run 42169571888).
+                with contextlib.redirect_stderr(io.StringIO()), \
+                        mock.patch.dict(os.environ, {"LAB_TEST_REPORT_DIR": out}):
                     self.assertEqual(run_tests.main(["run_tests.py", "suite_r"]), 1)
             finally:
                 os.chdir(cwd)
-                del os.environ["LAB_TEST_REPORT_DIR"]
             with open(os.path.join(out, "suite_r.json")) as f:
                 report = json.load(f)
         self.assertEqual(report["format"], "lab-test-report-1")
