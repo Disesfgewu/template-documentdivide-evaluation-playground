@@ -1,0 +1,15 @@
+{
+  "question_id": "q_001",
+  "metric": "faithfulness",
+  "status": "pending",
+  "raw_value": 0.0,
+  "display_value": "0.00",
+  "rounding": "lab-round-1",
+  "numerator": null,
+  "denominator": null,
+  "reason_codes": [
+    "x"
+  ],
+  "grader_revision": "grader@1",
+  "support_refs": []
+}

@@ -40,6 +40,15 @@
     "loc": "max_parallel_queries",
     "type": "greater_than_equal"
   },
+  "CapabilityManifest.missing_capability.json": {
+    "loc": "chart_reading",
+    "type": "missing"
+  },
+  "CapabilityManifest.supported_without_evidence.json": {
+    "loc": "chart_reading",
+    "message": "supported requires at least one fixture_evidence",
+    "type": "value_error"
+  },
   "ErrorResponse.empty_request_id.json": {
     "loc": "error.request_id",
     "type": "string_too_short"
@@ -84,6 +93,39 @@
     "message": "succeeded requires result",
     "type": "value_error"
   },
+  "MetricResult.display_not_two_decimals.json": {
+    "loc": "display_value",
+    "type": "string_pattern_mismatch"
+  },
+  "MetricResult.display_rounding.json": {
+    "loc": "",
+    "message": "display_value must be 100*numerator/denominator rounded half-up to 2 decimals",
+    "type": "value_error"
+  },
+  "MetricResult.na_without_reason.json": {
+    "loc": "",
+    "message": "not_applicable requires reason_codes",
+    "type": "value_error"
+  },
+  "MetricResult.over_100.json": {
+    "loc": "raw_value",
+    "type": "less_than_equal"
+  },
+  "MetricResult.pending_as_zero.json": {
+    "loc": "",
+    "message": "pending must not carry raw_value/display_value",
+    "type": "value_error"
+  },
+  "MetricResult.raw_not_ratio.json": {
+    "loc": "",
+    "message": "raw_value must equal 100 * numerator / denominator",
+    "type": "value_error"
+  },
+  "MetricResult.zero_denominator.json": {
+    "loc": "",
+    "message": "scored requires denominator > 0 (use not_applicable)",
+    "type": "value_error"
+  },
   "PageRequest.over_max.json": {
     "loc": "page_size",
     "type": "less_than_equal"
@@ -91,6 +133,53 @@
   "PageRequest.zero.json": {
     "loc": "page_size",
     "type": "greater_than_equal"
+  },
+  "ParseManifest.dpi_too_high.json": {
+    "loc": "render_settings.dpi",
+    "type": "less_than_equal"
+  },
+  "ParseManifest.fallback_without_reason.json": {
+    "loc": "",
+    "message": "fallback_reason is required exactly when effective_profile differs from requested",
+    "type": "value_error"
+  },
+  "ParseManifest.finished_before_started.json": {
+    "loc": "",
+    "message": "finished_at is before started_at",
+    "type": "value_error"
+  },
+  "ParseManifest.map_misses_page.json": {
+    "loc": "",
+    "message": "page_index_map must cover exactly the selected pages",
+    "type": "value_error"
+  },
+  "ParseManifest.reason_without_fallback.json": {
+    "loc": "",
+    "message": "fallback_reason is required exactly when effective_profile differs from requested",
+    "type": "value_error"
+  },
+  "ParseManifest.reproducible_with_unknown.json": {
+    "loc": "",
+    "message": "reproducible manifests must not contain unknown or floating (latest) versions",
+    "type": "value_error"
+  },
+  "ParseRequest.duplicate_page.json": {
+    "loc": "",
+    "message": "duplicate page_index: 0",
+    "type": "value_error"
+  },
+  "ParseRequest.no_pages.json": {
+    "loc": "page_indices",
+    "type": "too_short"
+  },
+  "ParseResult.failed_without_diagnostics.json": {
+    "loc": "pages.2",
+    "message": "non-ok page status requires diagnostics",
+    "type": "value_error"
+  },
+  "ParseResult.no_raw_refs.json": {
+    "loc": "raw_result_refs",
+    "type": "too_short"
   },
   "PrepareRequest.duplicate_document.json": {
     "loc": "",
