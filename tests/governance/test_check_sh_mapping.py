@@ -3,9 +3,9 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
-    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "db", "db-unit"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "db", "db-unit"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "db", "db-unit"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
@@ -17,6 +17,10 @@ PATHS = {
     "contracts/lab_contracts/source.py": {"contracts"},
     "contracts/README.md": {"contracts", "governance"},
     "tests/contracts/test_foundation.py": {"contracts"},
+    "db/lab_db/repo.py": {"db", "db-unit"},
+    "db/README.md": {"db", "db-unit", "governance"},
+    "tests/db/test_outbox.py": {"db"},
+    "tests/dbunit/test_export.py": {"db-unit"},
     "web/src/App.tsx": {"web"},
     "web/package-lock.json": {"web"},
     "web/README.md": {"web", "governance"},

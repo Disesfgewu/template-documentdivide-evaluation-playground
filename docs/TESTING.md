@@ -14,6 +14,8 @@ scripts/check.sh --scope all     # 全部 suite（main push / 發布 gate 使用
 - `parser`：parser service 設定、`/healthz`、`/readyz`、`/v1/capabilities`（不宣稱 adapter 可用），需 `pip install -r services/parser/requirements.lock`。
 - `web`：React 前端（`web/`）的 `npm ci`（lockfile 鎖版，`engine-strict`）、vitest、`tsc` 型別檢查與 production build，需 Node.js 22.12 以上。沒有 node/npm 時印 `BLOCKED` 並以 exit 3 失敗。
 - `contracts`：基礎資料契約（`contracts/`）的合法/非法範例（非法範例必須只因所標示的原因被拒）、schema 漂移檢查、以獨立的 `jsonschema` 驗證匯出的 schema，以及 #21 關閉條件逐項列出的正反例。需要 `pip install -r contracts/requirements.lock -r requirements-dev.txt`。
+- `db`：真 PostgreSQL 的 migration（套用、重跑、checksum 竄改、失敗回滾、舊資料升級）、約束（跨專案、重複 revision、缺引用、凍結、audit append-only、artifact 生命週期）、交易（T48 同時 20 個相同 key、T49 audit/outbox 失敗回滾）、角色矩陣、gold RLS 隔離、job 狀態機、outbox 消費、artifact 清理與可取得性。每個測試類別建立一個新資料庫，需要 `LAB_TEST_DATABASE_URL`；沒有時印 `BLOCKED` 並以 exit 3 失敗，任何 skipped 也算失敗。
+- `db-unit`：不需資料庫的 `lab_db` 程式（匯出、redaction、本機 artifact store）。
 - `governance`（必要檔、PR/Issue templates、workflow 無空 job/`continue-on-error`/`|| true`、CODEOWNERS 身份核實、相對連結、密鑰樣式掃描、branch 清理判定）。後續 Issue 新增應用程式 suite 時需在 `scripts/check.sh` 註冊並對應路徑。
 - 本文件不代表 T01–T104 已執行；各 PR 驗證表須列實際指令、SHA 與結果。
 
