@@ -5,7 +5,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from lab_contracts.parse import CAPABILITIES, CapabilityManifest, ParseManifest, ParseRequest, ParseResult
-from lab_contracts.score import MetricResult, display
+from lab_contracts.score import MetricResult, display, display_ratio
 
 EX = Path(__file__).resolve().parents[2] / "contracts" / "examples" / "valid"
 
@@ -49,6 +49,21 @@ class ParseContractTests(unittest.TestCase):
         other = load(ParseRequest, "ParseRequest.three_pages", page_indices=[0, 1], operation_id="op_x")
         self.assertEqual(res.check_against_request(other),
                          ["operation_id_mismatch", "unrequested_pages_reported"])
+
+
+class ParseResultNegativeTests(unittest.TestCase):
+    def test_duplicate_reported_page_rejected(self):
+        obj = json.loads((EX / "ParseResult.mixed_pages.json").read_text())
+        obj["pages"].append(dict(obj["pages"][0]))
+        with self.assertRaises(ValidationError) as cm:
+            ParseResult.model_validate_json(json.dumps(obj))
+        self.assertIn("page_index", str(cm.exception))
+
+    def test_missing_extra_and_wrong_binding_reported_together(self):
+        req = load(ParseRequest, "ParseRequest.three_pages", page_indices=[0, 9], operation_id="op_other")
+        res = load(ParseResult, "ParseResult.mixed_pages")
+        self.assertEqual(res.check_against_request(req),
+                         ["operation_id_mismatch", "unrequested_pages_reported", "requested_pages_missing"])
 
 
 def metric(**kw):
@@ -98,12 +113,80 @@ class ScoreContractTests(unittest.TestCase):
         metric(status="not_applicable", raw_value=None, display_value=None, numerator=0.0,
                denominator=0.0, reason_codes=["no_applicable_checks"])
 
+    def test_large_equal_ratio_does_not_overflow(self):
+        # 100.0 * 1e308 is inf in binary; the ratio is evaluated in decimal.
+        m = metric(numerator=1e308, denominator=1e308, raw_value=100.0, display_value="100.00")
+        self.assertEqual(m.raw_value, 100.0)
+        m = metric(numerator=5e307, denominator=1e308, raw_value=50.0, display_value="50.00")
+        self.assertEqual(m.display_value, "50.00")
+        with self.assertRaises(ValidationError):
+            metric(numerator=1e308, denominator=1e308, raw_value=99.0, display_value="100.00")
+
+    def test_out_of_range_ratio_rejected(self):
+        # numerator > denominator is never a valid percentage, even when
+        # raw_value is clamped into range or the ratio would overflow.
+        for num, den in ((3.0, 2.0), (1e308, 1e307), (1.0000001, 1.0)):
+            for raw, disp in ((100.0, "100.00"), (min(100.0 * num / den, 100.0), "100.00")):
+                with self.subTest(num=num, den=den, raw=raw), self.assertRaises(ValidationError):
+                    metric(numerator=num, denominator=den, raw_value=raw, display_value=disp)
+
+    def test_not_applicable_ratio_representations(self):
+        na = dict(status="not_applicable", raw_value=None, display_value=None,
+                  reason_codes=["no_applicable_checks"])
+        for num, den in ((None, None), (0.0, 0.0)):
+            with self.subTest(num=num, den=den):
+                metric(numerator=num, denominator=den, **na)
+        for num, den in ((1.0, 0.0), (1.0, None), (0.0, None), (None, 0.0), (2.0, 5.0), (0.0, 1.0)):
+            with self.subTest(num=num, den=den), self.assertRaises(ValidationError):
+                metric(numerator=num, denominator=den, **{**na, "reason_codes": ["none"]})
+
     def test_rounding_version_is_pinned(self):
         from lab_contracts.score import ROUNDING_VERSION
         self.assertEqual(ROUNDING_VERSION, "lab-round-1")
         for bad in ("lab-round-2", "", None):
             with self.subTest(bad=bad), self.assertRaises(ValidationError):
                 metric(numerator=1.0, denominator=2.0, raw_value=50.0, display_value="50.00", rounding=bad)
+
+    def test_ratio_ties_round_half_up(self):
+        # Exact decimal ties on the ratio path: 1/800 -> 0.125 -> "0.13";
+        # 1/1600 -> 0.0625 -> "0.06" (not a tie at 2 places, rounds down).
+        self.assertEqual(display_ratio(1.0, 800.0), "0.13")
+        self.assertEqual(display_ratio(1.0, 1600.0), "0.06")
+        self.assertEqual(display_ratio(5.0, 8000.0), "0.06")   # 0.0625
+        self.assertEqual(display_ratio(1.0, 8.0), "12.50")
+        metric(numerator=1.0, denominator=800.0, raw_value=0.125, display_value="0.13")
+        with self.assertRaises(ValidationError):
+            metric(numerator=1.0, denominator=800.0, raw_value=0.125, display_value="0.12")
+
+    def test_non_finite_numbers_rejected(self):
+        # JSON has no NaN/Infinity literals; Python's json emits them, the
+        # contract must still refuse them.
+        for field in ("numerator", "denominator", "raw_value"):
+            for bad in (float("nan"), float("inf")):
+                kw = dict(numerator=1.0, denominator=2.0, raw_value=50.0, display_value="50.00")
+                kw[field] = bad
+                with self.subTest(field=field, bad=bad), self.assertRaises(ValidationError):
+                    metric(**kw)
+
+    def test_signed_zero_is_canonical_zero(self):
+        # PR #29 review: -0.0 is a valid numeric zero, not a validation error.
+        self.assertEqual(display_ratio(-0.0, 1.0), "0.00")
+        self.assertEqual(display(-0.0), "0.00")
+        self.assertEqual(display_ratio(-0.0, 3.0), "0.00")
+        for num, raw in ((0.0, 0.0), (-0.0, 0.0), (-0.0, -0.0), (0.0, -0.0)):
+            body = json.dumps(dict(question_id="q", metric="correctness", status="scored",
+                                   numerator=num, denominator=1.0, raw_value=raw, display_value="0.00",
+                                   rounding="lab-round-1", reason_codes=[], grader_revision="g@1",
+                                   support_refs=[]))
+            with self.subTest(num=num, raw=raw):
+                self.assertIn(f'"numerator": {num!r}', body)  # really sent as signed JSON
+                m = MetricResult.model_validate_json(body)
+                self.assertEqual((m.display_value, m.raw_value), ("0.00", 0.0))
+            with self.subTest(num=num, raw=raw, display="-0.00"), self.assertRaises(ValidationError):
+                MetricResult.model_validate_json(body.replace('"0.00"', '"-0.00"'))
+        # N/A 0/0 written with signed zeros is still the 0/0 representation.
+        metric(status="not_applicable", raw_value=None, display_value=None, numerator=-0.0,
+               denominator=-0.0, reason_codes=["no_applicable_checks"])
 
     def test_error_status_carries_no_number(self):
         with self.assertRaises(ValidationError):
