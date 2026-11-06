@@ -113,6 +113,33 @@ class ScoreContractTests(unittest.TestCase):
         metric(status="not_applicable", raw_value=None, display_value=None, numerator=0.0,
                denominator=0.0, reason_codes=["no_applicable_checks"])
 
+    def test_large_equal_ratio_does_not_overflow(self):
+        # 100.0 * 1e308 is inf in binary; the ratio is evaluated in decimal.
+        m = metric(numerator=1e308, denominator=1e308, raw_value=100.0, display_value="100.00")
+        self.assertEqual(m.raw_value, 100.0)
+        m = metric(numerator=5e307, denominator=1e308, raw_value=50.0, display_value="50.00")
+        self.assertEqual(m.display_value, "50.00")
+        with self.assertRaises(ValidationError):
+            metric(numerator=1e308, denominator=1e308, raw_value=99.0, display_value="100.00")
+
+    def test_out_of_range_ratio_rejected(self):
+        # numerator > denominator is never a valid percentage, even when
+        # raw_value is clamped into range or the ratio would overflow.
+        for num, den in ((3.0, 2.0), (1e308, 1e307), (1.0000001, 1.0)):
+            for raw, disp in ((100.0, "100.00"), (min(100.0 * num / den, 100.0), "100.00")):
+                with self.subTest(num=num, den=den, raw=raw), self.assertRaises(ValidationError):
+                    metric(numerator=num, denominator=den, raw_value=raw, display_value=disp)
+
+    def test_not_applicable_ratio_representations(self):
+        na = dict(status="not_applicable", raw_value=None, display_value=None,
+                  reason_codes=["no_applicable_checks"])
+        for num, den in ((None, None), (0.0, 0.0)):
+            with self.subTest(num=num, den=den):
+                metric(numerator=num, denominator=den, **na)
+        for num, den in ((1.0, 0.0), (1.0, None), (0.0, None), (None, 0.0), (2.0, 5.0), (0.0, 1.0)):
+            with self.subTest(num=num, den=den), self.assertRaises(ValidationError):
+                metric(numerator=num, denominator=den, **{**na, "reason_codes": ["none"]})
+
     def test_rounding_version_is_pinned(self):
         from lab_contracts.score import ROUNDING_VERSION
         self.assertEqual(ROUNDING_VERSION, "lab-round-1")
