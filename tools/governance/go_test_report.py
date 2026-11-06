@@ -1,11 +1,16 @@
 """Convert ``go test -json`` output into a lab-test-report-1 report.
 
-Usage: go_test_report.py --module <dir> --input <go-test-json-file>
+Usage: go_test_report.py --module <dir> --input <go-test-json-file> [--tags <t1,t2>]
 
 Prints the test output (as ``go test -v`` would) and, if LAB_TEST_REPORT_DIR
 is set, writes ``<module dir with / as _>_go.json`` there. Keys use the
-traceability reference format ``<dir>/<file>_test.go::TestName``; the file is
-found by scanning the package's ``*_test.go`` files for ``func TestName(``.
+traceability reference format ``<dir>/<file>_test.go::TestName``. The file is
+found by scanning only the test files ``go list`` reports as active for the
+package (TestGoFiles + XTestGoFiles) under the same build configuration: the
+inherited environment (GOOS, GOARCH, GOFLAGS, CGO_ENABLED) plus ``--tags``,
+which must match the tags given to ``go test``. Files excluded by build
+constraints are never credited, and a name defined in more than one active
+file is an error, never a guess (PM-REVIEW on #32 at b08a0d7).
 Only top-level tests are recorded (a failing subtest fails its parent in Go).
 A test that never ran (build failure, filtered out) is simply absent, which
 the traceability verifier treats as not executed. Exit status: 0, or 2 for
@@ -16,6 +21,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,16 +39,38 @@ def module_path(module_dir: Path) -> str:
     return m.group(1)
 
 
-def test_files(pkg_dir: Path) -> dict[str, str]:
-    """TestName -> file name, for one package directory."""
-    out = {}
-    for f in sorted(pkg_dir.glob("*_test.go")):
+def active_test_files(pkg_dir: Path, tags: str = "") -> list[str]:
+    """Test file names go would compile for this package under the current
+    build configuration. Any go list failure is an error (fail closed)."""
+    go = shutil.which("go")
+    if go is None:
+        raise ValueError("go is required to resolve the active test files")
+    cmd = [go, "list"] + ([f"-tags={tags}"] if tags else []) + [
+        "-f", "{{range .TestGoFiles}}{{.}}\n{{end}}{{range .XTestGoFiles}}{{.}}\n{{end}}", "."]
+    try:
+        run = subprocess.run(cmd, cwd=pkg_dir, capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, GOTOOLCHAIN=os.environ.get("GOTOOLCHAIN", "local")))
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"go list timed out in {pkg_dir}") from exc
+    if run.returncode != 0:
+        raise ValueError(f"go list failed in {pkg_dir}: {run.stderr.strip()}")
+    return [line for line in run.stdout.splitlines() if line]
+
+
+def test_files(pkg_dir: Path, active: list[str]) -> dict[str, str]:
+    """TestName -> file name over the active test files of one package."""
+    out: dict[str, str] = {}
+    for name_ in sorted(active):
+        f = pkg_dir / name_
         for name in GO_TEST_FUNC.findall(f.read_text(encoding="utf-8")):
+            if name in out:
+                raise ValueError(f"{name} is defined in both {out[name]} and {f.name} in {pkg_dir}; "
+                                 "attribution is ambiguous")
             out[name] = f.name
     return out
 
 
-def convert(lines, module_dir: str) -> tuple[dict[str, str], list[str]]:
+def convert(lines, module_dir: str, tags: str = "", active_files=active_test_files) -> tuple[dict[str, str], list[str]]:
     """Return (outcomes, output lines) from go test -json event lines."""
     mod = Path(module_dir)
     prefix = module_path(mod)
@@ -66,10 +95,10 @@ def convert(lines, module_dir: str) -> tuple[dict[str, str], list[str]]:
         rel = pkg[len(prefix):].lstrip("/")
         pkg_dir = mod / rel if rel else mod
         if pkg_dir not in files:
-            files[pkg_dir] = test_files(pkg_dir)
+            files[pkg_dir] = test_files(pkg_dir, active_files(pkg_dir, tags))
         name = files[pkg_dir].get(test)
         if name is None:
-            raise ValueError(f"{pkg}.{test}: no func {test} in {pkg_dir}/*_test.go")
+            raise ValueError(f"{pkg}.{test}: no func {test} in the active test files of {pkg_dir}")
         outcomes[f"{(pkg_dir / name).as_posix()}::{test}"] = OUTCOMES[action]
     return outcomes, output
 
@@ -79,12 +108,13 @@ def main(argv=None) -> int:
     try:
         module_dir = argv[argv.index("--module") + 1]
         source = argv[argv.index("--input") + 1]
+        tags = argv[argv.index("--tags") + 1] if "--tags" in argv else ""
     except (ValueError, IndexError):
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
     try:
         with open(source, encoding="utf-8") as f:
-            outcomes, output = convert(f, module_dir)
+            outcomes, output = convert(f, module_dir, tags)
     except (OSError, ValueError) as exc:
         print(f"go_test_report: {exc}", file=sys.stderr)
         return 2

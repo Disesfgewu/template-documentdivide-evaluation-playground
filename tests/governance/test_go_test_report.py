@@ -104,6 +104,84 @@ class ConvertTests(unittest.TestCase):
                     got = ct._execution_problems(outcomes, "7", ref)
                     self.assertTrue(got and msg in got[0], got)
 
+    def _go_test(self, m, *args):
+        if not shutil.which("go"):
+            self.fail("go is required for the governance suite (CI installs it); not skipped silently")
+        env = dict(os.environ, GOTOOLCHAIN="local", GOFLAGS="-mod=mod")
+        return subprocess.run(["go", "test", "-count=1", "-json", *args, "./..."], cwd=m.dir, env=env,
+                              capture_output=True, text=True, timeout=300)
+
+    def test_pm_repro_build_tag_excluded_file_is_not_credited(self):
+        """PM-REVIEW on #32 (b08a0d7): a_test.go defines TestExample and
+        z_test.go defines it again under //go:build never_pm. The old
+        converter credited z_test.go, which never compiled. Only the active
+        file is credited; a test only in an excluded file is absent."""
+        with GoModule() as m:
+            Path(m.dir, "lab_test.go").unlink()
+            Path(m.dir, "a_test.go").write_text(
+                'package labgo\n\nimport "testing"\n\nfunc TestExample(t *testing.T) {}\n\n'
+                'func TestActiveSkip(t *testing.T) { t.Skip("missing") }\n', encoding="utf-8")
+            Path(m.dir, "z_test.go").write_text(
+                '//go:build never_pm\n\npackage labgo\n\nimport "testing"\n\n'
+                'func TestExample(t *testing.T) { t.Fatal("excluded") }\n\n'
+                'func TestOnlyTagged(t *testing.T) {}\n', encoding="utf-8")
+            run = self._go_test(m)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            outcomes, _ = gr.convert(run.stdout.splitlines(), m.rel)
+            self.assertEqual(outcomes, {f"{m.rel}/a_test.go::TestExample": "passed",
+                                        f"{m.rel}/a_test.go::TestActiveSkip": "skipped"})
+            # Synthetic event for a test that exists only in the excluded file:
+            # rejected, never attributed to z_test.go.
+            with self.assertRaisesRegex(ValueError, "no func TestOnlyTagged in the active test files"):
+                gr.convert(events("example.com/labgo", ("TestOnlyTagged", "pass")), m.rel)
+            # The verifier then sees the tagged test as not executed.
+            for ref, msg in ((f"{m.rel}/z_test.go::TestOnlyTagged", "did not execute"),
+                             (f"{m.rel}/z_test.go::TestExample", "did not execute"),
+                             (f"{m.rel}/a_test.go::TestActiveSkip", "was not passed")):
+                with self.subTest(ref=ref):
+                    got = ct._execution_problems(outcomes, "7", ref)
+                    self.assertTrue(got and msg in got[0], got)
+            self.assertEqual(ct._execution_problems(outcomes, "7", f"{m.rel}/a_test.go::TestExample"), [])
+
+    def test_tags_select_the_same_files_as_go_test(self):
+        """With -tags never_pm on both sides, the tagged file is the active one."""
+        with GoModule() as m:
+            Path(m.dir, "lab_test.go").unlink()
+            Path(m.dir, "a_test.go").write_text(
+                '//go:build !never_pm\n\npackage labgo\n\nimport "testing"\n\n'
+                'func TestExample(t *testing.T) { t.Fatal("excluded") }\n', encoding="utf-8")
+            Path(m.dir, "z_test.go").write_text(
+                '//go:build never_pm\n\npackage labgo\n\nimport "testing"\n\n'
+                'func TestExample(t *testing.T) {}\n', encoding="utf-8")
+            run = self._go_test(m, "-tags=never_pm")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            outcomes, _ = gr.convert(run.stdout.splitlines(), m.rel, tags="never_pm")
+            self.assertEqual(outcomes, {f"{m.rel}/z_test.go::TestExample": "passed"})
+
+    def test_ambiguous_active_definitions_fail_closed(self):
+        """TestExample in the internal and the external (_test) package of the
+        same directory: both are active, so attribution is refused."""
+        with GoModule() as m:
+            Path(m.dir, "lab_test.go").unlink()
+            Path(m.dir, "lab.go").write_text("package labgo\n", encoding="utf-8")
+            Path(m.dir, "a_test.go").write_text(
+                'package labgo\n\nimport "testing"\n\nfunc TestExample(t *testing.T) {}\n', encoding="utf-8")
+            Path(m.dir, "b_test.go").write_text(
+                'package labgo_test\n\nimport "testing"\n\nfunc TestExample(t *testing.T) {}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "attribution is ambiguous"):
+                gr.convert(events("example.com/labgo", ("TestExample", "pass")), m.rel)
+
+    def test_go_list_failure_fails_closed(self):
+        with GoModule() as m:
+            with mock.patch.object(gr, "module_path", return_value="example.com/labgo"):
+                Path(m.dir, "go.mod").write_text("module example.com/labgo\n\ngo not-a-version\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "go list failed"):
+                    gr.convert(events("example.com/labgo", ("TestPasses", "pass")), m.rel)
+            Path(m.dir, "go.mod").write_text(GO_MOD, encoding="utf-8")
+            with mock.patch("shutil.which", return_value=None):
+                with self.assertRaisesRegex(ValueError, "go is required"):
+                    gr.convert(events("example.com/labgo", ("TestPasses", "pass")), m.rel)
+
     def test_worker_suite_emits_the_go_report(self):
         script = (Path(ct.ROOT) / "scripts" / "check.sh").read_text(encoding="utf-8")
         self.assertIn("go test -count=1 -json ./...", script)
