@@ -7,7 +7,8 @@ fixtures.generators may be used as generators (no arbitrary imports).
 A human review only promotes a fixture after its signoff record is resolved
 (``--verify-signoff`` asks GitHub; offline, ``human: true`` is rejected). The
 record must be a comment/review in this repository, on the Issue/PR the URL
-names, written by ``by`` (a GitHub user, not a bot), containing the line
+names, written by ``by`` (a GitHub user, not a bot) who is an owner, member
+or collaborator with write access according to GitHub, containing the line
 ``FIXTURE-SIGNOFF <fixture id> <fixture_digest>``. The digest covers the
 generated items and the expected/golden content, so changing either after
 signoff makes the review stale.
@@ -35,6 +36,10 @@ SIGNOFF_URL = re.compile(
     rf"https://github\.com/{re.escape(REPO)}/(issues|pull)/(\d+)"
     r"#(issuecomment|pullrequestreview|discussion_r)-?(\d+)")
 GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
+# A signer must be trusted by the repository itself (GitHub metadata), so a
+# public comment by anyone cannot promote a fixture.
+TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
 # Identities that are automation, never a human reviewer.
 NON_HUMAN_BY = re.compile(r"(agent|bot|model|claude|gemini|gpt|llm)", re.IGNORECASE)
 
@@ -118,6 +123,21 @@ def github_signoff_verifier(fetch=None):
         if user.get("login") != review.get("by") or user.get("type") != "User":
             problems.append(f"{fid}: signoff author {user.get('login')!r} ({user.get('type')}) "
                             f"is not reviewer {review.get('by')!r}")
+        # The registry's ``by`` is only a claim: the signer must also be
+        # trusted by this repository, judged from GitHub, not the registry.
+        login = user.get("login")
+        if record.get("author_association") not in TRUSTED_ASSOCIATIONS:
+            problems.append(f"{fid}: signoff author {login!r} is not a repository owner/member/collaborator "
+                            f"(author_association={record.get('author_association')!r})")
+        else:
+            try:
+                perm = fetch(f"repos/{REPO}/collaborators/{login}/permission")
+            except Exception as exc:
+                problems.append(f"{fid}: signoff author permission could not be resolved ({exc})")
+            else:
+                if perm.get("permission") not in TRUSTED_PERMISSIONS:
+                    problems.append(f"{fid}: signoff author {login!r} lacks write access "
+                                    f"(permission={perm.get('permission')!r})")
         lines = [ln.strip() for ln in str(record.get("body") or "").splitlines()]
         if signoff_line(fid, digest) not in lines:
             problems.append(f"{fid}: signoff record does not contain '{signoff_line(fid, digest)}'")

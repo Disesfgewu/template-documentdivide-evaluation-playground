@@ -32,26 +32,31 @@ def promote(review):
     return mutate
 
 
-def fake_fetch(body=None, **change):
-    """Stand-in for gh api: only COMMENT_ID exists, on issue 31."""
+def fake_fetch(body=None, permissions=None, **change):
+    """Stand-in for gh api: only COMMENT_ID exists, on issue 31; repository
+    permissions per login (default: Disesfgewu is admin, others none)."""
+    permissions = {"Disesfgewu": "admin"} if permissions is None else permissions
     digest = rc.fixture_digest(f01(DOC)["items"], EXPECTED)
     record = {"issue_url": f"https://api.github.com/repos/{rc.REPO}/issues/31",
-              "user": {"login": "Disesfgewu", "type": "User"},
+              "user": {"login": "Disesfgewu", "type": "User"}, "author_association": "OWNER",
               "body": rc.signoff_line("F01", digest) if body is None else body, **change}
 
     def fetch(path):
         if path == f"repos/{rc.REPO}/issues/comments/{COMMENT_ID}":
             return record
+        if path.startswith(f"repos/{rc.REPO}/collaborators/") and path.endswith("/permission"):
+            login = path.split("/")[-2]
+            return {"permission": permissions.get(login, "none")}
         raise RuntimeError(f"HTTP 404: {path}")
     return fetch
 
 
-def signed_off(body=None, **change):
-    review = {"human": True, "by": "Disesfgewu", "date": "2026-11-05",
+def signed_off(body=None, by="Disesfgewu", permissions=None, **change):
+    review = {"human": True, "by": by, "date": "2026-11-05",
               "method": "page counts re-read with pypdf and compared with the SPEC T14 table",
               "signoff": f"https://github.com/{rc.REPO}/issues/31#issuecomment-{COMMENT_ID}",
               "fixture_digest": rc.fixture_digest(f01(DOC)["items"], EXPECTED)}
-    return review, rc.github_signoff_verifier(fake_fetch(body, **change))
+    return review, rc.github_signoff_verifier(fake_fetch(body, permissions, **change))
 
 
 class RegistryTests(unittest.TestCase):
@@ -137,6 +142,23 @@ class RegistryTests(unittest.TestCase):
                 _, v = signed_off(body=body, **change)
                 got = errs(promote(good), verify=v)
                 self.assertTrue(any(msg in e for e in got), got)
+        # PM-REVIEW on #34 (305f766): an outsider's exact signoff line, with
+        # by=outsider, promoted F01. The signer must be trusted by GitHub.
+        outsider = {"user": {"login": "outsider", "type": "User"}, "author_association": "NONE"}
+        review, v = signed_off(by="outsider", **outsider)
+        got = errs(promote(review), verify=v)
+        self.assertIn("F01: signoff author 'outsider' is not a repository owner/member/collaborator "
+                      "(author_association='NONE')", got)
+        # A collaborator with read-only access is not trusted either.
+        reader = {"user": {"login": "reader1", "type": "User"}, "author_association": "COLLABORATOR"}
+        review, v = signed_off(by="reader1", permissions={"reader1": "read"}, **reader)
+        self.assertIn("F01: signoff author 'reader1' lacks write access (permission='read')",
+                      errs(promote(review), verify=v))
+        # Authorized signers: the owner, and a write collaborator.
+        writer = {"user": {"login": "writer1", "type": "User"}, "author_association": "COLLABORATOR"}
+        review, v = signed_off(by="writer1", permissions={"writer1": "write"}, **writer)
+        self.assertEqual(errs(promote(review), verify=v), [])
+        self.assertEqual(errs(promote(good), verify=verify), [])
         # Changing an expected/golden value after signoff makes it stale.
         def changed_expected(d):
             promote(good)(d)
