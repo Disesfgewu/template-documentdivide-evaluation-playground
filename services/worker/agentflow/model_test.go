@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Disesfgewu/agentkit/graph"
 	"github.com/Disesfgewu/agentkit/model"
@@ -395,4 +396,48 @@ type clientFunc func(context.Context, model.Request) (model.Response, error)
 
 func (f clientFunc) Chat(ctx context.Context, req model.Request) (model.Response, error) {
 	return f(ctx, req)
+}
+
+// R20/T27: invalid integer extremes must not wrap into valid retry or
+// timeout settings. No request should be constructed from these configs.
+func TestModelConfigIntegerBoundaries(t *testing.T) {
+	maxTimeoutSeconds := int64(math.MaxInt64) / int64(time.Second)
+	for _, retries := range []int{1, MaxTransportAttempts - 1} {
+		c := goodConfig("boundary", "http://unused")
+		c.MaxRetries = retries
+		if err := ValidateModelConfig(c); err != nil {
+			t.Fatalf("valid retries %d: %v", retries, err)
+		}
+	}
+	for _, retries := range []int{0, -1, math.MinInt, MaxTransportAttempts, math.MaxInt} {
+		c := goodConfig("boundary", "http://unused")
+		c.MaxRetries = retries
+		if err := ValidateModelConfig(c); !errors.Is(err, ErrModelConfig) {
+			t.Errorf("invalid retries %d accepted: %v", retries, err)
+		}
+		if err := ValidateRouter(model.Router{Entries: []model.Entry{{Config: c}}}); !errors.Is(err, ErrModelConfig) {
+			t.Errorf("router accepted invalid retries %d: %v", retries, err)
+		}
+	}
+	// On 32-bit hosts every positive int number of seconds fits Duration.
+	if int64(math.MaxInt) <= maxTimeoutSeconds {
+		return
+	}
+	for _, seconds := range []int64{1, maxTimeoutSeconds} {
+		c := goodConfig("boundary", "http://unused")
+		c.TimeoutSeconds = int(seconds)
+		if err := ValidateModelConfig(c); err != nil {
+			t.Errorf("valid timeout %d: %v", seconds, err)
+		}
+	}
+	for _, seconds := range []int64{maxTimeoutSeconds + 1, int64(math.MaxInt)} {
+		c := goodConfig("boundary", "http://unused")
+		c.TimeoutSeconds = int(seconds)
+		if err := ValidateModelConfig(c); !errors.Is(err, ErrModelConfig) {
+			t.Errorf("unrepresentable timeout %d accepted: %v", seconds, err)
+		}
+		if err := ValidateRouter(model.Router{Entries: []model.Entry{{Config: c}}}); !errors.Is(err, ErrModelConfig) {
+			t.Errorf("router accepted unrepresentable timeout %d: %v", seconds, err)
+		}
+	}
 }

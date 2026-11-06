@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/Disesfgewu/agentkit/graph"
 	"github.com/Disesfgewu/agentkit/model"
@@ -46,7 +48,8 @@ func (e *ProviderStatusError) Unwrap() error { return e.Err }
 //
 //   - MaxRetries must be 1..2 (attempts = MaxRetries+1 <= 3). At ce49a71,
 //     MaxRetries 0 means 5 retries (6 attempts), so 0 is rejected.
-//   - TimeoutSeconds must be set (0 silently means 3 minutes).
+//   - TimeoutSeconds must be set and fit time.Duration in seconds
+//     (0 silently means 3 minutes).
 //   - RequestsPerMinute must be set (shared provider quota).
 func ValidateModelConfig(c model.Config) error {
 	var problems []string
@@ -56,11 +59,11 @@ func ValidateModelConfig(c model.Config) error {
 	if c.Kind == model.KindEmbedding {
 		problems = append(problems, "embedding models are not chat models")
 	}
-	if c.MaxRetries < 1 || c.MaxRetries+1 > MaxTransportAttempts {
+	if c.MaxRetries < 1 || c.MaxRetries > MaxTransportAttempts-1 {
 		problems = append(problems, fmt.Sprintf("max_retries %d: must be 1..%d (0 means 5 retries in agentKit)", c.MaxRetries, MaxTransportAttempts-1))
 	}
-	if c.TimeoutSeconds <= 0 {
-		problems = append(problems, "timeout_seconds must be set explicitly")
+	if c.TimeoutSeconds <= 0 || int64(c.TimeoutSeconds) > math.MaxInt64/int64(time.Second) {
+		problems = append(problems, "timeout_seconds must be positive and fit time.Duration")
 	}
 	if c.RequestsPerMinute <= 0 {
 		problems = append(problems, "requests_per_minute must be set")
