@@ -37,6 +37,49 @@ class RegistryTests(unittest.TestCase):
         got = errs(lambda d: f01(d).update(status="available"))
         self.assertIn("F01: available requires a human review record", got)
 
+    def test_human_review_gate(self):
+        """PM-REVIEW 6676133319: a flag-only, untraceable, impossible-date or
+        stale signoff must not promote a fixture to available (T05/T14)."""
+        def promote(review):
+            def mutate(d):
+                f01(d).update(status="available", missing=[])
+                f01(d)["golden"]["review"] = review
+            return mutate
+        digest = rc.fixture_digest(f01(DOC)["items"])
+        good = {"human": True, "by": "Disesfgewu", "date": "2026-11-05",
+                "method": "page counts re-read with pypdf and compared with the SPEC T14 table",
+                "signoff": f"https://github.com/{rc.REPO}/issues/31#issuecomment-6676139956",
+                "fixture_digest": digest}
+        self.assertEqual(errs(promote(good), reproduce=False), [])
+        bad = {
+            "PM repro: agent by, impossible date": {"human": True, "by": "coding-agent", "date": "2026-99-99"},
+            "flag only": {"human": True, "by": "Disesfgewu", "date": "2026-11-05", "method": "looked"},
+            "invalid calendar date": dict(good, date="2026-02-30"),
+            "future date": dict(good, date="2999-01-01"),
+            "automation identity": dict(good, by="coding-agent"),
+            "bot identity": dict(good, by="github-actions[bot]"),
+            "signoff outside repo": dict(good, signoff="https://example.com/ok"),
+            "no method": dict(good, method=" "),
+            "stale review": dict(good, fixture_digest=rc.fixture_digest(f01(DOC)["items"][1:])),
+        }
+        for label, review in bad.items():
+            with self.subTest(label):
+                got = errs(promote(review), reproduce=False)
+                self.assertTrue(got, label)
+        stale = errs(promote(bad["stale review"]), reproduce=False)
+        self.assertIn("F01: human review is stale (fixture_digest does not match the current items)", stale)
+        # Changing a reviewed item after signoff also makes the review stale.
+        def changed(d):
+            promote(good)(d)
+            f01(d)["items"][0]["sha256"] = "1" * 64
+        self.assertTrue(any("stale" in e for e in errs(changed, reproduce=False)))
+        # Unreviewed fixtures stay partial and still pass.
+        for e in DOC["fixtures"]:
+            with self.subTest(fid=e["id"]):
+                if e["status"] != "planned":
+                    self.assertEqual(e["status"], "partial")
+                    self.assertIs(e["golden"]["review"]["human"], False)
+
     def test_generator_outside_package_rejected(self):
         got = errs(lambda d: f01(d)["items"][0].update(generator="os"), reproduce=True)
         self.assertTrue(any("outside fixtures.generators" in e for e in got))

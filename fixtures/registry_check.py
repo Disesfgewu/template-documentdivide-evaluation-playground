@@ -4,6 +4,7 @@ Generator items are rebuilt in memory and must match the pinned sha256 byte
 for byte; file items must exist and match. Only modules under
 fixtures.generators may be used as generators (no arbitrary imports).
 """
+import datetime
 import hashlib
 import importlib
 import json
@@ -17,6 +18,15 @@ REGISTRY = ROOT / "fixtures" / "registry.yaml"
 REQUIRED_IDS = [f"F{i:02d}" for i in range(1, 13)]
 STATUSES = {"planned", "partial", "available"}
 ORIGINS = {"human", "script", "spec_table"}  # never "model"
+REPO = "Disesfgewu/template-documentdivide-evaluation-playground"
+# A human signoff must point at a GitHub comment/review in this repository
+# whose author can be checked; a bare flag or free-text name is not traceable.
+SIGNOFF_URL = re.compile(
+    rf"https://github\.com/{re.escape(REPO)}/(issues|pull)/\d+"
+    r"#(issuecomment|pullrequestreview|discussion_r)-?\d+")
+GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
+# Identities that are automation, never a human reviewer.
+NON_HUMAN_BY = re.compile(r"(agent|bot|model|claude|gemini|gpt|llm)", re.IGNORECASE)
 
 
 def _inside_fixtures(rel) -> Path:
@@ -48,7 +58,49 @@ def _expected_items(rel) -> dict:
     return items
 
 
-def check(doc: dict, reproduce: bool = True) -> list[str]:
+def fixture_digest(items) -> str:
+    """sha256 over the sorted "item_id:sha256" lines of one fixture version.
+    A human review records this digest; any item change makes it stale."""
+    lines = sorted(f"{it.get('id')}:{it.get('sha256')}" for it in items if isinstance(it, dict))
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _review_errors(fid, review, items, today: datetime.date) -> list[str]:
+    errors = []
+    if not isinstance(review, dict):
+        return [f"{fid}: golden.review must be a mapping"]
+    human, by = review.get("human"), review.get("by")
+    if not isinstance(human, bool) or not isinstance(by, str) or not by.strip():
+        errors.append(f"{fid}: golden.review needs human (bool) and by")
+    raw = review.get("date")
+    try:
+        if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            raise ValueError
+        when = datetime.date.fromisoformat(raw)
+    except ValueError:
+        errors.append(f"{fid}: golden.review.date must be a real calendar date (YYYY-MM-DD), got {raw!r}")
+    else:
+        if when > today:
+            errors.append(f"{fid}: golden.review.date {raw} is in the future")
+    method = review.get("method")
+    if not isinstance(method, str) or not method.strip():
+        errors.append(f"{fid}: golden.review.method must describe how the golden was checked")
+    if human is True:
+        if (not isinstance(by, str) or not GITHUB_LOGIN.fullmatch(by)
+                or NON_HUMAN_BY.search(by)):
+            errors.append(f"{fid}: human review 'by' must be the reviewer's GitHub login, not an automation identity")
+        if not isinstance(review.get("signoff"), str) or not SIGNOFF_URL.fullmatch(review["signoff"]):
+            errors.append(f"{fid}: human review needs signoff = URL of the reviewer's GitHub comment/review in {REPO}")
+        digest = review.get("fixture_digest")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            errors.append(f"{fid}: human review needs fixture_digest (sha256 of the reviewed items)")
+        elif digest != fixture_digest(items):
+            errors.append(f"{fid}: human review is stale (fixture_digest does not match the current items)")
+    return errors
+
+
+def check(doc: dict, reproduce: bool = True, today: datetime.date | None = None) -> list[str]:
+    today = today or datetime.date.today()
     errors = []
     entries = doc.get("fixtures") if isinstance(doc, dict) else None
     if not isinstance(entries, list):
@@ -79,10 +131,9 @@ def check(doc: dict, reproduce: bool = True) -> list[str]:
         if golden.get("origin") not in ORIGINS:
             errors.append(f"{fid}: golden.origin must be one of {sorted(ORIGINS)} (never model output)")
         review = golden.get("review") or {}
-        if (not isinstance(review.get("human"), bool) or not review.get("by")
-                or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(review.get("date", "")))):
-            errors.append(f"{fid}: golden.review needs human (bool), by, date (YYYY-MM-DD)")
-        if status == "available" and review.get("human") is not True:
+        raw_items = e.get("items")
+        errors.extend(_review_errors(fid, review, raw_items if isinstance(raw_items, list) else [], today))
+        if status == "available" and (not isinstance(review, dict) or review.get("human") is not True):
             errors.append(f"{fid}: available requires a human review record")
         try:
             exp_items = _expected_items(e.get("expected"))
