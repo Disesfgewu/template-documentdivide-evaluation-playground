@@ -21,6 +21,8 @@ NonNeg = Annotated[FiniteFloat, Field(ge=0.0)]
 # half-up to two places, computed from the decimal numerator/denominator.
 # A change of rule is a new version, never a silent re-rounding.
 ROUNDING_VERSION = "lab-round-1"
+# The only (numerator, denominator) pairs a not_applicable result may carry.
+NA_RATIOS = ((None, None), (0.0, 0.0))
 
 
 def display(value: float) -> str:
@@ -29,13 +31,21 @@ def display(value: float) -> str:
     return str(Decimal(repr(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def _ratio_percent(numerator: float, denominator: float) -> Decimal:
+    """100*numerator/denominator evaluated in decimal. Never overflows for
+    finite floats (1e308/1e308 is 100, where 100.0*1e308 would be inf)."""
+    with localcontext() as ctx:
+        ctx.prec = 50
+        return Decimal(repr(numerator)) * 100 / Decimal(repr(denominator))
+
+
 def display_ratio(numerator: float, denominator: float) -> str:
     """Display value of 100*numerator/denominator computed in decimal, so a
     binary artefact such as 100*0.12345 == 12.344999999999999 still shows
     as "12.35"."""
     with localcontext() as ctx:
         ctx.prec = 50
-        exact = Decimal(repr(numerator)) * 100 / Decimal(repr(denominator))
+        exact = _ratio_percent(numerator, denominator)
         return str(exact.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
@@ -60,7 +70,10 @@ class MetricResult(Contract):
                 raise ValueError("scored requires raw_value, display_value, numerator and denominator")
             if self.denominator == 0:
                 raise ValueError("scored requires denominator > 0 (use not_applicable)")
-            expected = 100.0 * self.numerator / self.denominator
+            if self.numerator > self.denominator:
+                # Every metric here is a percentage of its denominator.
+                raise ValueError("scored requires numerator <= denominator")
+            expected = float(_ratio_percent(self.numerator, self.denominator))
             if not math.isclose(self.raw_value, expected, rel_tol=1e-9, abs_tol=1e-9):
                 raise ValueError("raw_value must equal 100 * numerator / denominator")
             if self.display_value != display_ratio(self.numerator, self.denominator):
@@ -71,9 +84,10 @@ class MetricResult(Contract):
                 raise ValueError(f"{self.status} must not carry raw_value/display_value")
             if self.status in ("pending", "error") and (self.numerator, self.denominator) != (None, None):
                 raise ValueError(f"{self.status} must not carry numerator/denominator")
-            if self.status == "not_applicable" and self.denominator not in (None, 0):
-                # N/A means nothing applicable: an informative 0/0 at most.
-                raise ValueError("not_applicable allows only a zero (or null) denominator")
+            if self.status == "not_applicable" and (self.numerator, self.denominator) not in NA_RATIOS:
+                # N/A means nothing applicable: exactly null/null or an
+                # informative 0/0; never a positive numerator or a mixed pair.
+                raise ValueError("not_applicable allows only numerator/denominator null/null or 0/0")
             if not self.reason_codes:
                 raise ValueError(f"{self.status} requires reason_codes")
         return self
