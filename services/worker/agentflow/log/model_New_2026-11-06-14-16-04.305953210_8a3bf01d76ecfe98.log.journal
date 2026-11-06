@@ -1,1 +1,0 @@
-{"call_id":1,"parent_call_id":0,"function":"model.New","input":{"base_url":"http://127.0.0.1:34099","max_retries":1,"model":"primary-model","name":"primary","protocol":"openai_chat","requests_per_minute":6000,"timeout_seconds":30},"time":"2026-11-06T06:16:04.306201945Z"}

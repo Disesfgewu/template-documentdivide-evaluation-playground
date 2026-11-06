@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -339,4 +340,100 @@ func TestBudgetConcurrencyRaceLastBudgetT28(t *testing.T) {
 			t.Fatalf("iter %d: expected Reserved == 900_000, got %d", iter, snap.Reserved)
 		}
 	}
+}
+
+// PM-REVIEW on #39 (4f904e7): with limit MaxInt64, reserving MaxInt64 and then
+// 1 under another ID wrapped spent+reserved+amount to MinInt64 and passed the
+// cap (R20/T28). Settlement could also wrap spent. Rejected mutations must
+// leave the ledger unchanged.
+func TestBudgetInt64BoundariesNeverWrap(t *testing.T) {
+	ctx := context.Background()
+	usd := func(n int64) Money { return Money{Micros: n, Currency: "USD", PricingRevision: "2026-01"} }
+	same := func(t *testing.T, got, want LedgerSnapshot) {
+		t.Helper()
+		if got != want {
+			t.Fatalf("ledger changed on a rejected mutation: got %+v want %+v", got, want)
+		}
+	}
+
+	t.Run("reserve at MaxInt64 then 1 more is rejected", func(t *testing.T) {
+		l, err := NewLedger(usd(math.MaxInt64))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Reserve(ctx, "a", usd(math.MaxInt64)); err != nil {
+			t.Fatalf("reserve exactly the limit: %v", err)
+		}
+		before := l.Snapshot()
+		if err := l.Reserve(ctx, "b", usd(1)); !errors.Is(err, ErrBudgetExceeded) {
+			t.Fatalf("PM repro: want ErrBudgetExceeded, got %v", err)
+		}
+		if err := l.Reserve(ctx, "c", usd(math.MaxInt64)); !errors.Is(err, ErrBudgetExceeded) {
+			t.Fatalf("second MaxInt64 reserve: want ErrBudgetExceeded, got %v", err)
+		}
+		same(t, l.Snapshot(), before)
+	})
+
+	t.Run("settle at the limit then reserve 1 is rejected", func(t *testing.T) {
+		l, _ := NewLedger(usd(math.MaxInt64))
+		_ = l.Reserve(ctx, "a", usd(10))
+		if err := l.Settle("a", usd(math.MaxInt64)); err != nil {
+			t.Fatalf("settle up to MaxInt64: %v", err)
+		}
+		if s := l.Snapshot(); s.Spent != math.MaxInt64 || s.Reserved != 0 {
+			t.Fatalf("unexpected snapshot %+v", s)
+		}
+		if err := l.Reserve(ctx, "b", usd(1)); !errors.Is(err, ErrBudgetExceeded) {
+			t.Fatalf("want ErrBudgetExceeded, got %v", err)
+		}
+	})
+
+	t.Run("settle that would wrap spent is rejected and state kept", func(t *testing.T) {
+		l, _ := NewLedger(usd(math.MaxInt64))
+		_ = l.Reserve(ctx, "a", usd(5))
+		_ = l.Reserve(ctx, "b", usd(5))
+		if err := l.Settle("a", usd(math.MaxInt64-1)); err != nil {
+			t.Fatal(err)
+		}
+		before := l.Snapshot()
+		if err := l.Settle("b", usd(2)); !errors.Is(err, ErrLedgerOverflow) {
+			t.Fatalf("want ErrLedgerOverflow, got %v", err)
+		}
+		same(t, l.Snapshot(), before)
+		// The reservation is still held and settles at the exact boundary.
+		if err := l.Settle("b", usd(1)); err != nil {
+			t.Fatalf("settle to exactly MaxInt64: %v", err)
+		}
+		if s := l.Snapshot(); s.Spent != math.MaxInt64 || s.Reserved != 0 {
+			t.Fatalf("unexpected snapshot %+v", s)
+		}
+	})
+
+	t.Run("overrun beyond the limit blocks new reservations", func(t *testing.T) {
+		l, _ := NewLedger(usd(100))
+		_ = l.Reserve(ctx, "a", usd(10))
+		_ = l.Reserve(ctx, "b", usd(10))
+		if err := l.Settle("a", usd(150)); err != nil {
+			t.Fatal(err)
+		}
+		before := l.Snapshot()
+		if err := l.Reserve(ctx, "c", usd(1)); !errors.Is(err, ErrBudgetExceeded) {
+			t.Fatalf("want ErrBudgetExceeded after an overrun, got %v", err)
+		}
+		same(t, l.Snapshot(), before)
+	})
+
+	t.Run("exact remaining is accepted, one more is not", func(t *testing.T) {
+		l, _ := NewLedger(usd(math.MaxInt64))
+		_ = l.Reserve(ctx, "a", usd(math.MaxInt64-7))
+		if err := l.Reserve(ctx, "b", usd(8)); !errors.Is(err, ErrBudgetExceeded) {
+			t.Fatalf("want ErrBudgetExceeded, got %v", err)
+		}
+		if err := l.Reserve(ctx, "b", usd(7)); err != nil {
+			t.Fatalf("exact remaining: %v", err)
+		}
+		if s := l.Snapshot(); s.Reserved != math.MaxInt64 {
+			t.Fatalf("reserved %d", s.Reserved)
+		}
+	})
 }

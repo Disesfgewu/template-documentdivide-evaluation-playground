@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 )
 
@@ -12,6 +13,7 @@ var (
 	ErrCancelled            = errors.New("cancelled: no new paid call")
 	ErrUnknownReservation   = errors.New("unknown reservation")
 	ErrDuplicateReservation = errors.New("duplicate reservation")
+	ErrLedgerOverflow       = errors.New("ledger total would overflow int64")
 )
 
 type Money struct {
@@ -86,12 +88,18 @@ func (l *Ledger) Reserve(ctx context.Context, id string, amount Money) error {
 		return ErrDuplicateReservation
 	}
 
+	// Remaining-budget subtraction instead of spent+reserved+amount, which
+	// can wrap (PM-REVIEW on #39 at 4f904e7). All terms are >= 0 and the
+	// reserved total never exceeds limit, so no step below can overflow.
 	var reserved int64
 	for _, r := range l.reservations {
 		reserved += r.amount
 	}
-
-	if l.spent+reserved+amount.Micros > l.limit {
+	remaining := int64(0)
+	if l.spent <= l.limit && reserved <= l.limit-l.spent {
+		remaining = l.limit - l.spent - reserved
+	}
+	if amount.Micros > remaining {
 		return fmt.Errorf("%w: spent %d + reserved %d + requested %d > limit %d",
 			ErrBudgetExceeded, l.spent, reserved, amount.Micros, l.limit)
 	}
@@ -119,6 +127,12 @@ func (l *Ledger) Settle(id string, actual Money) error {
 	_, exists := l.reservations[id]
 	if !exists {
 		return ErrUnknownReservation
+	}
+	// Checked add: an actual cost may exceed its reservation (an honest
+	// overrun), but spent must never wrap. On rejection the reservation
+	// stays held and spent is unchanged.
+	if actual.Micros > math.MaxInt64-l.spent {
+		return fmt.Errorf("%w: spent %d + actual %d", ErrLedgerOverflow, l.spent, actual.Micros)
 	}
 
 	delete(l.reservations, id)

@@ -5,3 +5,4 @@ __pycache__/
 web/node_modules/
 web/dist/
 services/worker/agentkitsmoke/log/
+services/worker/agentflow/log/
