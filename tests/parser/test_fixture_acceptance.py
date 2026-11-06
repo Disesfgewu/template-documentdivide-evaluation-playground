@@ -42,6 +42,33 @@ def gray_ratio(png):
     return gray / (width * height)
 
 
+def crop_pixel_match(full_png, crop_png, golden):
+    """Compare actual crop content with the fixed location in the full L0 page.
+
+    PDFium rounds each crop margin separately. Permit one raster pixel around
+    the golden origin, but require every RGB byte to match a page slice. This
+    checks content placement independently of the crop's reported transform.
+    """
+    full_w, full_h, full = decode_png_rgb(full_png)
+    crop_w, crop_h, crop = decode_png_rgb(crop_png)
+    origin_x, origin_y = round(golden[0] * full_w), round(golden[1] * full_h)
+    candidates = []
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            x, y = origin_x + dx, origin_y + dy
+            if x < 0 or y < 0 or x + crop_w > full_w or y + crop_h > full_h:
+                continue
+            reference = b''.join(
+                full[((y + row) * full_w + x) * 3:((y + row) * full_w + x + crop_w) * 3]
+                for row in range(crop_h))
+            candidates.append((sum(a != b for a, b in zip(reference, crop)), x, y,
+                               hashlib.sha256(reference).hexdigest()))
+    mismatch, x, y, reference_hash = min(candidates)
+    return {'mismatched_rgb_bytes': mismatch, 'page_pixel_origin': [x, y],
+            'reference_rgb_sha256': reference_hash,
+            'crop_rgb_sha256': hashlib.sha256(crop).hexdigest()}
+
+
 def marker_extents(png):
     """Locate connected gray fills in actual L0 pixels, without PDF transforms.
 
@@ -220,6 +247,7 @@ class FixtureAcceptance(unittest.TestCase):
                         self.assertLessEqual(abs(got - pt * dpi / 72), 1)
                     self.assertEqual(asset.transform['page_size_pt'], DISPLAY_SIZES[index])
                     if dpi == 72:
+                        full_png = asset.png
                         observed = marker_extents(asset.png)
                         actual['observed_marker_bboxes'] = observed
                         golden_boxes = sorted(m['bbox'] for m in exp['markers'])
@@ -249,6 +277,9 @@ class FixtureAcceptance(unittest.TestCase):
                                          ((golden[2] - golden[0]) * width, (golden[3] - golden[1]) * height)):
                         self.assertLessEqual(abs(got - want), 2)
                     self.assertGreater(actual['gray_ratio'], GRAY_MIN_RATIO)
+                    actual['full_page_pixel_match'] = crop_pixel_match(full_png, asset.png, golden)
+                    self.assertEqual(actual['full_page_pixel_match']['mismatched_rgb_bytes'], 0,
+                                     'crop pixels must match the golden location in the full page')
                     # Wrong transforms must fail the T05 localization oracle. A wrong crop
                     # may still contain gray pixels, so pixel coverage alone is insufficient.
                     negatives = {'wrong_rotation': to_region_space(box, page.visible_box, (page.rotation + 90) % 360)}
