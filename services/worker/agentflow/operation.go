@@ -12,15 +12,17 @@ import (
 type OpStatus string
 
 const (
-	OpStarted   OpStatus = "started"
-	OpSucceeded OpStatus = "succeeded"
-	OpFailed    OpStatus = "failed"
-	OpUnknown   OpStatus = "outcome_unknown"
+	OpAccountingPending OpStatus = "accounting_pending"
+	OpStarted           OpStatus = "started"
+	OpSucceeded         OpStatus = "succeeded"
+	OpFailed            OpStatus = "failed"
+	OpUnknown           OpStatus = "outcome_unknown"
 )
 
 var (
-	ErrOutcomeUnknown = errors.New("outcome_unknown: external call may have happened; reconcile before continuing")
-	ErrResponseLost   = errors.New("response lost") // an Effect returns an error wrapping this when the request was sent but no response/result arrived
+	ErrAccountingPending = errors.New("accounting_pending: saved result requires reconciliation before publication")
+	ErrOutcomeUnknown    = errors.New("outcome_unknown: external call may have happened; reconcile before continuing")
+	ErrResponseLost      = errors.New("response lost") // an Effect returns an error wrapping this when the request was sent but no response/result arrived
 )
 
 type OpKey struct {
@@ -49,7 +51,7 @@ type OperationStore interface {
 	Get(ctx context.Context, key OpKey) (Operation, bool, error)
 	Begin(ctx context.Context, key OpKey) error                                                       // create status started with no attempts; error if it already exists
 	AddAttempt(ctx context.Context, key OpKey, a Attempt) error                                       // append
-	Finish(ctx context.Context, key OpKey, status OpStatus, result graph.State, errText string) error // status succeeded|failed|outcome_unknown
+	Finish(ctx context.Context, key OpKey, status OpStatus, result graph.State, errText string) error // status accounting_pending|succeeded|failed|outcome_unknown
 }
 
 type MemoryOperationStore struct {
@@ -185,6 +187,7 @@ func (r *NodeRunner) Node(effect Effect) (graph.Node, error) {
 
 		// 2. Get:
 		// succeeded -> return op.Result (effect NOT called).
+		// accounting_pending -> block until explicit reconciliation; never rerun the effect.
 		// failed -> return fmt.Errorf("operation failed earlier: %s", op.Error).
 		// outcome_unknown -> ErrOutcomeUnknown.
 		// started -> Finish(..., OpUnknown, nil, "found started on re-run") then return ErrOutcomeUnknown.
@@ -196,6 +199,8 @@ func (r *NodeRunner) Node(effect Effect) (graph.Node, error) {
 			switch op.Status {
 			case OpSucceeded:
 				return op.Result, nil
+			case OpAccountingPending:
+				return nil, ErrAccountingPending
 			case OpFailed:
 				return nil, fmt.Errorf("operation failed earlier: %s", op.Error)
 			case OpUnknown:
@@ -247,10 +252,11 @@ func (r *NodeRunner) Node(effect Effect) (graph.Node, error) {
 			// - call effect.
 			patch, charged, effectErr := effect(ctx, state, call)
 
-			// - success: Budget.Settle(AttemptID, charged); AddAttempt{succeeded, charged}; Finish succeeded with patch; return patch.
+			// - success: save attempt/result as accounting_pending; settle/hold unknown; only then Finish succeeded and return patch.
 			if effectErr == nil {
-				// Persist the result first: a re-run then reuses it (T61)
-				// even if settlement below fails.
+				// Save the external result before accounting, but do not mark
+				// it publishable until settlement/unknown bookkeeping succeeds.
+				// A crash in that gap blocks for reconciliation, never a resend.
 				usageUnknown := charged == UsageUnknown
 				if usageUnknown {
 					charged = 0
@@ -259,10 +265,10 @@ func (r *NodeRunner) Node(effect Effect) (graph.Node, error) {
 				if err := r.Store.AddAttempt(bk, key, attempt); err != nil {
 					return nil, err
 				}
-				if err := r.Store.Finish(bk, key, OpSucceeded, patch, ""); err != nil {
-					return nil, err
-				}
 				if r.Budget != nil {
+					if err := r.Store.Finish(bk, key, OpAccountingPending, patch, "accounting not confirmed"); err != nil {
+						return nil, err
+					}
 					var err error
 					if usageUnknown {
 						// Billed but usage not reported: hold the reservation
@@ -272,8 +278,14 @@ func (r *NodeRunner) Node(effect Effect) (graph.Node, error) {
 						err = r.Budget.Settle(attemptID, r.money(charged))
 					}
 					if err != nil {
-						return nil, fmt.Errorf("result saved, settlement failed: %w", err)
+						return nil, errors.Join(ErrAccountingPending, fmt.Errorf("result saved, settlement failed: %w", err))
 					}
+				}
+				if err := r.Store.Finish(bk, key, OpSucceeded, patch, ""); err != nil {
+					if r.Budget != nil {
+						return nil, errors.Join(ErrAccountingPending, err)
+					}
+					return nil, err
 				}
 				return patch, nil
 			}

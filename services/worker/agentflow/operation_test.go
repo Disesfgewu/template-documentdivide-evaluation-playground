@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -706,5 +707,135 @@ func TestOperationConfigValidation(t *testing.T) {
 	}
 	if node, err := rValid.Node(dummyEffect); err != nil || node == nil {
 		t.Fatalf("expected valid node, got err=%v, node=%v", err, node)
+	}
+}
+
+// R20/T28/T29: a saved external result is not publishable before accounting.
+func TestSettlementFailureCannotPublishOnReplay(t *testing.T) {
+	ctx := context.Background()
+	money := func(n int64) Money { return Money{Micros: n, Currency: "USD", PricingRevision: "test"} }
+	ledger, err := NewLedger(money(math.MaxInt64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Reserve(ctx, "prior", money(math.MaxInt64-1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Settle("prior", money(math.MaxInt64-1)); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryOperationStore()
+	runner := &NodeRunner{Store: store, WorkItemID: "w", NodeRevision: "r",
+		InvocationID: func(graph.State) (string, error) { return "i", nil },
+		MaxAttempts:  1, Budget: ledger, Estimate: money(1)}
+	calls := 0
+	node, err := runner.Node(func(context.Context, graph.State, Call) (graph.State, int64, error) {
+		calls++
+		return graph.State{"must_not_publish": true}, 2, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := node(ctx, graph.State{})
+	if !errors.Is(err, ErrLedgerOverflow) || patch != nil {
+		t.Fatalf("first: patch=%v err=%v", patch, err)
+	}
+	before := ledger.Snapshot()
+	patch, err = node(ctx, graph.State{})
+	if !errors.Is(err, ErrAccountingPending) || patch != nil {
+		t.Fatalf("replay published unsettled result: patch=%v err=%v", patch, err)
+	}
+	if calls != 1 || ledger.Snapshot() != before {
+		t.Fatalf("replay changed effect/accounting: calls=%d snapshot=%+v", calls, ledger.Snapshot())
+	}
+	if before.Spent != math.MaxInt64-1 || before.Reserved != 1 {
+		t.Fatalf("reservation not held: %+v", before)
+	}
+	op, ok, err := store.Get(ctx, OpKey{WorkItemID: "w", NodeRevision: "r", LogicalInvocationID: "i"})
+	if err != nil || !ok || op.Status != OpAccountingPending || op.Result["must_not_publish"] != true || len(op.Attempts) != 1 || op.Attempts[0].ChargedMicros != 2 {
+		t.Fatalf("unsettled result/usage not retained for reconciliation: op=%+v err=%v", op, err)
+	}
+}
+
+type failPublicationStore struct {
+	*MemoryOperationStore
+	fail bool
+}
+
+func (s *failPublicationStore) Finish(ctx context.Context, key OpKey, status OpStatus, result graph.State, text string) error {
+	if s.fail && status == OpSucceeded {
+		return errors.New("injected final status write failure")
+	}
+	return s.MemoryOperationStore.Finish(ctx, key, status, result, text)
+}
+
+func TestAccountingPublicationBoundaries(t *testing.T) {
+	for _, mode := range []string{"settled_replay", "mark_unknown_failure", "publication_write_failure"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			money := func(n int64) Money { return Money{Micros: n, Currency: "USD", PricingRevision: "test"} }
+			ledger, err := NewLedger(money(10))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &failPublicationStore{MemoryOperationStore: NewMemoryOperationStore(), fail: mode == "publication_write_failure"}
+			key := OpKey{WorkItemID: "w", NodeRevision: "r", LogicalInvocationID: "i"}
+			runner := &NodeRunner{Store: store, WorkItemID: key.WorkItemID, NodeRevision: key.NodeRevision,
+				InvocationID: func(graph.State) (string, error) { return key.LogicalInvocationID, nil },
+				MaxAttempts:  1, Budget: ledger, Estimate: money(3)}
+			calls := 0
+			node, err := runner.Node(func(_ context.Context, _ graph.State, call Call) (graph.State, int64, error) {
+				calls++
+				if mode == "mark_unknown_failure" {
+					// Fault: the reservation disappears before MarkUnknown.
+					if err := ledger.Release(call.AttemptID); err != nil {
+						t.Fatal(err)
+					}
+					return graph.State{"saved": true}, UsageUnknown, nil
+				}
+				return graph.State{"saved": true}, 2, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, firstErr := node(ctx, graph.State{})
+			before := ledger.Snapshot()
+			second, secondErr := node(ctx, graph.State{})
+			if calls != 1 || ledger.Snapshot() != before {
+				t.Fatalf("effect/accounting repeated: calls=%d", calls)
+			}
+			op, ok, err := store.Get(ctx, key)
+			if err != nil || !ok || op.Result["saved"] != true || len(op.Attempts) != 1 {
+				t.Fatalf("result/attempt not retained: op=%+v err=%v", op, err)
+			}
+			if mode == "settled_replay" {
+				if firstErr != nil || secondErr != nil || first["saved"] != true || second["saved"] != true || op.Status != OpSucceeded || before.Spent != 2 || before.Reserved != 0 {
+					t.Fatalf("successful T61 replay changed: first=%v second=%v op=%+v ledger=%+v", firstErr, secondErr, op, before)
+				}
+				return
+			}
+			if !errors.Is(firstErr, ErrAccountingPending) || !errors.Is(secondErr, ErrAccountingPending) || first != nil || second != nil || op.Status != OpAccountingPending {
+				t.Fatalf("unconfirmed accounting published: first=%v/%v second=%v/%v op=%+v", first, firstErr, second, secondErr, op)
+			}
+			if mode == "mark_unknown_failure" {
+				if !errors.Is(firstErr, ErrUnknownReservation) || !op.Attempts[0].Unknown {
+					t.Fatalf("missing unknown cause: err=%v op=%+v", firstErr, op)
+				}
+			} else {
+				if before.Spent != 2 || before.Reserved != 0 {
+					t.Fatalf("settlement lost: %+v", before)
+				}
+				// Simulate explicit reconciliation after confirming the stored
+				// attempt and the already completed settlement. No automatic retry.
+				store.fail = false
+				if err := store.Finish(ctx, key, OpSucceeded, op.Result, ""); err != nil {
+					t.Fatal(err)
+				}
+				patch, err := node(ctx, graph.State{})
+				if err != nil || patch["saved"] != true || calls != 1 || ledger.Snapshot() != before {
+					t.Fatalf("reconciled replay: patch=%v err=%v calls=%d", patch, err, calls)
+				}
+			}
+		})
 	}
 }
