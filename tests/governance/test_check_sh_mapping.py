@@ -3,9 +3,9 @@ import subprocess
 import unittest
 
 PATHS = {
-    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
-    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
-    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts"},
+    ".github/workflows/ci.yml": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures"},
+    "scripts/check.sh": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures"},
+    "tools/governance/run_tests.py": {"governance", "api", "api-db", "worker", "parser", "web", "contracts", "fixtures"},
     "tools/governance/check_repo.py": {"governance"},
     "services/api/lab_api/main.py": {"api", "api-db"},
     "tests/api/test_app.py": {"api", "api-db"},
@@ -14,9 +14,11 @@ PATHS = {
     "services/worker/cmd/lab-worker/main.go": {"worker"},
     "services/worker/go.mod": {"worker"},
     "docs/TESTING.md": {"governance"},
-    "contracts/lab_contracts/source.py": {"contracts"},
-    "contracts/README.md": {"contracts", "governance"},
-    "tests/contracts/test_foundation.py": {"contracts"},
+    "contracts/lab_contracts/source.py": {"contracts", "fixtures"},
+    "contracts/README.md": {"contracts", "fixtures", "governance"},
+    "fixtures/registry.yaml": {"fixtures"},
+    "tests/fixtures/test_registry.py": {"fixtures"},
+    "tests/contracts/test_foundation.py": {"contracts", "fixtures"},
     "web/src/App.tsx": {"web"},
     "web/package-lock.json": {"web"},
     "web/README.md": {"web", "governance"},
