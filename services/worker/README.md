@@ -28,3 +28,13 @@ curl -s localhost:8081/healthz
 ```
 
 `LAB_DATABASE_URL` 目前只驗證格式，不會連線（連線與 migration 在 #5/#6）。
+
+## agentKit smoke（#28，需私有存取）
+
+`services/worker/agentkitsmoke/` 是獨立的 Go module，用 `replace` 指向 `third_party/agentkit` submodule，所以一般 clone、`services/worker` 的 `go build ./...` 與公開 CI 都不會編譯它，也不需要私有憑證。有 agentKit 讀取權限的 checkout 先依 `docs/AGENTKIT_SUBMODULE.md` 初始化 submodule，再執行：
+
+```sh
+scripts/check.sh --scope worker-agentkit
+```
+
+這個 suite 不在 `--scope all/auto` 內。它會確認 gitlink 與實際 checkout 是同一個 commit，執行 agentKit 的 `go test ./graph ./model`，再跑 smoke：以真正的 `agentkit/graph` 建一個確定性的本地流程（inspect → 依頁數條件路由到 parse/finalize 或 reject），驗證條件路由、路由錯誤會停止、以及 checkpoint/resume——parse 第一次模擬崩潰後，換新的 graph 實例從 checkpoint 續跑，已提交的 inspect 不會重跑；checkpoint 同時用記憶體與只存 JSON bytes 的 store 測試。agentKit 的稽核 log 寫到測試暫存目錄，並在結束時以 `agentlog.Verify` 驗證雜湊鏈。沒有 submodule 時回報 BLOCKED，不算通過。持久 store、lease/fencing 與真 provider 屬 #6。
