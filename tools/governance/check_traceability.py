@@ -14,10 +14,15 @@ main at exactly the recorded commit, that the commit is on main, and that
 every cited test file and named test exists *at that commit*, read through
 the contents API, not in the current checkout).
 
-What this proves is run provenance: a successful main run at a commit that
-contained the cited tests. It does not prove that the run executed those
-tests (the checker reads no logs); ``main`` prints that distinction for every
-verified passed entry, and the note must say which suite ran them.
+Execution is proven separately: the run must be the CI workflow
+(``.github/workflows/ci.yml``, full checks: push or workflow_dispatch) and its
+``test-reports`` artifact (written by tools/governance/run_tests.py) must list
+every cited test as ``passed``. A test that was skipped, failed or not run
+at all is not evidence, and a run without reports (older runs, expired
+artifacts) cannot back ``passed``.
+
+Evidence test paths must be runner-discoverable: Python ``tests/**/test*.py``
+(unittest discovery) or Go ``*_test.go``.
 Named tests (``file::Name``) must exist for a supported runner (Python
 unittest classes/methods, Go ``func TestX``); other files cannot carry names.
 """
@@ -25,10 +30,12 @@ from __future__ import annotations
 
 import ast
 import base64
+import io
 import json
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import yaml
@@ -41,6 +48,10 @@ SECTIONS = {"requirements": "R", "tests": "T", "acceptance": "A"}
 
 
 REPO = "Disesfgewu/template-documentdivide-evaluation-playground"
+CI_WORKFLOW = ".github/workflows/ci.yml"
+FULL_CHECK_EVENTS = {"push", "workflow_dispatch"}  # scripts/check.sh --scope all
+REPORT_ARTIFACT = "test-reports"
+REPORT_FORMAT = "lab-test-report-1"
 RUN_URL = re.compile(r"https://github\.com/Disesfgewu/template-documentdivide-evaluation-playground/actions/runs/([0-9]+)")
 
 
@@ -73,6 +84,14 @@ def _named_test_problem(path: str, t: str, text: str | None = None) -> str | Non
     return f"named tests are only supported for Python and Go test files: {t}"
 
 
+def _discoverable(path: str) -> bool:
+    """Would a project test runner pick this file up?"""
+    name = path.rsplit("/", 1)[-1]
+    if path.endswith(".py"):
+        return path.startswith("tests/") and name.startswith("test")
+    return name.endswith("_test.go")
+
+
 def _evidence_problems(ev) -> list[str]:
     """Each evidence item must be a mapping naming where it came from and
     pointing at tests or a CI run that exist."""
@@ -101,6 +120,9 @@ def _evidence_problems(ev) -> list[str]:
                         out.append(f"no file matches {path}")
                 elif not (ROOT / path).is_file():
                     out.append(f"test file does not exist: {path}")
+                elif not _discoverable(path):
+                    # PM #32: LICENSE (or any non-test file) is not a test.
+                    out.append(f"not a runner-discoverable test file: {path}")
                 elif "::" in t:
                     # A named test must exist: stale evidence (renamed or
                     # removed test) is not evidence.
@@ -139,15 +161,58 @@ def _test_at_commit_problems(fetch, commit: str, t: str) -> list[str]:
     return [f"provenance: at {commit[:7]}: {problem}"] if problem else []
 
 
-def github_verifier(fetch=None):
-    """Verifier asking GitHub whether a main evidence item really happened.
-    ``fetch(path) -> dict`` defaults to ``gh api``; failures are problems."""
+def _gh_bytes(path: str) -> bytes:
+    out = subprocess.run(["gh", "api", path], capture_output=True, timeout=120)
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.decode("utf-8", "replace").strip() or f"gh api {path} failed")
+    return out.stdout
+
+
+def _run_outcomes(fetch, download, run_id: str) -> dict:
+    """Per-test outcomes recorded by run_tests.py in the run's report artifact."""
+    listing = fetch(f"repos/{REPO}/actions/runs/{run_id}/artifacts")
+    arts = [a for a in listing.get("artifacts", []) if a.get("name") == REPORT_ARTIFACT]
+    if not arts:
+        raise LookupError(f"run {run_id} has no {REPORT_ARTIFACT} artifact")
+    if arts[0].get("expired"):
+        raise LookupError(f"run {run_id} {REPORT_ARTIFACT} artifact has expired")
+    outcomes = {}
+    with zipfile.ZipFile(io.BytesIO(download(f"repos/{REPO}/actions/artifacts/{arts[0]['id']}/zip"))) as z:
+        for name in z.namelist():
+            if name.endswith(".json"):
+                report = json.loads(z.read(name))
+                if report.get("format") == REPORT_FORMAT and isinstance(report.get("tests"), dict):
+                    outcomes.update(report["tests"])
+    if not outcomes:
+        raise LookupError(f"run {run_id} {REPORT_ARTIFACT} artifact holds no test report")
+    return outcomes
+
+
+def _execution_problems(outcomes: dict, run_id: str, t: str) -> list[str]:
+    ref = t.split(" ", 1)[0]
+    path, _, name = ref.partition("::")
+    if not name:
+        hits = {k: v for k, v in outcomes.items() if k.startswith(f"{path}::")}
+    elif "." in name:
+        hits = {k: v for k, v in outcomes.items() if k == ref}
+    else:
+        hits = {k: v for k, v in outcomes.items() if k == ref or k.startswith(f"{ref}.")}
+    if not hits:
+        return [f"execution: run {run_id} did not execute {t}"]
+    bad = sorted(f"{k}={v}" for k, v in hits.items() if v != "passed")
+    return [f"execution: in run {run_id} {t} was not passed ({', '.join(bad)})"] if bad else []
+
+
+def github_verifier(fetch=None, download=None):
+    """Verifier asking GitHub whether a main evidence item really happened
+    and really executed the cited tests. ``fetch(path) -> dict`` and
+    ``download(path) -> bytes`` default to ``gh api``; failures are problems."""
+    if download is None:
+        # An injected fetch (tests) also serves the downloads, never real gh.
+        download = _gh_bytes if fetch is None else fetch
     if fetch is None:
         def fetch(path):
-            out = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=60)
-            if out.returncode != 0:
-                raise RuntimeError(out.stderr.strip() or f"gh api {path} failed")
-            return json.loads(out.stdout)
+            return json.loads(_gh_bytes(path))
 
     def verify(ev) -> list[str]:
         m = RUN_URL.fullmatch(str(ev.get("run", "")))
@@ -166,11 +231,20 @@ def github_verifier(fetch=None):
                 problems.append("provenance: run head_sha does not match commit")
             if run.get("status") != "completed" or run.get("conclusion") != "success":
                 problems.append(f"provenance: run did not succeed ({run.get('status')}/{run.get('conclusion')})")
+            if run.get("path") != CI_WORKFLOW or run.get("event") not in FULL_CHECK_EVENTS:
+                problems.append(f"provenance: run is {run.get('path')!r}/{run.get('event')!r}, "
+                                f"not the full {CI_WORKFLOW} checks (push or workflow_dispatch)")
             cmp = fetch(f"repos/{REPO}/compare/{commit}...main")
             if cmp.get("status") not in {"ahead", "identical"}:
                 problems.append("provenance: commit is not on main")
             for t in ev.get("tests") or []:
                 problems += _test_at_commit_problems(fetch, commit, t)
+            try:
+                outcomes = _run_outcomes(fetch, download, m.group(1))
+            except Exception as exc:
+                return problems + [f"execution: no test report for run {m.group(1)} ({exc})"]
+            for t in ev.get("tests") or []:
+                problems += _execution_problems(outcomes, m.group(1), t)
             return problems
         except Exception as exc:  # unreachable run/commit is not evidence
             return [f"provenance: could not verify ({exc})"]
@@ -246,13 +320,13 @@ def check(doc, ids: dict[str, set[str]], verify=None) -> list[str]:
     return errors
 
 
-def main(argv=None, doc=None, spec_text=None, fetch=None) -> int:
+def main(argv=None, doc=None, spec_text=None, fetch=None, download=None) -> int:
     """``--verify-provenance`` (used by scripts/check.sh, so CI runs it) asks
     GitHub only for ``passed`` entries; with none, no network is needed. If
     GitHub cannot be reached, passed entries fail (blocked, never passed).
     ``doc``/``spec_text``/``fetch`` are injection points for tests."""
     argv = sys.argv[1:] if argv is None else argv
-    verify = github_verifier(fetch) if "--verify-provenance" in argv else None
+    verify = github_verifier(fetch, download) if "--verify-provenance" in argv else None
     if doc is None:
         doc = yaml.safe_load(TRACE.read_text(encoding="utf-8"))
     if spec_text is None:
@@ -269,8 +343,8 @@ def main(argv=None, doc=None, spec_text=None, fetch=None) -> int:
         for section in SECTIONS:
             for e in doc[section]:
                 if e["status"] == "passed":
-                    print(f"traceability: {e['id']} passed: run provenance and tests-at-commit verified; "
-                          "execution of the cited tests is not log-verified by this checker")
+                    print(f"traceability: {e['id']} passed: run provenance, tests-at-commit and "
+                          "execution (passed in the run's test report) verified")
     return 1 if errors else 0
 
 

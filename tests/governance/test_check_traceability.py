@@ -1,6 +1,9 @@
 import base64
 import copy
+import io
+import json
 import unittest
+import zipfile
 
 import yaml
 
@@ -32,7 +35,24 @@ def contents(text):
     return {"type": "file", "encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
 
 
-def fake_github(run=None, compare="ahead", files=None):
+ARTIFACT_ID = 9001
+
+
+def report_zip(outcomes) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("tests_governance.json", json.dumps({"format": "lab-test-report-1",
+                                                        "start_dir": "tests/governance", "tests": outcomes}))
+    return buf.getvalue()
+
+
+def all_passed_here() -> dict:
+    """What a full run of this file reports: every method passed."""
+    names = ct._test_names((ct.ROOT / HERE).read_text(encoding="utf-8"))
+    return {f"{HERE}::{n}": "passed" for n in names if "." in n}
+
+
+def fake_github(run=None, compare="ahead", files=None, outcomes=None, artifacts=None):
     """Stand-in for gh api: only RUN_ID exists, as a successful main run at SHA.
     ``files`` maps path -> source at SHA (None: absent); by default SHA holds
     the current checkout's files."""
@@ -51,7 +71,13 @@ def fake_github(run=None, compare="ahead", files=None):
             raise RuntimeError(f"HTTP 404: {path}")
         if path == f"repos/{ct.REPO}/actions/runs/{RUN_ID}":
             return {"repository": repo, "head_repository": repo, "head_branch": "main", "head_sha": SHA,
-                    "status": "completed", "conclusion": "success", **(run or {})}
+                    "status": "completed", "conclusion": "success", "path": ".github/workflows/ci.yml",
+                    "event": "push", **(run or {})}
+        if path == f"repos/{ct.REPO}/actions/runs/{RUN_ID}/artifacts":
+            return {"artifacts": [{"id": ARTIFACT_ID, "name": "test-reports", "expired": False}]
+                    if artifacts is None else artifacts}
+        if path == f"repos/{ct.REPO}/actions/artifacts/{ARTIFACT_ID}/zip":
+            return report_zip(all_passed_here() if outcomes is None else outcomes)
         if path == f"repos/{ct.REPO}/compare/{SHA}...main":
             return {"status": compare}
         raise RuntimeError(f"HTTP 404: {path}")
@@ -104,7 +130,7 @@ class TraceabilityTests(unittest.TestCase):
         doc = copy.deepcopy(GOOD)
         doc["tests"][0].update(status="passed", evidence=ev, note="fake")
         offline = ct.check(doc, IDS)
-        self.assertTrue(any("named tests are only supported" in e for e in offline), offline)
+        self.assertTrue(any("not a runner-discoverable test file: LICENSE" in e for e in offline), offline)
         self.assertTrue(any("verified provenance" in e for e in offline), offline)
         online = ct.check(doc, IDS, verify=ct.github_verifier(fake_github()))
         self.assertTrue(any("could not verify" in e for e in online), online)
@@ -200,8 +226,57 @@ class TraceabilityTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(ct.main(["--verify-provenance"], doc=doc, spec_text=SPEC, fetch=fake_github()), 0)
-        self.assertIn("T01 passed: run provenance and tests-at-commit verified; "
-                      "execution of the cited tests is not log-verified", out.getvalue())
+        self.assertIn("T01 passed: run provenance, tests-at-commit and execution "
+                      "(passed in the run's test report) verified", out.getvalue())
+
+    def test_passed_needs_a_discoverable_test_that_ran(self):
+        """PM-REVIEW on #32 (38db96a): T01 passed with tests=['LICENSE'] and a
+        real successful main run was accepted. Evidence must name a test the
+        runner discovers, and the run's report must show it passed."""
+        def doc_with(tests):
+            doc = copy.deepcopy(GOOD)
+            doc["tests"][0].update(status="passed", note="LICENSE", evidence=[
+                {"branch": "main", "commit": SHA, "run": RUN, "tests": tests}])
+            return doc
+        # PM repro: LICENSE exists at the commit, run succeeded.
+        got = ct.check(doc_with(["LICENSE"]), IDS, verify=ct.github_verifier(fake_github()))
+        self.assertIn("tests[T01].evidence[0]: not a runner-discoverable test file: LICENSE", got)
+        self.assertIn(f"tests[T01]: execution: run {RUN_ID} did not execute LICENSE", got)
+        self.assertFalse(ct._discoverable("tools/governance/check_traceability.py"))
+        self.assertTrue(ct._discoverable(HERE))
+        self.assertTrue(ct._discoverable("services/worker/main_test.go"))
+
+        named = f"{HERE}::TraceabilityTests.test_good"
+        def verify(**kw):
+            return ct.github_verifier(fake_github(**kw))
+        # A successful run that skipped the cited test is not evidence.
+        skipped = dict(all_passed_here(), **{named: "skipped"})
+        got = ct.check(doc_with([named]), IDS, verify=verify(outcomes=skipped))
+        self.assertIn(f"tests[T01]: execution: in run {RUN_ID} {named} was not passed ({named}=skipped)", got)
+        # ...or did not run it at all (e.g. a scoped run without this suite).
+        absent = {k: v for k, v in all_passed_here().items() if k != named}
+        got = ct.check(doc_with([named]), IDS, verify=verify(outcomes=absent))
+        self.assertIn(f"tests[T01]: execution: run {RUN_ID} did not execute {named}", got)
+        # A class or file reference needs every executed method passed.
+        failed = dict(all_passed_here(), **{named: "failed"})
+        for ref in (f"{HERE}::TraceabilityTests", HERE):
+            with self.subTest(ref=ref):
+                got = ct.check(doc_with([ref]), IDS, verify=verify(outcomes=failed))
+                self.assertTrue(any("was not passed" in e for e in got), got)
+        # No report (older run / expired artifact) cannot back passed.
+        for arts in ([], [{"id": ARTIFACT_ID, "name": "test-reports", "expired": True}]):
+            with self.subTest(artifacts=arts):
+                got = ct.check(doc_with([named]), IDS, verify=verify(artifacts=arts))
+                self.assertTrue(any("execution: no test report" in e for e in got), got)
+        # Only the full CI workflow counts: not a PR (scoped) run, not another workflow.
+        for change in ({"event": "pull_request"}, {"path": ".github/workflows/other.yml"}):
+            with self.subTest(run=change):
+                got = ct.check(doc_with([named]), IDS, verify=verify(run=change))
+                self.assertTrue(any("not the full .github/workflows/ci.yml checks" in e for e in got), got)
+        # Positive: discoverable, present at the commit and passed in the report.
+        for ref in (named, f"{HERE}::TraceabilityTests", HERE):
+            with self.subTest(ok=ref):
+                self.assertEqual(ct.check(doc_with([ref]), IDS, verify=verify()), [])
 
     def test_go_named_tests(self):
         import tempfile
