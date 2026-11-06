@@ -31,6 +31,8 @@ commit, working diff hash, dependency/PDFium versions, UTC times, executor/run,
 profile, fixture and expected-file hashes, per-case expected/actual/status,
 transforms, image SHA-256/size and remaining gates. The PR records the exact head
 and CI run; neither a local uncommitted run nor a green unrelated head is CI proof.
+Class cleanup writes failed evidence even when registry loading fails during setup,
+so repeating a run cannot leave an earlier passed report after that failure.
 
 ## Fixed oracles and scope
 

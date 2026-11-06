@@ -23,6 +23,22 @@ class FixtureEvidenceFailureTests(unittest.TestCase):
             self.assertEqual(report['status'], 'failed')
             self.assertEqual(report['cases'], [])
 
+    def test_registry_setup_error_replaces_stale_passed_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = Path(directory) / 'evidence.json'
+            report_path.write_text(json.dumps({'status': 'passed', 'commit': 'stale'}))
+            with patch.dict(os.environ, {'LAB_PDF_FIXTURE_REPORT_DIR': directory}):
+                with patch.object(acceptance.rc, 'load', side_effect=ValueError('invalid registry')):
+                    suite = unittest.TestSuite([
+                        acceptance.FixtureAcceptance('test_f01_hash_counts_and_physical_indices')])
+                    result = unittest.TestResult()
+                    suite.run(result)
+            self.assertEqual(len(result.errors), 1)
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report['status'], 'failed')
+            self.assertNotEqual(report['commit'], 'stale')
+            self.assertEqual(report['cases'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

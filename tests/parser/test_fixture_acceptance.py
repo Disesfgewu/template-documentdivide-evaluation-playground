@@ -79,14 +79,18 @@ class FixtureAcceptance(unittest.TestCase):
     def setUpClass(cls):
         cls.started = datetime.now(timezone.utc).isoformat()
         cls.records = []
-        cls.has_failures = False
-        cls.entries = {entry['id']: entry for entry in rc.load()['fixtures']}
+        # Class cleanup also runs when setUpClass raises; tearDownClass does not.
+        # Start failed so a broken registry cannot leave stale passed evidence.
+        cls.has_failures = True
         cls.output = os.environ.get('LAB_PDF_FIXTURE_REPORT_DIR')
         if cls.output:
             Path(cls.output).mkdir(parents=True, exist_ok=True)
+        cls.addClassCleanup(cls.write_report)
+        cls.entries = {entry['id']: entry for entry in rc.load()['fixtures']}
+        cls.has_failures = False
 
     @classmethod
-    def tearDownClass(cls):
+    def write_report(cls):
         if not cls.output:
             return
         report = {
