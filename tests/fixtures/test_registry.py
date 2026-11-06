@@ -11,14 +11,47 @@ from fixtures.generators import synthetic_pdf
 DOC = rc.load()
 
 
-def errs(mutate, reproduce=False):
+def errs(mutate, reproduce=False, verify=None):
     doc = copy.deepcopy(DOC)
     mutate(doc)
-    return rc.check(doc, reproduce=reproduce)
+    return rc.check(doc, reproduce=reproduce, verify_signoff=verify)
 
 
 def f01(doc):
     return doc["fixtures"][0]
+
+
+EXPECTED = rc._expected_items("fixtures/F01/expected.json")
+COMMENT_ID = 7000000001
+
+
+def promote(review):
+    def mutate(d):
+        f01(d).update(status="available", missing=[])
+        f01(d)["golden"]["review"] = review
+    return mutate
+
+
+def fake_fetch(body=None, **change):
+    """Stand-in for gh api: only COMMENT_ID exists, on issue 31."""
+    digest = rc.fixture_digest(f01(DOC)["items"], EXPECTED)
+    record = {"issue_url": f"https://api.github.com/repos/{rc.REPO}/issues/31",
+              "user": {"login": "Disesfgewu", "type": "User"},
+              "body": rc.signoff_line("F01", digest) if body is None else body, **change}
+
+    def fetch(path):
+        if path == f"repos/{rc.REPO}/issues/comments/{COMMENT_ID}":
+            return record
+        raise RuntimeError(f"HTTP 404: {path}")
+    return fetch
+
+
+def signed_off(body=None, **change):
+    review = {"human": True, "by": "Disesfgewu", "date": "2026-11-05",
+              "method": "page counts re-read with pypdf and compared with the SPEC T14 table",
+              "signoff": f"https://github.com/{rc.REPO}/issues/31#issuecomment-{COMMENT_ID}",
+              "fixture_digest": rc.fixture_digest(f01(DOC)["items"], EXPECTED)}
+    return review, rc.github_signoff_verifier(fake_fetch(body, **change))
 
 
 class RegistryTests(unittest.TestCase):
@@ -40,17 +73,8 @@ class RegistryTests(unittest.TestCase):
     def test_human_review_gate(self):
         """PM-REVIEW 6676133319: a flag-only, untraceable, impossible-date or
         stale signoff must not promote a fixture to available (T05/T14)."""
-        def promote(review):
-            def mutate(d):
-                f01(d).update(status="available", missing=[])
-                f01(d)["golden"]["review"] = review
-            return mutate
-        digest = rc.fixture_digest(f01(DOC)["items"])
-        good = {"human": True, "by": "Disesfgewu", "date": "2026-11-05",
-                "method": "page counts re-read with pypdf and compared with the SPEC T14 table",
-                "signoff": f"https://github.com/{rc.REPO}/issues/31#issuecomment-6676139956",
-                "fixture_digest": digest}
-        self.assertEqual(errs(promote(good), reproduce=False), [])
+        good, verify = signed_off()
+        self.assertEqual(errs(promote(good), verify=verify), [])
         bad = {
             "PM repro: agent by, impossible date": {"human": True, "by": "coding-agent", "date": "2026-99-99"},
             "flag only": {"human": True, "by": "Disesfgewu", "date": "2026-11-05", "method": "looked"},
@@ -60,25 +84,82 @@ class RegistryTests(unittest.TestCase):
             "bot identity": dict(good, by="github-actions[bot]"),
             "signoff outside repo": dict(good, signoff="https://example.com/ok"),
             "no method": dict(good, method=" "),
-            "stale review": dict(good, fixture_digest=rc.fixture_digest(f01(DOC)["items"][1:])),
+            "stale review": dict(good, fixture_digest=rc.fixture_digest(f01(DOC)["items"][1:], EXPECTED)),
         }
         for label, review in bad.items():
             with self.subTest(label):
-                got = errs(promote(review), reproduce=False)
+                got = errs(promote(review), verify=verify)
                 self.assertTrue(got, label)
-        stale = errs(promote(bad["stale review"]), reproduce=False)
-        self.assertIn("F01: human review is stale (fixture_digest does not match the current items)", stale)
+        stale = errs(promote(bad["stale review"]), verify=verify)
+        self.assertIn("F01: human review is stale (fixture_digest does not match the current items/expected)", stale)
         # Changing a reviewed item after signoff also makes the review stale.
         def changed(d):
             promote(good)(d)
             f01(d)["items"][0]["sha256"] = "1" * 64
-        self.assertTrue(any("stale" in e for e in errs(changed, reproduce=False)))
+        self.assertTrue(any("stale" in e for e in errs(changed, verify=verify)))
         # Unreviewed fixtures stay partial and still pass.
         for e in DOC["fixtures"]:
             with self.subTest(fid=e["id"]):
                 if e["status"] != "planned":
                     self.assertEqual(e["status"], "partial")
                     self.assertIs(e["golden"]["review"]["human"], False)
+
+    def test_signoff_must_be_resolved(self):
+        """PM-REVIEW on #34 (c7aaed4): a well-formed review pointing at
+        issuecomment-0 was accepted offline. The record is now resolved and
+        must be the reviewer's explicit signoff of this fixture and digest."""
+        good, verify = signed_off()
+        pm_repro = dict(good, signoff=f"https://github.com/{rc.REPO}/issues/31#issuecomment-0")
+        # Offline: never accepted, however well-formed.
+        self.assertIn("F01: human review requires a resolved signoff (run with --verify-signoff)",
+                      errs(promote(good)))
+        self.assertIn("F01: human review requires a resolved signoff (run with --verify-signoff)",
+                      errs(promote(pm_repro)))
+        # Nonexistent record.
+        got = errs(promote(pm_repro), verify=verify)
+        self.assertTrue(any("signoff record could not be resolved" in e for e in got), got)
+        digest = good["fixture_digest"]
+        unrelated = {
+            "PM change request, no signoff line": ("PM-REVIEW: REQUEST_CHANGES ...", {}, "does not contain"),
+            "signoff of another fixture": (rc.signoff_line("F02", digest), {}, "does not contain"),
+            "signoff of an older digest": (rc.signoff_line("F01", "0" * 64), {}, "does not contain"),
+            "line only quoted in prose": (f"please post `{rc.signoff_line('F01', digest)}`", {}, "does not contain"),
+            "another author": (rc.signoff_line("F01", digest), {"user": {"login": "someone", "type": "User"}},
+                               "is not reviewer"),
+            "bot author": (rc.signoff_line("F01", digest), {"user": {"login": "Disesfgewu", "type": "Bot"}},
+                           "is not reviewer"),
+            "comment on another issue": (rc.signoff_line("F01", digest),
+                                         {"issue_url": f"https://api.github.com/repos/{rc.REPO}/issues/30"},
+                                         "is not on issues/31"),
+        }
+        for label, (body, change, msg) in unrelated.items():
+            with self.subTest(label):
+                _, v = signed_off(body=body, **change)
+                got = errs(promote(good), verify=v)
+                self.assertTrue(any(msg in e for e in got), got)
+        # Changing an expected/golden value after signoff makes it stale.
+        def changed_expected(d):
+            promote(good)(d)
+            f01(d)["expected"] = "fixtures/F02/expected.json"
+        self.assertIn("F01: human review is stale (fixture_digest does not match the current items/expected)",
+                      errs(changed_expected, verify=verify))
+        changed = copy.deepcopy(EXPECTED)
+        first = next(iter(changed))
+        changed[first] = {"changed": True}
+        self.assertNotEqual(rc.fixture_digest(f01(DOC)["items"], changed), digest)
+        # main(): the CI entry point resolves signoffs, needs no network
+        # without human reviews, and an unreachable GitHub is never a pass.
+        import contextlib
+        doc = copy.deepcopy(DOC)
+        promote(good)(doc)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(rc.main(["--verify-signoff"], doc=doc, fetch=fake_fetch()), 0)
+            self.assertEqual(rc.main([], doc=doc), 1)
+
+            def unreachable(path):
+                raise RuntimeError("gh: not logged in")
+            self.assertEqual(rc.main(["--verify-signoff"], doc=doc, fetch=unreachable), 1)
+            self.assertEqual(rc.main(["--verify-signoff"], doc=copy.deepcopy(DOC), fetch=unreachable), 0)
 
     def test_generator_outside_package_rejected(self):
         got = errs(lambda d: f01(d)["items"][0].update(generator="os"), reproduce=True)

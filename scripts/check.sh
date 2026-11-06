@@ -79,6 +79,9 @@ run_suite() {
     fixtures)
       # Fixture registry: rebuild every registered item and compare sha256.
       PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/fixtures
+      # Human signoffs are resolved on GitHub; with none recorded no network
+      # is used, and an unreachable GitHub fails a human review (never passes).
+      PYTHONPATH=contracts python3 -m fixtures.registry_check --verify-signoff
       ;;
     parser)
       PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser

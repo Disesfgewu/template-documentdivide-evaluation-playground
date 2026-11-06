@@ -3,12 +3,22 @@
 Generator items are rebuilt in memory and must match the pinned sha256 byte
 for byte; file items must exist and match. Only modules under
 fixtures.generators may be used as generators (no arbitrary imports).
+
+A human review only promotes a fixture after its signoff record is resolved
+(``--verify-signoff`` asks GitHub; offline, ``human: true`` is rejected). The
+record must be a comment/review in this repository, on the Issue/PR the URL
+names, written by ``by`` (a GitHub user, not a bot), containing the line
+``FIXTURE-SIGNOFF <fixture id> <fixture_digest>``. The digest covers the
+generated items and the expected/golden content, so changing either after
+signoff makes the review stale.
 """
 import datetime
 import hashlib
 import importlib
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -22,8 +32,8 @@ REPO = "Disesfgewu/template-documentdivide-evaluation-playground"
 # A human signoff must point at a GitHub comment/review in this repository
 # whose author can be checked; a bare flag or free-text name is not traceable.
 SIGNOFF_URL = re.compile(
-    rf"https://github\.com/{re.escape(REPO)}/(issues|pull)/\d+"
-    r"#(issuecomment|pullrequestreview|discussion_r)-?\d+")
+    rf"https://github\.com/{re.escape(REPO)}/(issues|pull)/(\d+)"
+    r"#(issuecomment|pullrequestreview|discussion_r)-?(\d+)")
 GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 # Identities that are automation, never a human reviewer.
 NON_HUMAN_BY = re.compile(r"(agent|bot|model|claude|gemini|gpt|llm)", re.IGNORECASE)
@@ -58,14 +68,65 @@ def _expected_items(rel) -> dict:
     return items
 
 
-def fixture_digest(items) -> str:
-    """sha256 over the sorted "item_id:sha256" lines of one fixture version.
-    A human review records this digest; any item change makes it stale."""
+def fixture_digest(items, expected) -> str:
+    """sha256 over the sorted "item_id:sha256" lines of one fixture version
+    plus the canonical JSON of its expected/golden items. A human review
+    records this digest; changing any item or expected value makes it stale."""
     lines = sorted(f"{it.get('id')}:{it.get('sha256')}" for it in items if isinstance(it, dict))
+    golden = json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    lines.append("expected:" + hashlib.sha256(golden.encode("utf-8")).hexdigest())
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
-def _review_errors(fid, review, items, today: datetime.date) -> list[str]:
+def signoff_line(fid: str, digest: str) -> str:
+    return f"FIXTURE-SIGNOFF {fid} {digest}"
+
+
+def github_signoff_verifier(fetch=None):
+    """``verify(fid, review, digest) -> problems`` resolving the signoff URL.
+    ``fetch(path) -> dict`` defaults to ``gh api``; any failure is a problem
+    (an unreachable record is not a signoff)."""
+    if fetch is None:
+        def fetch(path):
+            out = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=60)
+            if out.returncode != 0:
+                raise RuntimeError(out.stderr.strip() or f"gh api {path} failed")
+            return json.loads(out.stdout)
+
+    def verify(fid, review, digest) -> list[str]:
+        m = SIGNOFF_URL.fullmatch(str(review.get("signoff", "")))
+        if not m:
+            return [f"{fid}: signoff: not a signoff URL of this repository"]
+        kind, number, anchor, rid = m.groups()
+        if anchor == "issuecomment":
+            path, parent_key, parent = f"repos/{REPO}/issues/comments/{rid}", "issue_url", f"/issues/{number}"
+        elif anchor == "pullrequestreview" and kind == "pull":
+            path, parent_key, parent = (f"repos/{REPO}/pulls/{number}/reviews/{rid}",
+                                        "pull_request_url", f"/pulls/{number}")
+        elif anchor == "discussion_r" and kind == "pull":
+            path, parent_key, parent = f"repos/{REPO}/pulls/comments/{rid}", "pull_request_url", f"/pulls/{number}"
+        else:
+            return [f"{fid}: signoff: {anchor} anchors need a pull URL"]
+        try:
+            record = fetch(path)
+        except Exception as exc:
+            return [f"{fid}: signoff record could not be resolved ({exc})"]
+        problems = []
+        if not str(record.get(parent_key, "")).endswith(f"repos/{REPO}{parent}"):
+            problems.append(f"{fid}: signoff record is not on {kind}/{number}")
+        user = record.get("user") or {}
+        if user.get("login") != review.get("by") or user.get("type") != "User":
+            problems.append(f"{fid}: signoff author {user.get('login')!r} ({user.get('type')}) "
+                            f"is not reviewer {review.get('by')!r}")
+        lines = [ln.strip() for ln in str(record.get("body") or "").splitlines()]
+        if signoff_line(fid, digest) not in lines:
+            problems.append(f"{fid}: signoff record does not contain '{signoff_line(fid, digest)}'")
+        return problems
+
+    return verify
+
+
+def _review_errors(fid, review, items, expected, today: datetime.date, verify=None) -> list[str]:
     errors = []
     if not isinstance(review, dict):
         return [f"{fid}: golden.review must be a mapping"]
@@ -94,12 +155,21 @@ def _review_errors(fid, review, items, today: datetime.date) -> list[str]:
         digest = review.get("fixture_digest")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             errors.append(f"{fid}: human review needs fixture_digest (sha256 of the reviewed items)")
-        elif digest != fixture_digest(items):
-            errors.append(f"{fid}: human review is stale (fixture_digest does not match the current items)")
+        elif digest != fixture_digest(items, expected):
+            errors.append(f"{fid}: human review is stale (fixture_digest does not match the current items/expected)")
+        if not errors:
+            # Well-formed is not signed off: the record itself must be read.
+            if verify is None:
+                errors.append(f"{fid}: human review requires a resolved signoff (run with --verify-signoff)")
+            else:
+                errors.extend(verify(fid, review, digest))
     return errors
 
 
-def check(doc: dict, reproduce: bool = True, today: datetime.date | None = None) -> list[str]:
+def check(doc: dict, reproduce: bool = True, today: datetime.date | None = None,
+          verify_signoff=None) -> list[str]:
+    """``verify_signoff`` (see github_signoff_verifier) resolves human
+    signoffs; without it a ``human: true`` review is never accepted."""
     today = today or datetime.date.today()
     errors = []
     entries = doc.get("fixtures") if isinstance(doc, dict) else None
@@ -131,15 +201,16 @@ def check(doc: dict, reproduce: bool = True, today: datetime.date | None = None)
         if golden.get("origin") not in ORIGINS:
             errors.append(f"{fid}: golden.origin must be one of {sorted(ORIGINS)} (never model output)")
         review = golden.get("review") or {}
-        raw_items = e.get("items")
-        errors.extend(_review_errors(fid, review, raw_items if isinstance(raw_items, list) else [], today))
-        if status == "available" and (not isinstance(review, dict) or review.get("human") is not True):
-            errors.append(f"{fid}: available requires a human review record")
         try:
             exp_items = _expected_items(e.get("expected"))
         except (OSError, ValueError) as exc:  # includes JSON errors and path escapes
             errors.append(f"{fid}: expected file unusable ({type(exc).__name__}: {exc})")
             exp_items = {}
+        raw_items = e.get("items")
+        errors.extend(_review_errors(fid, review, raw_items if isinstance(raw_items, list) else [],
+                                     exp_items, today, verify_signoff))
+        if status == "available" and (not isinstance(review, dict) or review.get("human") is not True):
+            errors.append(f"{fid}: available requires a human review record")
         items = e.get("items") or []
         if not isinstance(items, list) or not all(isinstance(it, dict) for it in items):
             errors.append(f"{fid}: items must be a list of mappings")
@@ -174,3 +245,20 @@ def check(doc: dict, reproduce: bool = True, today: datetime.date | None = None)
 
 def load() -> dict:
     return yaml.safe_load(REGISTRY.read_text(encoding="utf-8"))
+
+
+def main(argv=None, doc=None, fetch=None) -> int:
+    """``--verify-signoff`` (used by scripts/check.sh) asks GitHub only for
+    human reviews; with none recorded, no network is needed."""
+    argv = sys.argv[1:] if argv is None else argv
+    verify = github_signoff_verifier(fetch) if "--verify-signoff" in argv else None
+    errors = check(load() if doc is None else doc, reproduce=True, verify_signoff=verify)
+    for err in errors:
+        print(f"fixtures: {err}", file=sys.stderr)
+    if not errors:
+        print("fixture registry ok")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
