@@ -248,13 +248,15 @@ class FixtureAcceptance(unittest.TestCase):
                         self.assertLessEqual(abs(got - pt * dpi / 72), 1)
                     self.assertEqual(asset.transform['page_size_pt'], DISPLAY_SIZES[index])
                     full_pages[dpi] = asset.png
-                    if dpi == 72:
-                        observed = marker_extents(asset.png)
-                        actual['observed_marker_bboxes'] = observed
-                        golden_boxes = sorted(m['bbox'] for m in exp['markers'])
-                        self.assertEqual(len(observed), len(golden_boxes))
-                        for got, want in zip(observed, golden_boxes):
-                            self.assertLessEqual(max(abs(a - b) for a, b in zip(got, want)), T05_TOLERANCE)
+                    # Anchor every raster scale to fixed geometry. Comparing
+                    # crops only to the same renderer's full page can hide a
+                    # shared content offset at one DPI.
+                    observed = marker_extents(asset.png)
+                    actual['observed_marker_bboxes'] = observed
+                    golden_boxes = sorted(m['bbox'] for m in exp['markers'])
+                    self.assertEqual(len(observed), len(golden_boxes))
+                    for got, want in zip(observed, golden_boxes):
+                        self.assertLessEqual(max(abs(a - b) for a, b in zip(got, want)), T05_TOLERANCE)
 
             for marker, box in zip(exp['markers'], PDF_BOXES):
                 for dpi in (72, 150):

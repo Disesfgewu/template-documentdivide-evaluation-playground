@@ -53,7 +53,7 @@ its partial/human-signoff status are unchanged.
 T05 uses fixed display sizes `(612,792)`, `(792,612)`, `(612,792)`,
 `(792,612)`, `(540,648)`, `(648,540)` points. Full pages at 72 and 150 DPI must
 match those sizes within one pixel. An independent flood fill locates both gray
-marker extents in the **production L0 PNG**, with maximum coordinate error
+marker extents at both 72 and 150 DPI in the **production L0 PNG**, with maximum coordinate error
 ≤0.005. The production forward transform must match golden within 0.000001;
 the inverse is compared with literal PDF rectangles within the T05 tolerance.
 Golden marker crops must have >80% gray pixels (217 ±6 per RGB channel), correct
@@ -70,6 +70,13 @@ restricted to 150 DPI (with all 12 unshifted 72 DPI crops still passing). Both
 mutations must produce failed evidence. The 150 DPI-only mutation previously
 passed because crop acceptance ran only at 72 DPI. Production defaults to
 150 DPI, so both raster scales now have the same localization checks. This does not change golden geometry or the 0.005 tolerance.
+
+A separate shared-offset regression translates PDF content by eight points for
+both the first full page and its crops at 150 DPI. Crop/page RGB comparisons
+remain exact, but the independent full-page marker oracle must reject the
+misplaced content and write failed evidence. This mutation previously passed
+because full-page marker extents were checked only at 72 DPI. Both scales now
+compare observed marker positions with the fixed golden coordinates.
 
 Wrong rotation (+90 degrees) on every marker and ignoring the CropBox on offset
 pages must exceed the 0.005 localization tolerance. Their crops/hashes/pixel
