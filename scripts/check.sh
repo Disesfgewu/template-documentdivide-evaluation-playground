@@ -34,7 +34,7 @@ suite_for_base() {
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
     web/*) echo web;;
-    contracts/*|tests/contracts/*) echo "contracts fixtures";;
+    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db";;
     fixtures/*|tests/fixtures/*) echo fixtures;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
@@ -57,7 +57,7 @@ run_suite() {
       python3 -m tools.governance.run_tests tests/governance
       ;;
     api)
-      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api
+      PYTHONPATH=services/api:contracts python3 -m tools.governance.run_tests tests/api
       ;;
     api-db)
       # Real PostgreSQL/pgvector only. Missing database = BLOCKED, never passed.
@@ -65,7 +65,7 @@ run_suite() {
         echo "BLOCKED: suite api-db needs LAB_TEST_DATABASE_URL (see docs/TESTING.md)" >&2
         return 3
       fi
-      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
+      PYTHONPATH=services/api:contracts python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
       ;;
     web)
       # React frontend: locked install, unit tests, type check, production build.
