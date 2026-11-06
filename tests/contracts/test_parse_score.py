@@ -168,6 +168,26 @@ class ScoreContractTests(unittest.TestCase):
                 with self.subTest(field=field, bad=bad), self.assertRaises(ValidationError):
                     metric(**kw)
 
+    def test_signed_zero_is_canonical_zero(self):
+        # PR #29 review: -0.0 is a valid numeric zero, not a validation error.
+        self.assertEqual(display_ratio(-0.0, 1.0), "0.00")
+        self.assertEqual(display(-0.0), "0.00")
+        self.assertEqual(display_ratio(-0.0, 3.0), "0.00")
+        for num, raw in ((0.0, 0.0), (-0.0, 0.0), (-0.0, -0.0), (0.0, -0.0)):
+            body = json.dumps(dict(question_id="q", metric="correctness", status="scored",
+                                   numerator=num, denominator=1.0, raw_value=raw, display_value="0.00",
+                                   rounding="lab-round-1", reason_codes=[], grader_revision="g@1",
+                                   support_refs=[]))
+            with self.subTest(num=num, raw=raw):
+                self.assertIn(f'"numerator": {num!r}', body)  # really sent as signed JSON
+                m = MetricResult.model_validate_json(body)
+                self.assertEqual((m.display_value, m.raw_value), ("0.00", 0.0))
+            with self.subTest(num=num, raw=raw, display="-0.00"), self.assertRaises(ValidationError):
+                MetricResult.model_validate_json(body.replace('"0.00"', '"-0.00"'))
+        # N/A 0/0 written with signed zeros is still the 0/0 representation.
+        metric(status="not_applicable", raw_value=None, display_value=None, numerator=-0.0,
+               denominator=-0.0, reason_codes=["no_applicable_checks"])
+
     def test_error_status_carries_no_number(self):
         with self.assertRaises(ValidationError):
             metric(status="error", raw_value=0.0, display_value="0.00", reason_codes=["grader_fault"])

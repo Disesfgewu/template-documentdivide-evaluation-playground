@@ -28,7 +28,14 @@ NA_RATIOS = ((None, None), (0.0, 0.0))
 def display(value: float) -> str:
     """Two decimals for display only (half-up on the shortest repr of the
     float, so 12.345 -> "12.35"); computation keeps full precision."""
-    return str(Decimal(repr(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    return _format(Decimal(repr(value)))
+
+
+def _format(d: Decimal) -> str:
+    """Two-place half-up text. A zero of either sign is the canonical
+    "0.00": IEEE -0.0 (e.g. a grader computing -0.0*w) is the same score."""
+    q = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return "0.00" if q.is_zero() else str(q)
 
 
 def _ratio_percent(numerator: float, denominator: float) -> Decimal:
@@ -45,8 +52,7 @@ def display_ratio(numerator: float, denominator: float) -> str:
     as "12.35"."""
     with localcontext() as ctx:
         ctx.prec = 50
-        exact = _ratio_percent(numerator, denominator)
-        return str(exact.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        return _format(_ratio_percent(numerator, denominator))
 
 
 class MetricResult(Contract):
