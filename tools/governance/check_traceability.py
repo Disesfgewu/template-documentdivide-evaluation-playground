@@ -10,13 +10,21 @@ owner list must be explicitly marked unassigned.
 cannot know whether a run/commit is real, so it rejects ``passed`` unless a
 verifier confirms each main evidence item (``--verify-provenance`` asks
 GitHub that the run belongs to this repository, concluded success, ran on
-main at exactly the recorded commit, and that the commit is on main).
+main at exactly the recorded commit, that the commit is on main, and that
+every cited test file and named test exists *at that commit*, read through
+the contents API, not in the current checkout).
+
+What this proves is run provenance: a successful main run at a commit that
+contained the cited tests. It does not prove that the run executed those
+tests (the checker reads no logs); ``main`` prints that distinction for every
+verified passed entry, and the note must say which suite ran them.
 Named tests (``file::Name``) must exist for a supported runner (Python
 unittest classes/methods, Go ``func TestX``); other files cannot carry names.
 """
 from __future__ import annotations
 
 import ast
+import base64
 import json
 import re
 import subprocess
@@ -36,10 +44,10 @@ REPO = "Disesfgewu/template-documentdivide-evaluation-playground"
 RUN_URL = re.compile(r"https://github\.com/Disesfgewu/template-documentdivide-evaluation-playground/actions/runs/([0-9]+)")
 
 
-def _test_names(path: Path) -> set[str]:
-    """Class and Class.method names defined in a Python test file."""
+def _test_names(text: str) -> set[str]:
+    """Class and Class.method names defined in Python test source."""
     names = set()
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+    for node in ast.parse(text).body:
         if isinstance(node, ast.ClassDef):
             names.add(node.name)
             names.update(f"{node.name}.{f.name}" for f in node.body
@@ -47,18 +55,21 @@ def _test_names(path: Path) -> set[str]:
     return names
 
 
-def _go_test_names(path: Path) -> set[str]:
-    return set(re.findall(r"^func (Test[A-Za-z0-9_]*)\(\w+ \*testing\.T\)", path.read_text(encoding="utf-8"), re.M))
+def _go_test_names(text: str) -> set[str]:
+    return set(re.findall(r"^func (Test[A-Za-z0-9_]*)\(\w+ \*testing\.T\)", text, re.M))
 
 
 NAMED_TEST_RUNNERS = {".py": _test_names, "_test.go": _go_test_names}
 
 
-def _named_test_problem(path: str, t: str) -> str | None:
+def _named_test_problem(path: str, t: str, text: str | None = None) -> str | None:
+    """``text`` is the file's source (default: the current checkout)."""
     name = t.split("::", 1)[1].split(" ", 1)[0]
     for suffix, names in NAMED_TEST_RUNNERS.items():
         if path.endswith(suffix):
-            return None if name in names(ROOT / path) else f"test not found: {t}"
+            if text is None:
+                text = (ROOT / path).read_text(encoding="utf-8")
+            return None if name in names(text) else f"test not found: {t}"
     return f"named tests are only supported for Python and Go test files: {t}"
 
 
@@ -108,6 +119,26 @@ def spec_ids(text: str) -> dict[str, set[str]]:
     return out
 
 
+def _test_at_commit_problems(fetch, commit: str, t: str) -> list[str]:
+    """The cited test must exist in the verified run's commit, not only in the
+    current checkout: a test added after that run cannot have run in it
+    (PM-REVIEW on #32, T01 with run 42151272974 / 64da938)."""
+    path = t.split("::", 1)[0].split(" ", 1)[0]
+    if "*" in path:
+        return [f"provenance: passed evidence needs concrete test files, not a glob: {t}"]
+    try:
+        meta = fetch(f"repos/{REPO}/contents/{path}?ref={commit}")
+    except Exception as exc:
+        return [f"provenance: {path} does not exist at {commit[:7]} ({exc})"]
+    if not isinstance(meta, dict) or meta.get("type") != "file" or meta.get("encoding") != "base64":
+        return [f"provenance: {path} at {commit[:7]} is not a file"]
+    if "::" not in t:
+        return []
+    text = base64.b64decode(meta.get("content") or "").decode("utf-8")
+    problem = _named_test_problem(path, t, text)
+    return [f"provenance: at {commit[:7]}: {problem}"] if problem else []
+
+
 def github_verifier(fetch=None):
     """Verifier asking GitHub whether a main evidence item really happened.
     ``fetch(path) -> dict`` defaults to ``gh api``; failures are problems."""
@@ -138,6 +169,8 @@ def github_verifier(fetch=None):
             cmp = fetch(f"repos/{REPO}/compare/{commit}...main")
             if cmp.get("status") not in {"ahead", "identical"}:
                 problems.append("provenance: commit is not on main")
+            for t in ev.get("tests") or []:
+                problems += _test_at_commit_problems(fetch, commit, t)
             return problems
         except Exception as exc:  # unreachable run/commit is not evidence
             return [f"provenance: could not verify ({exc})"]
@@ -233,6 +266,11 @@ def main(argv=None, doc=None, spec_text=None, fetch=None) -> int:
             for e in doc[section]:
                 counts[e["status"]] = counts.get(e["status"], 0) + 1
         print(f"traceability ok: {counts}")
+        for section in SECTIONS:
+            for e in doc[section]:
+                if e["status"] == "passed":
+                    print(f"traceability: {e['id']} passed: run provenance and tests-at-commit verified; "
+                          "execution of the cited tests is not log-verified by this checker")
     return 1 if errors else 0
 
 

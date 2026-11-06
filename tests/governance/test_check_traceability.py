@@ -1,3 +1,4 @@
+import base64
 import copy
 import unittest
 
@@ -24,11 +25,30 @@ RUN = f"https://github.com/Disesfgewu/template-documentdivide-evaluation-playgro
 SHA = "ab" * 20
 
 
-def fake_github(run=None, compare="ahead"):
-    """Stand-in for gh api: only RUN_ID exists, as a successful main run at SHA."""
+HERE = "tests/governance/test_check_traceability.py"
+
+
+def contents(text):
+    return {"type": "file", "encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
+
+
+def fake_github(run=None, compare="ahead", files=None):
+    """Stand-in for gh api: only RUN_ID exists, as a successful main run at SHA.
+    ``files`` maps path -> source at SHA (None: absent); by default SHA holds
+    the current checkout's files."""
     repo = {"full_name": ct.REPO}
 
     def fetch(path):
+        prefix, ref = f"repos/{ct.REPO}/contents/", f"?ref={SHA}"
+        if path.startswith(prefix) and path.endswith(ref):
+            rel = path[len(prefix):-len(ref)]
+            if files is not None and rel in files:
+                if files[rel] is None:
+                    raise RuntimeError(f"HTTP 404: {path}")
+                return contents(files[rel])
+            if (ct.ROOT / rel).is_file():
+                return contents((ct.ROOT / rel).read_text(encoding="utf-8"))
+            raise RuntimeError(f"HTTP 404: {path}")
         if path == f"repos/{ct.REPO}/actions/runs/{RUN_ID}":
             return {"repository": repo, "head_repository": repo, "head_branch": "main", "head_sha": SHA,
                     "status": "completed", "conclusion": "success", **(run or {})}
@@ -129,7 +149,7 @@ class TraceabilityTests(unittest.TestCase):
                                      fetch=unreachable), 0)
 
     def test_github_verifier_checks_run_and_commit(self):
-        ev = {"branch": "main", "commit": SHA, "run": RUN, "tests": ["x"]}
+        ev = {"branch": "main", "commit": SHA, "run": RUN, "tests": [HERE]}
         self.assertEqual(ct.github_verifier(fake_github())(ev), [])
         cases = {
             "failed run": ({"conclusion": "failure"}, "did not succeed"),
@@ -144,6 +164,44 @@ class TraceabilityTests(unittest.TestCase):
                 self.assertTrue(any(msg in e for e in got), got)
         got = ct.github_verifier(fake_github(compare="diverged"))(ev)
         self.assertTrue(any("not on main" in e for e in got), got)
+
+    def test_passed_tests_must_exist_at_evidence_commit(self):
+        """PM-REVIEW on #32 (673ceca): T01 cited run 42151272974 / 64da938 and a
+        test added after that commit; the checker looked at the PR checkout,
+        so the stale reference was accepted. Tests are now read at the SHA."""
+        named = f"{HERE}::TraceabilityTests.test_named_glob_rejected"
+
+        def verify(files, tests):
+            ev = {"branch": "main", "commit": SHA, "run": RUN, "tests": tests}
+            return ct.github_verifier(fake_github(files=files))(ev)
+
+        # Test file introduced after the run's commit: absent at SHA.
+        got = verify({HERE: None}, [named])
+        self.assertTrue(any(f"{HERE} does not exist at {SHA[:7]}" in e for e in got), got)
+        # File existed, but the named test was added later.
+        older = "import unittest\n\nclass TraceabilityTests(unittest.TestCase):\n    def test_good(self):\n        pass\n"
+        got = verify({HERE: older}, [named])
+        self.assertIn(f"provenance: at {SHA[:7]}: test not found: {named}", got)
+        # Positive historical reference: the name existed at SHA, even though
+        # that file's content differs from the current checkout.
+        self.assertEqual(verify({HERE: older}, [f"{HERE}::TraceabilityTests.test_good"]), [])
+        self.assertEqual(verify({HERE: older}, [HERE]), [])
+        # Globs cannot be resolved at a commit, so passed evidence rejects them.
+        got = verify(None, ["tests/governance/test_*.py"])
+        self.assertTrue(any("not a glob" in e for e in got), got)
+        # Through check(): the PM's T01 shape is rejected, and main() labels a
+        # verified entry as provenance, not proof of execution.
+        doc = copy.deepcopy(GOOD)
+        doc["tests"][0].update(status="passed", note="T01", evidence=[
+            {"branch": "main", "commit": SHA, "run": RUN, "tests": [named]}])
+        got = ct.check(doc, IDS, verify=ct.github_verifier(fake_github(files={HERE: None})))
+        self.assertTrue(any(e.startswith("tests[T01]: provenance:") for e in got), got)
+        import contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ct.main(["--verify-provenance"], doc=doc, spec_text=SPEC, fetch=fake_github()), 0)
+        self.assertIn("T01 passed: run provenance and tests-at-commit verified; "
+                      "execution of the cited tests is not log-verified", out.getvalue())
 
     def test_go_named_tests(self):
         import tempfile
