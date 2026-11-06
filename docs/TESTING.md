@@ -14,7 +14,7 @@ scripts/check.sh --scope all     # 全部 suite（main push / 發布 gate 使用
 - `parser`：parser service 設定、`/healthz`、`/readyz`、`/v1/capabilities`（不宣稱 adapter 可用），需 `pip install -r services/parser/requirements.lock`。
 - `web`：React 前端（`web/`）的 `npm ci`（lockfile 鎖版，`engine-strict`）、vitest、`tsc` 型別檢查與 production build，需 Node.js 22.12 以上。沒有 node/npm 時印 `BLOCKED` 並以 exit 3 失敗。
 - `contracts`：基礎資料契約（`contracts/`）的合法/非法範例（非法範例必須只因所標示的原因被拒）、schema 漂移檢查、以獨立的 `jsonschema` 驗證匯出的 schema，以及 #21 關閉條件逐項列出的正反例。需要 `pip install -r contracts/requirements.lock -r requirements-dev.txt`。
-- `governance` 也會跑 `tools.governance.check_traceability`：`docs/traceability.yaml` 必須涵蓋 SPEC 全部 R/T/A 編號且不多列；status 只能是 not_started、partial、blocked、passed；非 not_started 必須有 evidence 與 note；passed 必須有 main commit、本 repo 的 CI run 與測試；evidence 引用的測試檔與 `檔案::類別[.方法]` 都必須實際存在，改名或刪除的測試不算證據。
+- `governance` 也會跑 `tools.governance.check_traceability`：`docs/traceability.yaml` 必須涵蓋 SPEC 全部 R/T/A 編號且不多列；status 只能是 not_started、partial、blocked、passed；非 not_started 必須有 evidence 與 note；passed 必須有 main commit、本 repo 的 CI run 與測試，且離線檢查一律拒絕 passed：必須以 `python3 -m tools.governance.check_traceability --verify-provenance` 向 GitHub 確認該 run 屬於本 repo、在 main 上以該 commit 執行且結論為 success，並且該 commit 在 main 上；evidence 引用的測試檔與具名測試都必須實際存在（具名測試只支援 Python `檔案::類別[.方法]` 與 Go `x_test.go::TestX`，其他檔案不可帶名稱），改名或刪除的測試不算證據。
 - `governance`（必要檔、PR/Issue templates、workflow 無空 job/`continue-on-error`/`|| true`、CODEOWNERS 身份核實、相對連結、密鑰樣式掃描、branch 清理判定）。後續 Issue 新增應用程式 suite 時需在 `scripts/check.sh` 註冊並對應路徑。
 - 本文件不代表 T01–T104 已執行；各 PR 驗證表須列實際指令、SHA 與結果。
 
