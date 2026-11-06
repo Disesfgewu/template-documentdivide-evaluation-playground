@@ -128,6 +128,11 @@ class InvalidPageLabels(ValueError):
 
 
 _MAX_TREE_DEPTH = 32
+# A printed page label is short. The bound is checked before any label text
+# is built, so an adversarial /St (e.g. /A with 26000001) cannot allocate
+# huge strings or loop in roman formatting (PM review on #36).
+MAX_LABEL_CHARS = 64
+MAX_LABEL_NUMBER = 10**9
 
 
 def _label_ranges(node: Any, depth: int, out: list[tuple[int, Any]]) -> None:
@@ -179,8 +184,21 @@ def _format_label(spec: Any, number: int) -> str:
         raise InvalidPageLabels(f"unknown numbering style {style!r}")
     if not isinstance(prefix, str):
         raise InvalidPageLabels("/P is not a text string")
+    if len(prefix) > MAX_LABEL_CHARS:
+        raise InvalidPageLabels(f"/P longer than {MAX_LABEL_CHARS} characters")
     if style is None:
         return str(prefix)
+    if number > MAX_LABEL_NUMBER:
+        raise InvalidPageLabels(f"page number {number} exceeds {MAX_LABEL_NUMBER}")
+    # Exact rendered length, computed without rendering.
+    if style == "/D":
+        length = len(str(number))
+    elif style in {"/A", "/a"}:
+        length = (number - 1) // 26 + 1
+    else:  # roman: at least one "m" per thousand, at most 15 more symbols
+        length = number // 1000 + 15
+    if len(prefix) + length > MAX_LABEL_CHARS:
+        raise InvalidPageLabels(f"label for page number {number} would exceed {MAX_LABEL_CHARS} characters")
     if style == "/D":
         body = str(number)
     elif style in {"/R", "/r"}:
@@ -211,6 +229,8 @@ def page_labels(reader: PdfReader) -> list[str | None]:
         first = spec.get("/St", 1)
         if isinstance(first, bool) or not isinstance(first, int) or first < 1:
             raise InvalidPageLabels(f"/St {first!r} is not a positive integer")
+        if first > MAX_LABEL_NUMBER:
+            raise InvalidPageLabels(f"/St {first} exceeds {MAX_LABEL_NUMBER}")
         labels.append(_format_label(spec, int(first) + index - start))
     return labels
 

@@ -145,6 +145,33 @@ class TestPages(unittest.TestCase):
                 with self.assertRaises(InvalidPageLabels):
                     extract_pages(with_label_tree(tree))
 
+    def test_adversarial_label_numbers_are_bounded(self) -> None:
+        """PM-REVIEW on #36 (ca8bd54): /A with /St 26000001 rendered a
+        1,000,001-character label; larger values could stall /R. Rejected
+        before any text is built, quickly, with the label cap enforced."""
+        import time
+        from lab_parser.pages import MAX_LABEL_CHARS
+        bad = {
+            "PM repro /A 26000001": {"/S": "/A", "/St": 26000001},
+            "/a just over the cap": {"/S": "/a", "/St": 26 * MAX_LABEL_CHARS + 1},
+            "/R huge": {"/S": "/R", "/St": 10**9},
+            "/r beyond number cap": {"/S": "/r", "/St": 10**12},
+            "/D beyond number cap": {"/S": "/D", "/St": 10**18},
+            "/R long via prefix": {"/S": "/R", "/St": 48000, "/P": "x" * 10},
+            "prefix too long": {"/P": "x" * (MAX_LABEL_CHARS + 1)},
+        }
+        for label, spec in bad.items():
+            with self.subTest(label):
+                start = time.monotonic()
+                with self.assertRaises(InvalidPageLabels):
+                    extract_pages(with_label_tree({"/Nums": [0, spec]}, pages=1))
+                self.assertLess(time.monotonic() - start, 1.0)
+        # Largest labels still accepted at the cap.
+        ok = {"/Nums": [0, {"/S": "/A", "/St": 26 * MAX_LABEL_CHARS}, 1, {"/S": "/D", "/St": 10**9}]}
+        got = labels(with_label_tree(ok, pages=2))
+        self.assertEqual(got, ["Z" * MAX_LABEL_CHARS, str(10**9)])
+        self.assertEqual(labels(with_label_tree({"/Nums": [0, {"/S": "/R", "/St": 3999}]}, pages=1)), ["MMMCMXCIX"])
+
     def test_genuine_label_styles(self) -> None:
         tree = {"/Nums": [0, {"/S": "/r"}, 2, {"/S": "/D", "/P": "A-"}, 3, {"/P": "Cover"},
                           4, {"/S": "/R", "/St": 4}, 5, {"/S": "/A", "/St": 27}, 6, {"/S": "/a", "/St": 2}]}
