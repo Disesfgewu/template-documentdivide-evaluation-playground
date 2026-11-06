@@ -48,4 +48,6 @@ scripts/check.sh --scope worker-agentkit
 - `NodeRunner`（`operation.go`）：以 (work_item_id, node_revision, logical_invocation_id) 記錄 operation，外部呼叫前先 Begin；成功結果先持久化再讓 graph 存 checkpoint，重跑直接沿用（T61）；回應遺失、呼叫中取消或逾時、或重跑時發現 started 都標 `outcome_unknown`，不再自動重送（T63）；每個 logical call 最多 3 次 attempt，attempt 與用量分開記錄；取消後不再預留或送出新呼叫（T29）。
 - `Ledger`（`budget.go`）：以 micro 單位整數記帳，`spent+reserved+next ≤ limit` 才可預留，`outcome_unknown` 保留預留直到核對；並行搶最後預算不會超限（T28）。
 
-尚未完成：PostgreSQL 版 store/operation/ledger（依賴 #5）、scheduler、真 provider 呼叫與 retry owner 對齊 agentKit model 設定、TraceBridge/AuditImporter、VisionReader。
+- `ChatCall`（`model.go`）：把一次 pinned 的 agentKit `model.Client.Chat`（`Router`/`RemoteClient`/`HTTPClient`）包成 NodeRunner effect。transport retry 只由 agentKit HTTPClient 負責：`ValidateModelConfig` 要求 `max_retries` 明確為 1–2（每個 logical call ≤3 次；ce49a71 的 0 代表 5 次重試，因此拒絕）、`timeout_seconds` 與 `requests_per_minute` 明確設定；包成 node 時 runner 必須 `MaxAttempts 1` 且無 `Retryable`，避免重試層數相乘（T27）。必須 pin Router entry（不 failover），回應來自其他模型即拒絕（T26）；`max_output_tokens` 必填（agentKit 會默默補 1024）。HTTP 狀態錯誤是已知失敗；無狀態的傳輸錯誤與呼叫中取消是 `outcome_unknown`；回應沒有 usage 時保留預留為 unknown，不當成 0（T29）。
+
+尚未完成：PostgreSQL 版 store/operation/ledger（依賴 #5）、scheduler、embedding 與 vision 呼叫、JSON 修復上限（T19）、TraceBridge/AuditImporter。

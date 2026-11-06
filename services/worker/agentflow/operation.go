@@ -251,7 +251,11 @@ func (r *NodeRunner) Node(effect Effect) (graph.Node, error) {
 			if effectErr == nil {
 				// Persist the result first: a re-run then reuses it (T61)
 				// even if settlement below fails.
-				attempt := Attempt{N: n, Outcome: "succeeded", ChargedMicros: charged}
+				usageUnknown := charged == UsageUnknown
+				if usageUnknown {
+					charged = 0
+				}
+				attempt := Attempt{N: n, Outcome: "succeeded", ChargedMicros: charged, Unknown: usageUnknown}
 				if err := r.Store.AddAttempt(bk, key, attempt); err != nil {
 					return nil, err
 				}
@@ -259,7 +263,15 @@ func (r *NodeRunner) Node(effect Effect) (graph.Node, error) {
 					return nil, err
 				}
 				if r.Budget != nil {
-					if err := r.Budget.Settle(attemptID, r.money(charged)); err != nil {
+					var err error
+					if usageUnknown {
+						// Billed but usage not reported: hold the reservation
+						// for reconciliation, never settle as zero.
+						err = r.Budget.MarkUnknown(attemptID)
+					} else {
+						err = r.Budget.Settle(attemptID, r.money(charged))
+					}
+					if err != nil {
 						return nil, fmt.Errorf("result saved, settlement failed: %w", err)
 					}
 				}
@@ -293,10 +305,18 @@ func (r *NodeRunner) Node(effect Effect) (graph.Node, error) {
 			// - other error: Budget.Settle(AttemptID, charged) (charged may be 0); AddAttempt{failed, err text, charged};
 			//   if Retryable(err) && n < MaxAttempts -> continue; else Finish failed and return the error.
 			var bookErr error
-			if r.Budget != nil {
-				bookErr = r.Budget.Settle(attemptID, r.money(charged))
+			usageUnknown := charged == UsageUnknown
+			if usageUnknown {
+				charged = 0
 			}
-			attempt := Attempt{N: n, Outcome: "failed", Error: effectErr.Error(), ChargedMicros: charged}
+			if r.Budget != nil {
+				if usageUnknown {
+					bookErr = r.Budget.MarkUnknown(attemptID)
+				} else {
+					bookErr = r.Budget.Settle(attemptID, r.money(charged))
+				}
+			}
+			attempt := Attempt{N: n, Outcome: "failed", Error: effectErr.Error(), ChargedMicros: charged, Unknown: usageUnknown}
 			bookErr = errors.Join(bookErr, r.Store.AddAttempt(bk, key, attempt))
 			if bookErr != nil {
 				// Unrecorded attempts must not be retried blindly.
