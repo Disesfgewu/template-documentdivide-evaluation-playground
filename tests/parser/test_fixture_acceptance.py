@@ -238,6 +238,7 @@ class FixtureAcceptance(unittest.TestCase):
                     self.assertIn(marker['text'], text)
                 self.assertNotIn(f'MARK-{(index + 1) % len(pages)}-L', text)
 
+            full_pages = {}
             for dpi in (72, 150):
                 with self.case(f'page-{index}-full-{dpi}', item, 'T05',
                                {'dimensions_pt': DISPLAY_SIZES[index], 'dpi': dpi}) as actual:
@@ -246,8 +247,8 @@ class FixtureAcceptance(unittest.TestCase):
                     for got, pt in zip((asset.width_px, asset.height_px), DISPLAY_SIZES[index]):
                         self.assertLessEqual(abs(got - pt * dpi / 72), 1)
                     self.assertEqual(asset.transform['page_size_pt'], DISPLAY_SIZES[index])
+                    full_pages[dpi] = asset.png
                     if dpi == 72:
-                        full_png = asset.png
                         observed = marker_extents(asset.png)
                         actual['observed_marker_bboxes'] = observed
                         golden_boxes = sorted(m['bbox'] for m in exp['markers'])
@@ -256,43 +257,44 @@ class FixtureAcceptance(unittest.TestCase):
                             self.assertLessEqual(max(abs(a - b) for a, b in zip(got, want)), T05_TOLERANCE)
 
             for marker, box in zip(exp['markers'], PDF_BOXES):
-                with self.case(marker['text'], item, 'T05', {'bbox': marker['bbox'], 'pdf_box': box,
-                                                          'gray_min_ratio': GRAY_MIN_RATIO}) as actual:
-                    golden = tuple(marker['bbox'])
-                    calculated = to_region_space(box, page.visible_box, page.rotation)
-                    restored = to_user_space(golden, page.visible_box, page.rotation)
-                    actual.update(calculated_bbox=calculated, restored_pdf_box=restored)
-                    for got, want in zip(calculated, golden):
-                        self.assertLessEqual(abs(got - want), 0.000001)
-                    for got, want in zip(restored, box):
-                        self.assertLessEqual(abs(got - want), T05_TOLERANCE * max(page.display_width_pt, page.display_height_pt))
-                    asset = self.asset(marker['text'], data, index, golden)
-                    repeat = render_region(data, index, golden, dpi=72)
-                    actual.update(sha256=asset.sha256, transform=asset.transform, gray_ratio=gray_ratio(asset.png))
-                    self.assertEqual(asset.png, repeat.png)
-                    self.assertEqual(asset.transform['region'], golden)
-                    self.assertEqual(asset.page_index, index)
-                    width, height = DISPLAY_SIZES[index]
-                    for got, want in zip((asset.width_px, asset.height_px),
-                                         ((golden[2] - golden[0]) * width, (golden[3] - golden[1]) * height)):
-                        self.assertLessEqual(abs(got - want), 2)
-                    self.assertGreater(actual['gray_ratio'], GRAY_MIN_RATIO)
-                    actual['full_page_pixel_match'] = crop_pixel_match(full_png, asset.png, golden)
-                    self.assertEqual(actual['full_page_pixel_match']['mismatched_rgb_bytes'], 0,
-                                     'crop pixels must match the golden location in the full page')
-                    # Wrong transforms must fail the T05 localization oracle. A wrong crop
-                    # may still contain gray pixels, so pixel coverage alone is insufficient.
-                    negatives = {'wrong_rotation': to_region_space(box, page.visible_box, (page.rotation + 90) % 360)}
-                    if page.cropbox != page.mediabox:
-                        negatives['ignored_cropbox'] = to_region_space(box, page.mediabox, page.rotation)
-                    actual['negative_controls'] = {}
-                    for name, wrong in negatives.items():
-                        bad = self.asset(f'{marker["text"]}-{name}', data, index, wrong)
-                        ratio = gray_ratio(bad.png)
-                        actual['negative_controls'][name] = {'bbox': wrong, 'gray_ratio': ratio, 'sha256': bad.sha256}
-                        error = max(abs(a - b) for a, b in zip(wrong, golden))
-                        actual['negative_controls'][name]['max_coordinate_error'] = error
-                        self.assertGreater(error, T05_TOLERANCE, name)
+                for dpi in (72, 150):
+                    with self.case(f"{marker['text']}-{dpi}", item, 'T05', {'bbox': marker['bbox'], 'pdf_box': box,
+                                                              'gray_min_ratio': GRAY_MIN_RATIO, 'dpi': dpi}) as actual:
+                        golden = tuple(marker['bbox'])
+                        calculated = to_region_space(box, page.visible_box, page.rotation)
+                        restored = to_user_space(golden, page.visible_box, page.rotation)
+                        actual.update(calculated_bbox=calculated, restored_pdf_box=restored)
+                        for got, want in zip(calculated, golden):
+                            self.assertLessEqual(abs(got - want), 0.000001)
+                        for got, want in zip(restored, box):
+                            self.assertLessEqual(abs(got - want), T05_TOLERANCE * max(page.display_width_pt, page.display_height_pt))
+                        asset = self.asset(f"{marker['text']}-{dpi}", data, index, golden, dpi=dpi)
+                        repeat = render_region(data, index, golden, dpi=dpi)
+                        actual.update(sha256=asset.sha256, transform=asset.transform, gray_ratio=gray_ratio(asset.png))
+                        self.assertEqual(asset.png, repeat.png)
+                        self.assertEqual(asset.transform['region'], golden)
+                        self.assertEqual(asset.page_index, index)
+                        width, height = DISPLAY_SIZES[index]
+                        for got, want in zip((asset.width_px, asset.height_px),
+                                             ((golden[2] - golden[0]) * width * dpi / 72, (golden[3] - golden[1]) * height * dpi / 72)):
+                            self.assertLessEqual(abs(got - want), 2)
+                        self.assertGreater(actual['gray_ratio'], GRAY_MIN_RATIO)
+                        actual['full_page_pixel_match'] = crop_pixel_match(full_pages[dpi], asset.png, golden)
+                        self.assertEqual(actual['full_page_pixel_match']['mismatched_rgb_bytes'], 0,
+                                         'crop pixels must match the golden location in the full page')
+                        # Wrong transforms must fail the T05 localization oracle. A wrong crop
+                        # may still contain gray pixels, so pixel coverage alone is insufficient.
+                        negatives = {'wrong_rotation': to_region_space(box, page.visible_box, (page.rotation + 90) % 360)}
+                        if page.cropbox != page.mediabox:
+                            negatives['ignored_cropbox'] = to_region_space(box, page.mediabox, page.rotation)
+                        actual['negative_controls'] = {}
+                        for name, wrong in negatives.items():
+                            bad = self.asset(f'{marker["text"]}-{dpi}-{name}', data, index, wrong, dpi=dpi)
+                            ratio = gray_ratio(bad.png)
+                            actual['negative_controls'][name] = {'bbox': wrong, 'gray_ratio': ratio, 'sha256': bad.sha256}
+                            error = max(abs(a - b) for a, b in zip(wrong, golden))
+                            actual['negative_controls'][name]['max_coordinate_error'] = error
+                            self.assertGreater(error, T05_TOLERANCE, name)
 
     def test_f05_fixed_outcomes_and_exact_limits(self):
         mapping = {'accept_as_data': 'accept', 'reject_if_over_limit': 'reject'}

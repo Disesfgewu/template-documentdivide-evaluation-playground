@@ -58,14 +58,18 @@ marker extents in the **production L0 PNG**, with maximum coordinate error
 the inverse is compared with literal PDF rectangles within the T05 tolerance.
 Golden marker crops must have >80% gray pixels (217 ±6 per RGB channel), correct
 pixel dimensions/metadata/hash, and byte-identical repeat renders.
-Each 72 DPI crop must also match every RGB byte in a slice at its golden
+Each 72 and 150 DPI crop must also match every RGB byte in a slice at its golden
 location in the full-page L0 render. The slice origin permits one pixel of
 PDFium margin rounding; it does not use the crop's self-reported transform.
 Evidence records the matched page-pixel origin and reference/crop RGB hashes.
 This content check detects a four-point horizontal crop shift that preserves
 dimensions, metadata and >80% gray fill: the previous oracle accepted all 12
-shifted crops, while the regression now requires all 12 to fail and the report
-to say failed. This does not change golden geometry or the 0.005 tolerance.
+shifted crops. Regressions now require all 24 crops across both DPIs to fail
+when shifted, and separately require all 12 crops to fail when the shift is
+restricted to 150 DPI (with all 12 unshifted 72 DPI crops still passing). Both
+mutations must produce failed evidence. The 150 DPI-only mutation previously
+passed because crop acceptance ran only at 72 DPI. Production defaults to
+150 DPI, so both raster scales now have the same localization checks. This does not change golden geometry or the 0.005 tolerance.
 
 Wrong rotation (+90 degrees) on every marker and ignoring the CropBox on offset
 pages must exceed the 0.005 localization tolerance. Their crops/hashes/pixel

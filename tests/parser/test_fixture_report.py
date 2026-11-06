@@ -30,15 +30,47 @@ class FixtureEvidenceFailureTests(unittest.TestCase):
                     result = unittest.TestResult()
                     suite.run(result)
             self.assertEqual(len(result.errors), 0)
-            self.assertEqual(len(result.failures), 12)
+            self.assertEqual(len(result.failures), 24)
             report = json.loads((Path(directory) / 'evidence.json').read_text())
             self.assertEqual(report['status'], 'failed')
             crops = [case for case in report['cases'] if 'full_page_pixel_match' in case['actual']]
-            self.assertEqual(len(crops), 12)
+            self.assertEqual(len(crops), 24)
             for case in crops:
                 self.assertEqual(case['status'], 'failed')
                 self.assertGreater(case['actual']['gray_ratio'], acceptance.GRAY_MIN_RATIO)
                 self.assertGreater(case['actual']['full_page_pixel_match']['mismatched_rgb_bytes'], 0)
+
+    def test_150_dpi_shifted_crop_cannot_pass_localization(self):
+        original = acceptance.pdfium.PdfPage.render
+
+        def shifted(page, *args, **kwargs):
+            crop = kwargs.get('crop')
+            if kwargs.get('scale') == 150 / 72 and crop and any(crop):
+                left, bottom, right, top = crop
+                kwargs['crop'] = (left + 4, bottom, right - 4, top)
+            return original(page, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {'LAB_PDF_FIXTURE_REPORT_DIR': directory}):
+                with patch.object(acceptance.pdfium.PdfPage, 'render', shifted):
+                    suite = unittest.TestSuite([
+                        acceptance.FixtureAcceptance('test_f02_geometry_render_and_negative_controls')])
+                    result = unittest.TestResult()
+                    suite.run(result)
+            self.assertEqual(len(result.errors), 0)
+            self.assertEqual(len(result.failures), 12)
+            report = json.loads((Path(directory) / 'evidence.json').read_text())
+            self.assertEqual(report['status'], 'failed')
+            crops = [case for case in report['cases'] if 'full_page_pixel_match' in case['actual']]
+            self.assertEqual(len(crops), 24)
+            for case in crops:
+                dpi = case['actual']['transform']['dpi']
+                self.assertEqual(case['status'], 'failed' if dpi == 150 else 'passed')
+                mismatch = case['actual']['full_page_pixel_match']['mismatched_rgb_bytes']
+                if dpi == 150:
+                    self.assertGreater(mismatch, 0)
+                else:
+                    self.assertEqual(mismatch, 0)
 
     def test_bad_input_hash_cannot_emit_passed_report(self):
         with tempfile.TemporaryDirectory() as directory:
