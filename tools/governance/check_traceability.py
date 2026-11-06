@@ -82,7 +82,11 @@ def _evidence_problems(ev) -> list[str]:
             for t in tests:
                 path = t.split("::", 1)[0].split(" ", 1)[0]
                 if "*" in path:
-                    if not list(ROOT.glob(path)):
+                    if "::" in t:
+                        # A glob cannot pin which file holds the named test,
+                        # so a missing name would slip through (PM #32).
+                        out.append(f"named tests need a concrete file, not a glob: {t}")
+                    elif not list(ROOT.glob(path)):
                         out.append(f"no file matches {path}")
                 elif not (ROOT / path).is_file():
                     out.append(f"test file does not exist: {path}")
@@ -209,15 +213,22 @@ def check(doc, ids: dict[str, set[str]], verify=None) -> list[str]:
     return errors
 
 
-def main(argv=None) -> int:
+def main(argv=None, doc=None, spec_text=None, fetch=None) -> int:
+    """``--verify-provenance`` (used by scripts/check.sh, so CI runs it) asks
+    GitHub only for ``passed`` entries; with none, no network is needed. If
+    GitHub cannot be reached, passed entries fail (blocked, never passed).
+    ``doc``/``spec_text``/``fetch`` are injection points for tests."""
     argv = sys.argv[1:] if argv is None else argv
-    verify = github_verifier() if "--verify-provenance" in argv else None
-    errors = check(yaml.safe_load(TRACE.read_text(encoding="utf-8")), spec_ids(SPEC.read_text(encoding="utf-8")), verify)
+    verify = github_verifier(fetch) if "--verify-provenance" in argv else None
+    if doc is None:
+        doc = yaml.safe_load(TRACE.read_text(encoding="utf-8"))
+    if spec_text is None:
+        spec_text = SPEC.read_text(encoding="utf-8")
+    errors = check(doc, spec_ids(spec_text), verify)
     for err in errors:
         print(f"traceability: {err}", file=sys.stderr)
     counts = {}
     if not errors:
-        doc = yaml.safe_load(TRACE.read_text(encoding="utf-8"))
         for section in SECTIONS:
             for e in doc[section]:
                 counts[e["status"]] = counts.get(e["status"], 0) + 1

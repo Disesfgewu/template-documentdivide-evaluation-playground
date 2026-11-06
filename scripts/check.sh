@@ -50,7 +50,8 @@ run_suite() {
   case "$1" in
     governance)
       python3 -m tools.governance.check_repo
-      python3 -m tools.governance.check_traceability
+      # Provenance is checked against GitHub for passed entries only (needs GH_TOKEN then).
+      python3 -m tools.governance.check_traceability --verify-provenance
       python3 -m tools.governance.run_tests tests/governance
       ;;
     api)

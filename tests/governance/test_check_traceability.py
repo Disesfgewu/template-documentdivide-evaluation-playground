@@ -89,6 +89,45 @@ class TraceabilityTests(unittest.TestCase):
         online = ct.check(doc, IDS, verify=ct.github_verifier(fake_github()))
         self.assertTrue(any("could not verify" in e for e in online), online)
 
+    def test_named_glob_rejected(self):
+        """PM-REVIEW 6676131274: a glob with a named test skipped name
+        validation, so a nonexistent test passed with a stub verifier."""
+        ev = [{"branch": "main", "commit": "64da938ca7506964e7170ae3b51d046eb20c895b",
+               "run": "https://github.com/Disesfgewu/template-documentdivide-evaluation-playground/actions/runs/42151272974",
+               "tests": ["tests/governance/test_*.py::NoSuchTest"]}]
+        doc = copy.deepcopy(GOOD)
+        doc["tests"][0].update(status="passed", evidence=ev, note="glob")
+        got = ct.check(doc, IDS, verify=lambda _: [])
+        self.assertIn("tests[T01].evidence[0]: named tests need a concrete file, not a glob: "
+                      "tests/governance/test_*.py::NoSuchTest", got)
+        # An unnamed glob stays allowed.
+        ev[0]["tests"] = ["tests/governance/test_*.py"]
+        self.assertEqual(ct.check(doc, IDS, verify=lambda _: []), [])
+
+    def test_passed_ci_path(self):
+        """The CI entrypoint runs --verify-provenance, so valid passed evidence
+        passes there and fake evidence fails; offline mode still rejects it."""
+        import contextlib, io
+        from pathlib import Path
+        script = (Path(ct.ROOT) / "scripts" / "check.sh").read_text(encoding="utf-8")
+        self.assertIn("python3 -m tools.governance.check_traceability --verify-provenance", script)
+        doc = copy.deepcopy(GOOD)
+        doc["tests"][0].update(status="passed", note="covered by the named test", evidence=[
+            {"branch": "main", "commit": SHA, "run": RUN,
+             "tests": ["tests/governance/test_check_traceability.py::TraceabilityTests.test_passed_ci_path"]}])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ct.main(["--verify-provenance"], doc=doc, spec_text=SPEC, fetch=fake_github()), 0)
+            self.assertEqual(ct.main([], doc=doc, spec_text=SPEC), 1)
+            bad = fake_github(run={"conclusion": "failure"})
+            self.assertEqual(ct.main(["--verify-provenance"], doc=doc, spec_text=SPEC, fetch=bad), 1)
+
+            def unreachable(path):
+                raise RuntimeError("gh: not logged in")
+            self.assertEqual(ct.main(["--verify-provenance"], doc=doc, spec_text=SPEC, fetch=unreachable), 1)
+            # No passed entries: provenance mode never calls GitHub.
+            self.assertEqual(ct.main(["--verify-provenance"], doc=copy.deepcopy(GOOD), spec_text=SPEC,
+                                     fetch=unreachable), 0)
+
     def test_github_verifier_checks_run_and_commit(self):
         ev = {"branch": "main", "commit": SHA, "run": RUN, "tests": ["x"]}
         self.assertEqual(ct.github_verifier(fake_github())(ev), [])

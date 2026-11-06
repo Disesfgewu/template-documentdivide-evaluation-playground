@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: read  # traceability --verify-provenance reads CI runs for passed entries
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -40,11 +41,13 @@ jobs:
       - name: Scoped checks (PR)
         env:
           LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+          GH_TOKEN: ${{ github.token }}
         if: github.event_name == 'pull_request'
         run: scripts/check.sh --scope auto --base "origin/${{ github.base_ref }}"
       - name: Full checks (main / manual)
         env:
           LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+          GH_TOKEN: ${{ github.token }}
         if: github.event_name != 'pull_request'
         run: scripts/check.sh --scope all
       - name: Stop database
