@@ -35,7 +35,7 @@ suite_for_base() {
     services/parser/*|tests/parser/*) echo parser;;
     web/*) echo web;;
     contracts/*|tests/contracts/*) echo "contracts fixtures";;
-    fixtures/*|tests/fixtures/*) echo fixtures;;
+    fixtures/*|tests/fixtures/*) echo "fixtures parser";;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
