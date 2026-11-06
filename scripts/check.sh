@@ -28,6 +28,7 @@ suite_for_base() {
   case "$1" in
     # Shared test/CI infrastructure affects every suite.
     .github/*|scripts/*|tools/governance/run_tests.py) echo "${SUITES[*]}";;
+    tools/governance/go_test_report.py) echo "governance worker";;
     services/api/*|tests/api/*) echo "api api-db";;
     tests/api_db/*|deploy/*) echo api-db;;
     services/worker/*) echo worker;;
@@ -102,8 +103,16 @@ run_suite() {
         (cd services/worker && gofmt -d .) >&2
         return 1
       fi
-      (cd services/worker && export GOTOOLCHAIN=local && go version && go vet ./... \
-        && go test -count=1 -v ./... && go build -o /dev/null ./cmd/lab-worker)
+      # go test -json is converted to the shared per-test report (printed
+      # like -v; written to LAB_TEST_REPORT_DIR for traceability evidence).
+      local gojson rc=0
+      gojson="$(mktemp)"
+      (cd services/worker && export GOTOOLCHAIN=local && go version && go vet ./...) || { rm -f "$gojson"; return 1; }
+      (cd services/worker && GOTOOLCHAIN=local go test -count=1 -json ./... > "$gojson") || rc=$?
+      python3 -m tools.governance.go_test_report --module services/worker --input "$gojson" || rc=1
+      rm -f "$gojson"
+      (( rc == 0 )) || return 1
+      (cd services/worker && GOTOOLCHAIN=local go build -o /dev/null ./cmd/lab-worker)
       ;;
     *) echo "unknown suite: $1" >&2; return 2;;
   esac
