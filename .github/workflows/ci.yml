@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: read  # traceability --verify-provenance reads CI runs for passed entries
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -40,13 +41,25 @@ jobs:
       - name: Scoped checks (PR)
         env:
           LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+          GH_TOKEN: ${{ github.token }}
+          LAB_TEST_REPORT_DIR: ${{ runner.temp }}/test-reports
         if: github.event_name == 'pull_request'
         run: scripts/check.sh --scope auto --base "origin/${{ github.base_ref }}"
       - name: Full checks (main / manual)
         env:
           LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+          GH_TOKEN: ${{ github.token }}
+          LAB_TEST_REPORT_DIR: ${{ runner.temp }}/test-reports
         if: github.event_name != 'pull_request'
         run: scripts/check.sh --scope all
+      - name: Upload per-test reports (traceability execution evidence)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: ${{ runner.temp }}/test-reports/
+          if-no-files-found: warn
+          retention-days: 90
       - name: Stop database
         if: always()
         run: docker compose -f deploy/compose.dev.yml down -v
