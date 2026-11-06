@@ -364,7 +364,7 @@ func Import(binding Binding, log, journal, seal []byte) (Report, error) {
 				v := stable(binding, b.ParentID, "span")
 				p = &v
 			}
-			r.Events = append(r.Events, Event{EventID: stable(binding, id, "incomplete"), SpanID: stable(binding, id, "span"), ParentSpanID: p, CallID: id, ParentCallID: b.ParentID, Phase: "reconciliation", Level: "WARN", Status: "incomplete", OccurredAt: b.Time.UTC(), RecordSHA256: ""})
+			r.Events = append(r.Events, Event{EventID: stable(binding, id, "incomplete:"+r.Events[id-1].RecordSHA256), SpanID: stable(binding, id, "span"), ParentSpanID: p, CallID: id, ParentCallID: b.ParentID, Phase: "reconciliation", Level: "WARN", Status: "incomplete", OccurredAt: b.Time.UTC(), RecordSHA256: r.Events[id-1].RecordSHA256})
 		}
 	}
 	if seal != nil {

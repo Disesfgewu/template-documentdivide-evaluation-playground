@@ -211,3 +211,17 @@ func TestProducerSessionIdentityAndRecordIdentity(t *testing.T) {
 		t.Fatal("record revision identity wrong")
 	}
 }
+
+func TestReconciliationIdentityBindsOriginalBegin(t *testing.T) {
+	_, journal, _ := fixture(false)
+	first, err := Import(binding, nil, journal, nil)
+	if err == nil || first.Status != "incomplete" {
+		t.Fatal("expected incomplete")
+	}
+	changed := bytes.ReplaceAll(journal, []byte("NEVER_EMIT_SECRET"), []byte("OTHER_PRIVATE_INPUT"))
+	second, _ := Import(binding, nil, changed, nil)
+	a, b := first.Events[len(first.Events)-1], second.Events[len(second.Events)-1]
+	if a.Phase != "reconciliation" || a.RecordSHA256 == "" || a.RecordSHA256 != first.Events[0].RecordSHA256 || a.EventID == b.EventID {
+		t.Fatal("reconciliation identity ignored original begin")
+	}
+}
