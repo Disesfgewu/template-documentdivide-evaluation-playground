@@ -157,7 +157,7 @@ class TestPages(unittest.TestCase):
             "/R huge": {"/S": "/R", "/St": 10**9},
             "/r beyond number cap": {"/S": "/r", "/St": 10**12},
             "/D beyond number cap": {"/S": "/D", "/St": 10**18},
-            "/R long via prefix": {"/S": "/R", "/St": 48000, "/P": "x" * 10},
+            "/R long via prefix": {"/S": "/R", "/St": 48888, "/P": "x" * 10},  # 10 + 48 + 12 = 70
             "prefix too long": {"/P": "x" * (MAX_LABEL_CHARS + 1)},
         }
         for label, spec in bad.items():
@@ -171,6 +171,32 @@ class TestPages(unittest.TestCase):
         got = labels(with_label_tree(ok, pages=2))
         self.assertEqual(got, ["Z" * MAX_LABEL_CHARS, str(10**9)])
         self.assertEqual(labels(with_label_tree({"/Nums": [0, {"/S": "/R", "/St": 3999}]}, pages=1)), ["MMMCMXCIX"])
+
+    def test_pm_repro_roman_at_cap_accepted(self) -> None:
+        """PM-REVIEW on #36 (d78edb8): /S /R, /St 1 and a 63-character /P is a
+        valid 64-character label, but the old precheck assumed 15 numeral
+        symbols and rejected it. The precheck now uses the exact length."""
+        from lab_parser.pages import MAX_LABEL_CHARS, _format_label, _roman
+        p63 = "p" * (MAX_LABEL_CHARS - 1)
+        self.assertEqual(labels(with_label_tree({"/Nums": [0, {"/S": "/R", "/St": 1, "/P": p63}]}, pages=1)),
+                         [p63 + "I"])
+        with self.assertRaises(InvalidPageLabels):  # "II": 65 characters
+            extract_pages(with_label_tree({"/Nums": [0, {"/S": "/R", "/St": 2, "/P": p63}]}, pages=1))
+        # Thousands: 52888 -> 52 "m" + "dccclxxxviii" (12) = 64; 53888 -> 65.
+        self.assertEqual(labels(with_label_tree({"/Nums": [0, {"/S": "/r", "/St": 52888}]}, pages=1)),
+                         ["m" * 52 + "dccclxxxviii"])
+        with self.assertRaises(InvalidPageLabels):
+            extract_pages(with_label_tree({"/Nums": [0, {"/S": "/r", "/St": 53888}]}, pages=1))
+        # The precheck agrees with the rendered output: every number whose
+        # numeral fits is accepted with the exact numeral, every other is rejected.
+        for n in range(1, 66000, 7):
+            body = _roman(n)
+            with self.subTest(n=n):
+                if len(body) <= MAX_LABEL_CHARS:
+                    self.assertEqual(_format_label({"/S": "/r"}, n), body)
+                else:
+                    with self.assertRaises(InvalidPageLabels):
+                        _format_label({"/S": "/r"}, n)
 
     def test_genuine_label_styles(self) -> None:
         tree = {"/Nums": [0, {"/S": "/r"}, 2, {"/S": "/D", "/P": "A-"}, 3, {"/P": "Cover"},

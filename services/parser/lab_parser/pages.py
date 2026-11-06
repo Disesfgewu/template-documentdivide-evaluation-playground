@@ -195,8 +195,8 @@ def _format_label(spec: Any, number: int) -> str:
         length = len(str(number))
     elif style in {"/A", "/a"}:
         length = (number - 1) // 26 + 1
-    else:  # roman: at least one "m" per thousand, at most 15 more symbols
-        length = number // 1000 + 15
+    else:  # roman: one "m" per thousand plus the exact numeral of the rest (< 1000)
+        length = number // 1000 + len(_roman(number % 1000))
     if len(prefix) + length > MAX_LABEL_CHARS:
         raise InvalidPageLabels(f"label for page number {number} would exceed {MAX_LABEL_CHARS} characters")
     if style == "/D":
