@@ -111,7 +111,9 @@ run_suite() {
         && echo "agentkit gitlink $(git rev-parse HEAD:third_party/agentkit) checkout $(git -C third_party/agentkit rev-parse HEAD)" \
         && test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)" \
         && (cd third_party/agentkit && go test -count=1 ./graph ./model) \
-        && (cd services/worker/agentkitsmoke && go vet ./... && go test -count=1 -v ./...))
+        && for m in services/worker/agentkitsmoke services/worker/agentflow; do \
+             test -z "$(cd "$m" && gofmt -l .)" || { echo "gofmt needed in $m" >&2; exit 1; }; \
+             (cd "$m" && go vet ./... && go test -count=1 -race -v ./...) || exit 1; done)
       ;;
     *) echo "unknown suite: $1" >&2; return 2;;
   esac
