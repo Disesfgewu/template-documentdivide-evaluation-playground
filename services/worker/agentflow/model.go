@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"regexp"
 	"strconv"
 
@@ -20,6 +21,8 @@ const UsageUnknown int64 = -1
 const MaxTransportAttempts = 3
 
 var (
+	ErrInvalidUsage  = errors.New("token counts and prices must not be negative")
+	ErrCostOverflow  = errors.New("priced usage cannot be represented in int64 micro-units")
 	ErrModelSwapped  = errors.New("model pin not honoured: response came from another model")
 	ErrModelConfig   = errors.New("model config cannot express the LAB profile")
 	statusErrPattern = regexp.MustCompile(`HTTP (\d{3}) after \d+ retries`)
@@ -93,10 +96,22 @@ type Price struct {
 	OutputMicrosPerMTok int64
 }
 
-// Cost rounds up: a fraction of a micro-unit is charged as one.
-func (p Price) Cost(in, out int) int64 {
-	total := int64(in)*p.InputMicrosPerMTok + int64(out)*p.OutputMicrosPerMTok
-	return (total + 999_999) / 1_000_000
+// Cost rounds up once after summing both token charges. Wide integer
+// intermediates avoid overflow even when the final micro-unit cost fits.
+func (p Price) Cost(in, out int) (int64, error) {
+	if in < 0 || out < 0 || p.InputMicrosPerMTok < 0 || p.OutputMicrosPerMTok < 0 {
+		return 0, ErrInvalidUsage
+	}
+	var input, output, total big.Int
+	input.Mul(big.NewInt(int64(in)), big.NewInt(p.InputMicrosPerMTok))
+	output.Mul(big.NewInt(int64(out)), big.NewInt(p.OutputMicrosPerMTok))
+	total.Add(&input, &output)
+	total.Add(&total, big.NewInt(999_999))
+	total.Quo(&total, big.NewInt(1_000_000))
+	if !total.IsInt64() {
+		return 0, ErrCostOverflow
+	}
+	return total.Int64(), nil
 }
 
 // ChatCall turns one pinned agentKit chat call into a NodeRunner Effect.
@@ -151,7 +166,12 @@ func (c ChatCall) effect(ctx context.Context, s graph.State, _ Call) (graph.Stat
 	}
 	charged := UsageUnknown
 	if resp.UsageKnown {
-		charged = c.Price.Cost(resp.InputTokens, resp.OutputTokens)
+		charged, err = c.Price.Cost(resp.InputTokens, resp.OutputTokens)
+		if err != nil {
+			// The response arrived, but cannot be settled safely. The runner
+			// records the failure and holds the reservation for reconciliation.
+			return nil, UsageUnknown, fmt.Errorf("price reported usage: %w", err)
+		}
 	}
 	if resp.Provider != c.Pin {
 		return nil, charged, fmt.Errorf("%w: pinned %q, got %q (%s)", ErrModelSwapped, c.Pin, resp.Provider, resp.Model)

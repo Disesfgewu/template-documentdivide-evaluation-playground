@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -298,4 +299,100 @@ func TestChatCallGuards(t *testing.T) {
 	if _, err := node(context.Background(), graph.State{}); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("timeout: %v", err)
 	}
+}
+
+// R20/T28: products, sums and the ceiling operation must stay exact.
+func TestPriceCostBoundaries(t *testing.T) {
+	cases := []struct {
+		name    string
+		price   Price
+		in, out int
+		want    int64
+		wantErr error
+	}{
+		{"zero", Price{}, 0, 0, 0, nil},
+		{"fraction rounds up", Price{1, 0}, 1, 0, 1, nil},
+		{"exact micro", Price{1, 0}, 1_000_000, 0, 1, nil},
+		{"sum then round once", Price{1, 1}, 1, 1, 1, nil},
+		{"multiplication exceeds int64", Price{math.MaxInt64, 0}, 2, 0, 18_446_744_073_710, nil},
+		{"sum exceeds int64", Price{math.MaxInt64, math.MaxInt64}, 1, 1, 18_446_744_073_710, nil},
+		{"rounding addition exceeds int64", Price{math.MaxInt64, 0}, 1, 0, 9_223_372_036_855, nil},
+		{"exact maximum cost", Price{math.MaxInt64, 0}, 1_000_000, 0, math.MaxInt64, nil},
+		{"round up to maximum", Price{math.MaxInt64 - 1, 1}, 1_000_000, 1, math.MaxInt64, nil},
+		{"one fraction above maximum", Price{math.MaxInt64, 1}, 1_000_000, 1, 0, ErrCostOverflow},
+		{"above maximum", Price{math.MaxInt64, 0}, 1_000_001, 0, 0, ErrCostOverflow},
+		{"negative input", Price{1, 1}, -1, 0, 0, ErrInvalidUsage},
+		{"negative output", Price{1, 1}, 0, -1, 0, ErrInvalidUsage},
+		{"negative input price", Price{-1, 1}, 0, 0, 0, ErrInvalidUsage},
+		{"negative output price", Price{1, -1}, 0, 0, 0, ErrInvalidUsage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.price.Cost(tc.in, tc.out)
+			if got != tc.want || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Cost(%d,%d) = %d, %v; want %d, %v", tc.in, tc.out, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+// R20/T29: known token counts can still have an unrepresentable cost.
+// No result is published, no charge is fabricated, and no call is repeated.
+func TestUnsettleableUsageHoldsReservation(t *testing.T) {
+	cases := []struct {
+		name    string
+		in, out int
+		wantErr error
+	}{
+		{"cost overflow", 1_000_001, 0, ErrCostOverflow},
+		{"negative input", -1, 0, ErrInvalidUsage},
+		{"negative output", 0, -1, ErrInvalidUsage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := NewMemoryOperationStore()
+			budget, _ := NewLedger(usd(1_000_000))
+			r := &NodeRunner{Store: ops, WorkItemID: "q1", NodeRevision: "generate@1", MaxAttempts: 1,
+				InvocationID: func(graph.State) (string, error) { return "inv", nil }, Budget: budget, Estimate: usd(1_000_000)}
+			calls, applied := 0, false
+			call := ChatCall{Client: clientFunc(func(context.Context, model.Request) (model.Response, error) {
+				calls++
+				return model.Response{Provider: "primary", UsageKnown: true, InputTokens: tc.in, OutputTokens: tc.out}, nil
+			}), Pin: "primary", Price: Price{InputMicrosPerMTok: math.MaxInt64, OutputMicrosPerMTok: math.MaxInt64},
+				Build: func(graph.State) (model.Request, error) { return model.Request{MaxOutputTokens: 1}, nil },
+				Apply: func(graph.State, model.Response) (graph.State, error) {
+					applied = true
+					return graph.State{"answer": "must not publish"}, nil
+				}}
+			node, err := call.Node(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			patch, err := node(context.Background(), graph.State{})
+			if !errors.Is(err, tc.wantErr) || patch != nil || applied {
+				t.Fatalf("patch=%v applied=%v err=%v", patch, applied, err)
+			}
+			env := chatEnv{ops: ops, budget: budget, node: node}
+			op := env.op(t)
+			if op.Status != OpFailed || len(op.Attempts) != 1 || !op.Attempts[0].Unknown || op.Attempts[0].ChargedMicros != 0 || !strings.Contains(op.Error, tc.wantErr.Error()) {
+				t.Fatalf("operation %+v", op)
+			}
+			before := budget.Snapshot()
+			if before.Spent != 0 || before.Reserved != 1_000_000 || before.Unknown != 1_000_000 {
+				t.Fatalf("budget %+v", before)
+			}
+			if err := budget.Release("q1/generate@1/inv#1"); err == nil {
+				t.Fatal("unreconciled reservation released")
+			}
+			if _, err := node(context.Background(), graph.State{}); err == nil || calls != 1 || budget.Snapshot() != before {
+				t.Fatalf("re-run err=%v calls=%d budget=%+v", err, calls, budget.Snapshot())
+			}
+		})
+	}
+}
+
+type clientFunc func(context.Context, model.Request) (model.Response, error)
+
+func (f clientFunc) Chat(ctx context.Context, req model.Request) (model.Response, error) {
+	return f(ctx, req)
 }
