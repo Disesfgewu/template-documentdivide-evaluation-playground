@@ -79,6 +79,19 @@ class CompareRunsTests(unittest.TestCase):
         c = compare_runs([P("r1"), P("r2", answerer_model=None)], "full_system")
         self.assertEqual(c.differences, ("answerer_model_undisclosed",))
 
+    def test_blank_answerer_is_undisclosed(self):
+        # PM-REVIEW 6676132303: '' and ' ' disclose nothing, so the runs must not be rankable.
+        for claim in ("full_system", "retrieval_only"):
+            for models in (("", " "), ("", ""), (" ", "\t"), ("m1", "  ")):
+                with self.subTest(claim=claim, models=models):
+                    c = compare_runs([P("r1", answerer_model=models[0]),
+                                      P("r2", answerer_model=models[1])], claim)
+                    self.assertFalse(c.rankable)
+                    self.assertIn("answerer_model_undisclosed", c.differences)
+        # Different disclosed models stay comparable for a full-system claim.
+        c = compare_runs([P("r1", answerer_model="m1"), P("r2", answerer_model="m2")], "full_system")
+        self.assertEqual((c.rankable, c.differences), (True, ()))
+
     def test_bad_input(self):
         for runs, claim in (([P("r1")], "full_system"), ([P("r1"), P("r1")], "full_system"),
                             ([P("r1"), P("r2")], "best")):

@@ -90,13 +90,19 @@ class RunProfile:
     grader_revision: str
     budget_profile: str
     observation_profile: str
-    answerer_model: Optional[str]  # actual model used; None = not disclosed
+    answerer_model: Optional[str]  # actual model used; None/blank = not disclosed
 
 
 @dataclass(frozen=True)
 class Comparability:
     rankable: bool
     differences: tuple[str, ...]   # sorted keys that differ; shown to users
+
+
+def _disclosed(model: Optional[str]) -> bool:
+    """A model is disclosed only by a non-blank string; None, '' and
+    whitespace-only values all count as undisclosed (T45, SPEC 16.5)."""
+    return isinstance(model, str) and model.strip() != ""
 
 
 def compare_runs(runs: Sequence[RunProfile],
@@ -111,7 +117,7 @@ def compare_runs(runs: Sequence[RunProfile],
     if len({r.run_id for r in runs}) != len(runs):
         raise ValueError("duplicate run_id")
     diffs = {k for k in COMPARISON_KEYS if len({getattr(r, k) for r in runs}) > 1}
-    if any(r.answerer_model is None for r in runs):
+    if not all(_disclosed(r.answerer_model) for r in runs):
         diffs.add("answerer_model_undisclosed")
     if claim == "retrieval_only" and len({r.answerer_model for r in runs}) > 1:
         diffs.add("answerer_model")
