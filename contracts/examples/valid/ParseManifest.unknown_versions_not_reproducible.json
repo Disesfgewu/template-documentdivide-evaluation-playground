@@ -1,0 +1,50 @@
+{
+  "parser_name": "unstructured",
+  "package_or_service_version": "unknown",
+  "adapter_revision": "unstructured-adapter@0",
+  "output_schema": "unstructured-elements@unknown",
+  "model_revisions": [
+    {
+      "name": "layout",
+      "revision": "unknown",
+      "checksum": null
+    }
+  ],
+  "requested_profile": "hi_res",
+  "effective_profile": "hi_res",
+  "fallback_reason": null,
+  "ocr_languages": [
+    "zh-Hant",
+    "en"
+  ],
+  "page_selection": [
+    0,
+    1,
+    2
+  ],
+  "page_index_map": [
+    {
+      "parser_page": 1,
+      "page_index": 0
+    },
+    {
+      "parser_page": 2,
+      "page_index": 1
+    },
+    {
+      "parser_page": 3,
+      "page_index": 2
+    }
+  ],
+  "render_settings": {
+    "dpi": 150,
+    "max_megapixels": 16.0
+  },
+  "postprocess_flags": [],
+  "endpoint_deployment_id": null,
+  "started_at": "2026-11-05T10:00:00Z",
+  "finished_at": "2026-11-05T10:00:42Z",
+  "cost_usd": null,
+  "warnings": [],
+  "reproducible": false
+}

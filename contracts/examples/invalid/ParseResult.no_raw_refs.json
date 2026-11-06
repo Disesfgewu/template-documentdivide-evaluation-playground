@@ -1,0 +1,30 @@
+{
+  "operation_id": "op_parse_1",
+  "manifest_ref": "art_manifest_1",
+  "raw_result_refs": [],
+  "normalized_evidence_refs": [
+    "ev_1",
+    "ev_2"
+  ],
+  "pages": [
+    {
+      "page_index": 0,
+      "status": "ok",
+      "diagnostics": []
+    },
+    {
+      "page_index": 1,
+      "status": "needs_review",
+      "diagnostics": [
+        "table_structure_lost_on_fallback"
+      ]
+    },
+    {
+      "page_index": 2,
+      "status": "failed",
+      "diagnostics": [
+        "ocr_timeout"
+      ]
+    }
+  ]
+}
