@@ -53,13 +53,13 @@ def acquire(
             SET status = 'running',
                 lease_owner = %s,
                 lease_token = nextval('lease_tokens'),
-                lease_expires_at = now() + make_interval(secs => %s),
+                lease_expires_at = clock_timestamp() + make_interval(secs => %s),
                 row_version = row_version + 1,
                 attempt = attempt + 1
             WHERE project_id = %s
               AND id = %s
               AND attempt + 1 <= max_attempts
-              AND (status = 'queued' OR (status = 'running' AND lease_expires_at < now()))
+              AND (status = 'queued' OR (status = 'running' AND lease_expires_at < clock_timestamp()))
             RETURNING lease_token
             """,
             (worker, ttl_seconds, project_id, job_id),
@@ -70,17 +70,28 @@ def acquire(
 
 
 def _check(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease) -> None:
+    """Lock the job row, then validate the lease against wall time.
+
+    Lease grants and checks use ``clock_timestamp()``, never ``now()``:
+    ``now()`` is frozen at transaction start, so inside a long caller
+    transaction it would accept a lease that already expired on the wall
+    clock. The expiry comparison is a separate statement issued after
+    ``FOR UPDATE`` returns, because a locking SELECT may compute its target
+    list before waiting for the row lock."""
     row = conn.execute(
         """
-        SELECT status, lease_token, lease_expires_at > now()
+        SELECT status, lease_token, lease_expires_at
         FROM jobs
         WHERE project_id = %s AND id = %s
         FOR UPDATE
         """,
         (project_id, lease.job_id),
     ).fetchone()
-    if row is None or row[0] != "running" or row[1] != lease.token or not row[2]:
+    if row is None or row[0] != "running" or row[1] != lease.token:
         raise LeaseLost(f"job {lease.job_id} token {lease.token}")
+    live = conn.execute("SELECT %s::timestamptz > clock_timestamp()", (row[2],)).fetchone()[0]
+    if not live:
+        raise LeaseLost(f"job {lease.job_id} token {lease.token} (expired)")
 
 
 def heartbeat(
@@ -94,7 +105,7 @@ def heartbeat(
         conn.execute(
             """
             UPDATE jobs
-            SET lease_expires_at = now() + make_interval(secs => %s),
+            SET lease_expires_at = clock_timestamp() + make_interval(secs => %s),
                 row_version = row_version + 1
             WHERE project_id = %s AND id = %s
             """,

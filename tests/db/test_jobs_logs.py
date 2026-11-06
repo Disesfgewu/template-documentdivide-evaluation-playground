@@ -1,6 +1,7 @@
 """0004: job state machine, leases/fencing, checkpoints, node operations and
 redacted logs on a real PostgreSQL."""
 import json
+import threading
 import time
 import uuid
 
@@ -111,6 +112,85 @@ class FencingTests(FreshDatabase):
             with self.assertRaises(errors.IntegrityConstraintViolation):
                 with c.transaction():
                     c.execute("UPDATE graph_checkpoints SET last_node = 'x'")
+
+    def _expired_in_open_transaction(self, c, f, call):
+        """now() is frozen at transaction start; the lease check must use wall time."""
+        lease = jobs.acquire(c, f.p, f.job, "w1", ttl_seconds=1)
+        with c.transaction():
+            c.execute("SELECT now()").fetchone()
+            c.execute("SELECT pg_sleep(1.2)")
+            with self.assertRaises(jobs.LeaseLost):
+                call(lease)
+        return lease
+
+    def test_heartbeat_in_long_transaction_rejects_wall_clock_expiry(self):
+        with self.connect(autocommit=True) as c:
+            f = JobFixture(self, c)
+            self._expired_in_open_transaction(c, f, lambda ls: jobs.heartbeat(c, f.p, ls))
+            self.assertEqual(f.status(), "running")
+
+    def test_finish_in_long_transaction_rejects_wall_clock_expiry(self):
+        with self.connect(autocommit=True) as c:
+            f = JobFixture(self, c)
+            self._expired_in_open_transaction(c, f, lambda ls: jobs.finish(c, f.p, ls, "succeeded", "late"))
+            self.assertEqual(f.status(), "running")
+
+    def test_checkpoint_in_long_transaction_rejects_wall_clock_expiry(self):
+        with self.connect(autocommit=True) as c:
+            f = JobFixture(self, c)
+            tid = f.thread()
+            self._expired_in_open_transaction(
+                c, f, lambda ls: jobs.save_checkpoint(c, f.p, ls, tid, "wf@1", 1, {"s": 1}, 1, "n"))
+            self.assertIsNone(jobs.load_checkpoint(c, f.p, tid))
+
+    def test_acquire_in_long_transaction_sees_lease_expired_during_it(self):
+        with self.connect(autocommit=True) as c, self.connect(autocommit=True) as c2:
+            f = JobFixture(self, c)
+            old = jobs.acquire(c, f.p, f.job, "w1", ttl_seconds=1)
+            with c2.transaction():
+                c2.execute("SELECT now()").fetchone()
+                c2.execute("SELECT pg_sleep(1.2)")
+                new = jobs.acquire(c2, f.p, f.job, "w2", ttl_seconds=60)
+            self.assertGreater(new.token, old.token)
+            with self.assertRaises(jobs.LeaseLost):
+                jobs.heartbeat(c, f.p, old)
+
+    def test_heartbeat_after_row_lock_wait_rejects_expiry_during_wait(self):
+        """A lock-only holder delays the check past expiry without updating the row."""
+        with self.connect(autocommit=True) as c, self.connect(autocommit=True) as holder:
+            f = JobFixture(self, c)
+            lease = jobs.acquire(c, f.p, f.job, "w1", ttl_seconds=1)
+            locked, release = threading.Event(), threading.Event()
+
+            def hold():
+                with holder.transaction():
+                    holder.execute("SELECT 1 FROM jobs WHERE id = %s FOR UPDATE", (f.job,))
+                    locked.set()
+                    release.wait(10)
+
+            t = threading.Thread(target=hold)
+            t.start()
+            try:
+                self.assertTrue(locked.wait(10))
+                outcome = {}
+
+                def beat():
+                    try:
+                        jobs.heartbeat(c, f.p, lease)
+                        outcome["r"] = "ok"
+                    except jobs.LeaseLost:
+                        outcome["r"] = "lost"
+
+                b = threading.Thread(target=beat)
+                b.start()
+                time.sleep(1.5)  # lease expires while heartbeat waits on the row lock
+                self.assertTrue(b.is_alive(), "heartbeat should be blocked on the row lock")
+                release.set()
+                b.join(10)
+            finally:
+                release.set()
+                t.join(10)
+            self.assertEqual(outcome.get("r"), "lost")
 
     def test_revision_change_needs_a_new_thread(self):
         with self.connect() as c:
