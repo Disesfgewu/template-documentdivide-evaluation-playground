@@ -7,6 +7,9 @@ Rule-based scoring core for #12 (SPEC 9.1, 9.3, 16.5). Only standard-library Pyt
 - Metrics: Recall@k, Complete@k, Correctness (fact scores 0, 1/2 or 1; 1/2 without a rubric is an `error`, never a number), Textual Consistency (N/A without checks), Localization Precision, Citation Precision (identical citations deduplicated), Citation Completeness and Faithfulness (abstained answers score 0).
 - Aggregation: a method failure must be a real scored 0 and stays in the denominator; pending or error results make the aggregate provisional.
 
-Not covered here (#12 integration): mapping submissions to evidence IDs, the semantic judge, caching, the DB/API, and run selection (first valid terminal answer).
+- Selection (`selection.py`, T46): each question scores the first valid terminal submission (answered or abstained) in attempt order. Later attempts never replace it. Repairs of transport failures or rejected output are bounded, and when nothing is accepted the question is a method failure that stays in the denominator.
+- Comparability (`selection.py`, T45): runs share a ranking only if benchmark revision, question subset hash, grader, budget and observation profile are all equal. A retrieval-only claim also fixes the answerer, and undisclosed answerers are never rankable. Every difference is listed.
+
+Not covered here (#12 integration): mapping submissions to evidence IDs, the semantic judge, caching, and the DB/API.
 
 Tests: `bash scripts/check.sh --scope scoring`. `tests/scoring/test_cross_checks.py` re-derives the F06 SPEC vectors through the engine and checks the geometry against brute-force grid counting.
