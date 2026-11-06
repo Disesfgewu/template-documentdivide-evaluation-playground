@@ -4,3 +4,4 @@ __pycache__/
 .lab-artifacts/
 web/node_modules/
 web/dist/
+services/worker/agentkitsmoke/log/
