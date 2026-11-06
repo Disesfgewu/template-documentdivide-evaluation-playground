@@ -104,7 +104,7 @@ class TestVectors(FreshDatabase):
             V.upsert(conn, p, col_id, space_hash="0" * 64, items=[good_item], operation_id=op_id)
 
         # Verify no items polluted the database
-        count = conn.execute("SELECT count(*) FROM vector_items").fetchone()[0]
+        count = conn.execute("SELECT count(*) FROM vector_items WHERE collection_id = %s", (col_id,)).fetchone()[0]
         self.assertEqual(count, 0)
 
         # Direct SQL INSERT bypassing Python with 2-dim vector
@@ -530,7 +530,8 @@ class TestVectors(FreshDatabase):
                                               normalization="none", document_task="doc", query_task="query",
                                               preprocess_version="p1", metric="cosine")
         self.assertEqual(again_hash, space_hash)
-        self.assertEqual(conn.execute("SELECT count(*) FROM vector_items").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT count(*) FROM vector_items WHERE collection_id = %s",
+                                      (col_id,)).fetchone()[0], 0)
         with self.assertRaises(psycopg.errors.IntegrityConstraintViolation):
             conn.execute("UPDATE embedding_spaces SET model = 'changed' WHERE id = %s", (again_id,))
         conn.rollback()

@@ -294,7 +294,7 @@ def _run(conn, c, collection_id, lit, k, docs, index_name=None):
     if index_name is not None:
         plan = json.dumps(conn.execute(sql.SQL("EXPLAIN (FORMAT JSON) ") + q).fetchone()[0])
         if index_name not in plan:
-            raise IndexNotUsed(f"planner did not use {index_name}")
+            raise IndexNotUsed(f"planner did not use {index_name}: {plan[:2000]}")
     rows = conn.execute(q).fetchall()
     # Stable tie order for both modes: (distance, item_id).
     return sorted(((r[0], float(r[1])) for r in rows), key=lambda t: (t[1], t[0]))
@@ -329,9 +329,14 @@ def search(conn: psycopg.Connection, project_id: uuid.UUID, collection_id: uuid.
         docs = None if document_filter is None else set(document_filter)
         if mode == "hnsw":
             conn.execute(sql.SQL("SET LOCAL hnsw.ef_search = {}").format(sql.Literal(int(qparams["ef_search"]))))
-            conn.execute("SET LOCAL enable_seqscan = off")
+            # Steer the planner to the ANN index (a small table would otherwise
+            # be scanned via the primary key and sorted); EXPLAIN in _run still
+            # verifies the index is really used.
+            for knob in ("enable_seqscan", "enable_sort", "enable_bitmapscan"):
+                conn.execute(f"SET LOCAL {knob} = off")
             rows = _run(conn, c, collection_id, lit, k, docs, index_name)
-            conn.execute("RESET enable_seqscan")
+            for knob in ("enable_seqscan", "enable_sort", "enable_bitmapscan"):
+                conn.execute(f"RESET {knob}")
         else:
             rows = _run(conn, c, collection_id, lit, k, docs)
         shortfall = k - len(rows)
