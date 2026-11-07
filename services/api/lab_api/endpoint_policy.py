@@ -101,13 +101,10 @@ def _validate_port(port: object, *, error_code: str) -> int:
 
 def _validate_path(raw_path: str) -> str:
     path = raw_path or "/"
-    if not path.startswith("/") or "//" in path:
+    if not path.startswith("/") or "//" in path or "%" in path:
         raise EndpointPolicyError("invalid_path")
     segments = path.split("/")
     if any(seg in {".", ".."} for seg in segments):
-        raise EndpointPolicyError("invalid_path")
-    lower_path = path.lower()
-    if any(tok in lower_path for tok in ("%2e", "%2f", "%5c", "%00")):
         raise EndpointPolicyError("invalid_path")
     return path
 
@@ -239,6 +236,8 @@ def _check_resolved_ip(
 ) -> IPAddress:
     ip: IPAddress
     if isinstance(raw_ip, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+        if isinstance(raw_ip, ipaddress.IPv6Address) and raw_ip.scope_id is not None:
+            raise EndpointPolicyError("invalid_resolved_ip")
         ip = raw_ip
     elif isinstance(raw_ip, str):
         if "%" in raw_ip or any(ord(c) <= 0x20 or ord(c) >= 0x7F for c in raw_ip):
@@ -315,15 +314,17 @@ class EndpointPolicy:
         if isinstance(allowed_hosts, (str, bytes)) or not isinstance(allowed_hosts, Iterable):
             raise EndpointPolicyError("invalid_policy")
         normalized_hosts: set[tuple[str, int]] = set()
+        host_count = 0
         for item in allowed_hosts:
+            host_count += 1
+            if host_count > MAX_ALLOWED_HOSTS:
+                raise EndpointPolicyError("invalid_policy")
             if not isinstance(item, tuple) or len(item) != 2:
                 raise EndpointPolicyError("invalid_policy")
             raw_host, raw_port = item
             host = _normalize_host(raw_host, error_code="invalid_policy")
             port = _validate_port(raw_port, error_code="invalid_policy")
             normalized_hosts.add((host, port))
-            if len(normalized_hosts) > MAX_ALLOWED_HOSTS:
-                raise EndpointPolicyError("invalid_policy")
 
         if isinstance(allowed_nonpublic_cidrs, (str, bytes)) or not isinstance(
             allowed_nonpublic_cidrs, Iterable
@@ -331,7 +332,11 @@ class EndpointPolicy:
             raise EndpointPolicyError("invalid_policy")
         cidrs: list[IPNetwork] = []
         seen_cidrs: set[IPNetwork] = set()
+        cidr_count = 0
         for raw_cidr in allowed_nonpublic_cidrs:
+            cidr_count += 1
+            if cidr_count > MAX_ALLOWED_CIDRS:
+                raise EndpointPolicyError("invalid_policy")
             if isinstance(raw_cidr, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
                 net = raw_cidr
             elif isinstance(raw_cidr, str):
@@ -349,8 +354,6 @@ class EndpointPolicy:
             if net not in seen_cidrs:
                 seen_cidrs.add(net)
                 cidrs.append(net)
-            if len(cidrs) > MAX_ALLOWED_CIDRS:
-                raise EndpointPolicyError("invalid_policy")
 
         object.__setattr__(self, "allowed_hosts", frozenset(normalized_hosts))
         object.__setattr__(self, "allow_http", allow_http)

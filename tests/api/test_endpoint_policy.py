@@ -220,6 +220,8 @@ class EndpointPolicyUrlAndAllowlistNegativeTests(unittest.TestCase):
             "https://allowed.example.com/v1/../admin",
             "https://allowed.example.com/v1//query",
             "https://allowed.example.com/v1/%2e%2e/admin",
+            "https://allowed.example.com/%252e%252e/admin",
+            "https://allowed.example.com/v1/%252fadmin",
             "https://allowed.example.com/v1/%2fadmin",
             "https://allowed.example.com/v1/%5cadmin",
             "https://allowed.example.com/v1/%00admin",
@@ -350,7 +352,17 @@ class EndpointPolicyResolvedAddressNegativeTests(unittest.TestCase):
             validate_endpoint_url("https://svc.example.com/v1/query", self.policy, resolved_ips=[])
         self.assertEqual(cm.exception.code, "empty_resolution")
 
-        for bad_ip in ("not-an-ip", "fe80::1%eth0", "93.184.216.34/32", "", "127.0.0.1:8080", 12345):
+        for bad_ip in (
+            "not-an-ip",
+            "fe80::1%eth0",
+            "2606:4700:4700::1111%eth0",
+            ipaddress.IPv6Address("2606:4700:4700::1111%eth0"),
+            ipaddress.IPv6Address("fe80::1%eth0"),
+            "93.184.216.34/32",
+            "",
+            "127.0.0.1:8080",
+            12345,
+        ):
             with self.subTest(bad_ip=bad_ip):
                 with self.assertRaises(EndpointPolicyError) as cm:
                     validate_endpoint_url(
@@ -420,10 +432,41 @@ class EndpointPolicyBoundsTests(unittest.TestCase):
             EndpointPolicy(allowed_hosts=too_many_hosts)
         self.assertEqual(cm.exception.code, "invalid_policy")
 
+        # Duplicate host entries still count toward the consumed iterable bound
+        consumed_hosts = 0
+
+        def duplicate_host_stream():
+            nonlocal consumed_hosts
+            for _ in range(MAX_ALLOWED_HOSTS * 10):
+                consumed_hosts += 1
+                yield ("svc.example.com", 443)
+
+        with self.assertRaises(EndpointPolicyError) as cm:
+            EndpointPolicy(allowed_hosts=duplicate_host_stream())
+        self.assertEqual(cm.exception.code, "invalid_policy")
+        self.assertEqual(consumed_hosts, MAX_ALLOWED_HOSTS + 1)
+
         too_many_cidrs = [f"10.{i // 256}.{i % 256}.0/24" for i in range(MAX_ALLOWED_CIDRS + 1)]
         with self.assertRaises(EndpointPolicyError) as cm:
             EndpointPolicy(allowed_hosts=[("svc.example.com", 443)], allowed_nonpublic_cidrs=too_many_cidrs)
         self.assertEqual(cm.exception.code, "invalid_policy")
+
+        # Duplicate CIDR entries still count toward the consumed iterable bound
+        consumed_cidrs = 0
+
+        def duplicate_cidr_stream():
+            nonlocal consumed_cidrs
+            for _ in range(MAX_ALLOWED_CIDRS * 10):
+                consumed_cidrs += 1
+                yield "10.0.0.0/8"
+
+        with self.assertRaises(EndpointPolicyError) as cm:
+            EndpointPolicy(
+                allowed_hosts=[("svc.example.com", 443)],
+                allowed_nonpublic_cidrs=duplicate_cidr_stream(),
+            )
+        self.assertEqual(cm.exception.code, "invalid_policy")
+        self.assertEqual(consumed_cidrs, MAX_ALLOWED_CIDRS + 1)
 
         # Wildcard /0 nonpublic CIDR override is forbidden
         for wildcard_cidr in ("0.0.0.0/0", "::/0"):
