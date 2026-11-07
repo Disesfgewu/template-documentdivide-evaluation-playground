@@ -68,6 +68,47 @@ class ApiError(Exception):
         return JSONResponse(status_code=self.status_code, content=content)
 
 
+REJECTION_CODE_MAP = {
+    "empty_file": ("empty_file", 422),
+    "not_a_pdf": ("invalid_pdf", 422),
+    "corrupt_pdf": ("corrupt_pdf", 422),
+    "encrypted_pdf": ("unsupported_encryption", 422),
+    "page_limit_exceeded": ("page_limit_exceeded", 422),
+    "file_too_large": ("payload_too_large", 413),
+}
+
+
+def _make_rejection_error_response(
+    reason: str,
+    *,
+    request_id: str = "req-1",
+    sha256: str = "",
+    size_bytes: int = 0,
+    page_count: Optional[int] = None,
+    error_type: Optional[str] = None,
+) -> JSONResponse:
+    if reason == "invalid_page_geometry":
+        return ApiError(
+            status_code=422,
+            code="invalid_page_geometry",
+            message="failed to parse page geometry from PDF",
+            details={"error": error_type or "ValueError"},
+        ).to_error_response(request_id)
+
+    code, status_code = REJECTION_CODE_MAP.get(reason, ("invalid_pdf", 422))
+    return ApiError(
+        status_code=status_code,
+        code=code,
+        message=f"document rejected: {reason}",
+        details={
+            "reason": reason,
+            "sha256": sha256,
+            "size_bytes": size_bytes,
+            "page_count": page_count,
+        },
+    ).to_error_response(request_id)
+
+
 def get_db(request: Request):
     """Yield a database connection from application settings."""
     settings: Settings = request.app.state.settings
@@ -386,6 +427,36 @@ async def upload_document_handler(
                     raise ApiError(500, "internal_error", "replayed document version not found")
 
                 if op_status == "failed":
+                    audit_row = conn.execute(
+                        """
+                        SELECT reason
+                        FROM audit_events
+                        WHERE project_id = %s AND operation_id = %s AND action = 'document.rejected'
+                        """,
+                        (proj_id, existing_op),
+                    ).fetchone()
+                    if audit_row is not None:
+                        rej_reason = audit_row[0] or ""
+                        req_id = request.headers.get("X-Request-Id", "req-1")
+                        if rej_reason == "invalid_page_geometry":
+                            try:
+                                extract_pages(data)
+                                err_name = "ValueError"
+                            except Exception as exc:
+                                err_name = type(exc).__name__
+                            return _make_rejection_error_response(
+                                "invalid_page_geometry",
+                                request_id=req_id,
+                                error_type=err_name,
+                            )
+                        inspection = inspect_pdf(data, limits=Limits(max_bytes=max_bytes, max_pages=max_pages))
+                        return _make_rejection_error_response(
+                            rej_reason or inspection.reason or "",
+                            request_id=req_id,
+                            sha256=inspection.sha256,
+                            size_bytes=inspection.size_bytes,
+                            page_count=inspection.page_count,
+                        )
                     raise ApiError(409, "conflict", "idempotency key was used for a failed operation")
 
                 # If op_status is 'intent' (concurrent request still running), fail closed
@@ -428,26 +499,13 @@ async def upload_document_handler(
             except IngestRejected:
                 pass
 
-            code_map = {
-                "empty_file": ("empty_file", 422),
-                "not_a_pdf": ("invalid_pdf", 422),
-                "corrupt_pdf": ("corrupt_pdf", 422),
-                "encrypted_pdf": ("unsupported_encryption", 422),
-                "page_limit_exceeded": ("page_limit_exceeded", 422),
-                "file_too_large": ("payload_too_large", 413),
-            }
-            code, status_code = code_map.get(inspection.reason or "", ("invalid_pdf", 422))
-            return ApiError(
-                status_code=status_code,
-                code=code,
-                message=f"document rejected: {inspection.reason}",
-                details={
-                    "reason": inspection.reason,
-                    "sha256": inspection.sha256,
-                    "size_bytes": inspection.size_bytes,
-                    "page_count": inspection.page_count,
-                },
-            ).to_error_response(request.headers.get("X-Request-Id", "req-1"))
+            return _make_rejection_error_response(
+                inspection.reason or "",
+                request_id=request.headers.get("X-Request-Id", "req-1"),
+                sha256=inspection.sha256,
+                size_bytes=inspection.size_bytes,
+                page_count=inspection.page_count,
+            )
 
         try:
             page_infos = extract_pages(data)
@@ -475,12 +533,11 @@ async def upload_document_handler(
             except IngestRejected:
                 pass
 
-            return ApiError(
-                status_code=422,
-                code="invalid_page_geometry",
-                message="failed to parse page geometry from PDF",
-                details={"error": type(exc).__name__},
-            ).to_error_response(request.headers.get("X-Request-Id", "req-1"))
+            return _make_rejection_error_response(
+                "invalid_page_geometry",
+                request_id=request.headers.get("X-Request-Id", "req-1"),
+                error_type=type(exc).__name__,
+            )
 
         pages = [
             PageGeometry(

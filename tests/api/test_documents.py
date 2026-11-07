@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from lab_api.documents import ApiError, extract_upload_data
+from lab_api.documents import ApiError, _make_rejection_error_response, extract_upload_data
 from fixtures.generators import synthetic_pdf
 
 
@@ -205,6 +205,74 @@ class MultipartIntakeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(res.status_code, 400)
             self.assertEqual(res.json()["error"]["code"], "invalid_content_length")
+
+
+class RejectionResponseContractTests(unittest.TestCase):
+    def test_standard_rejection_reasons_and_structure(self) -> None:
+        """Verify each standard inspection rejection maps to its exact status, code, and details."""
+        cases = [
+            ("empty_file", 422, "empty_file"),
+            ("not_a_pdf", 422, "invalid_pdf"),
+            ("corrupt_pdf", 422, "corrupt_pdf"),
+            ("encrypted_pdf", 422, "unsupported_encryption"),
+            ("page_limit_exceeded", 422, "page_limit_exceeded"),
+            ("file_too_large", 413, "payload_too_large"),
+        ]
+        for reason, expected_status, expected_code in cases:
+            with self.subTest(reason=reason):
+                resp = _make_rejection_error_response(
+                    reason,
+                    request_id="req-test-1",
+                    sha256="abc123sha",
+                    size_bytes=42,
+                    page_count=None,
+                )
+                self.assertEqual(resp.status_code, expected_status)
+                import json
+                body = json.loads(resp.body.decode("utf-8"))
+                err = body["error"]
+                self.assertEqual(err["code"], expected_code)
+                self.assertEqual(err["message"], f"document rejected: {reason}")
+                self.assertFalse(err["retryable"])
+                self.assertEqual(err["request_id"], "req-test-1")
+                self.assertIsNone(err["retry_after"])
+                self.assertEqual(
+                    err["details"],
+                    {
+                        "reason": reason,
+                        "sha256": "abc123sha",
+                        "size_bytes": 42,
+                        "page_count": None,
+                    },
+                )
+
+    def test_invalid_page_geometry_rejection_structure(self) -> None:
+        """Verify invalid_page_geometry maps to 422, fixed message, and error details."""
+        resp = _make_rejection_error_response(
+            "invalid_page_geometry",
+            request_id="req-geom-99",
+            error_type="KeyError",
+        )
+        self.assertEqual(resp.status_code, 422)
+        import json
+        body = json.loads(resp.body.decode("utf-8"))
+        err = body["error"]
+        self.assertEqual(err["code"], "invalid_page_geometry")
+        self.assertEqual(err["message"], "failed to parse page geometry from PDF")
+        self.assertFalse(err["retryable"])
+        self.assertEqual(err["request_id"], "req-geom-99")
+        self.assertIsNone(err["retry_after"])
+        self.assertEqual(err["details"], {"error": "KeyError"})
+
+    def test_unknown_reason_defaults_safely(self) -> None:
+        """Unrecognized rejection reason falls back safely to 422 invalid_pdf."""
+        resp = _make_rejection_error_response("unknown_anomaly", request_id="req-unk")
+        self.assertEqual(resp.status_code, 422)
+        import json
+        body = json.loads(resp.body.decode("utf-8"))
+        err = body["error"]
+        self.assertEqual(err["code"], "invalid_pdf")
+        self.assertEqual(err["message"], "document rejected: unknown_anomaly")
 
 
 if __name__ == "__main__":

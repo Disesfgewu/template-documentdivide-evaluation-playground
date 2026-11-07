@@ -449,11 +449,13 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(res_rev.json()["error"]["code"], "permission_denied")
 
     def test_f05_rejections_and_audit_events_in_real_db(self) -> None:
-        """F05 failures leave 0 visible document versions, record failed operation, and reject replays."""
+        """F05 failures leave 0 visible document versions, record failed operation, and replay original rejection without outbox."""
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
+            _, other_owner_id = self.make_project(conn, role="owner")
 
         owner_token = issue_actor_token(owner_id, self.secret)
+        other_token = issue_actor_token(other_owner_id, self.secret)
 
         # Encrypted PDF with Idempotency-Key
         enc_bytes = bad_pdfs.build("encrypted")
@@ -473,6 +475,10 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             with conn.cursor(row_factory=dict_row) as cur:
                 # 0 document versions
                 cur.execute("SELECT count(*) AS cnt FROM document_versions WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+
+                # Rejection must NOT create outbox records
+                cur.execute("SELECT count(*) AS cnt FROM outbox_events WHERE project_id = %s", (project_id,))
                 self.assertEqual(cur.fetchone()["cnt"], 0)
 
                 # Rejection audit event recorded
@@ -500,7 +506,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 ).fetchone()[0]
                 self.assertEqual(intent_cnt, 0)
 
-        # Replaying the same key used for a failed operation returns 409 conflict
+        # 1. Replaying the identical rejected request returns original 422 status and response
         res_replay_failed = self.client.post(
             f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
             headers={
@@ -510,8 +516,164 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             },
             content=enc_bytes,
         )
-        self.assertEqual(res_replay_failed.status_code, 409)
-        self.assertEqual(res_replay_failed.json()["error"]["code"], "conflict")
+        self.assertEqual(res_replay_failed.status_code, 422)
+        self.assertEqual(res_replay_failed.json()["error"]["code"], "unsupported_encryption")
+        self.assertEqual(res_replay_failed.json()["error"]["message"], res_enc.json()["error"]["message"])
+        self.assertEqual(res_replay_failed.json()["error"]["details"], res_enc.json()["error"]["details"])
+
+        # 2. Replaying the same key with changed body returns 409 conflict
+        res_conflict_body = self.client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "f05-idemp-1",
+            },
+            content=self.f01_1,
+        )
+        self.assertEqual(res_conflict_body.status_code, 409)
+        self.assertEqual(res_conflict_body.json()["error"]["code"], "conflict")
+
+        # 3. Authorization must precede disclosure: unauthorized caller gets 403
+        res_unauth = self.client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
+            headers={
+                "Authorization": f"Bearer {other_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "f05-idemp-1",
+            },
+            content=enc_bytes,
+        )
+        self.assertEqual(res_unauth.status_code, 403)
+        self.assertEqual(res_unauth.json()["error"]["code"], "permission_denied")
+
+        # 4. Final verification: rejection and replays did not create outbox records or extra operations
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT count(*) AS cnt FROM outbox_events WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+                cur.execute("SELECT count(*) AS cnt FROM operations WHERE project_id = %s AND kind = 'document.import'", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 1)
+                cur.execute("SELECT count(*) AS cnt FROM audit_events WHERE project_id = %s AND action = 'document.rejected'", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 1)
+
+    def test_invalid_page_geometry_rejection_and_atomic_replay_in_real_db(self) -> None:
+        """Invalid page geometry persists failure without outbox; replay returns original 422, changed body is 409."""
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+            _, unauth_id = self.make_project(conn, role="owner")
+
+        owner_token = issue_actor_token(owner_id, self.secret)
+        unauth_token = issue_actor_token(unauth_id, self.secret)
+
+        def failing_extract_pages(*args, **kwargs):
+            raise ValueError("corrupted font dictionary / invalid page geometry")
+
+        with patch("lab_api.documents.extract_pages", side_effect=failing_extract_pages):
+            res_bad_geom = self.client.post(
+                f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
+                headers={
+                    "Authorization": f"Bearer {owner_token}",
+                    "Content-Type": "application/pdf",
+                    "Idempotency-Key": "geom-idemp-1",
+                },
+                content=self.f01_1,
+            )
+            self.assertEqual(res_bad_geom.status_code, 422)
+            self.assertEqual(res_bad_geom.json()["error"]["code"], "invalid_page_geometry")
+            self.assertEqual(
+                res_bad_geom.json()["error"]["message"],
+                "failed to parse page geometry from PDF",
+            )
+            self.assertEqual(
+                res_bad_geom.json()["error"]["details"],
+                {"error": "ValueError"},
+            )
+
+        # Verify PostgreSQL audit and that rejection did NOT create outbox records
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM audit_events WHERE project_id = %s AND action = 'document.rejected'",
+                    (project_id,),
+                )
+                audit_row = cur.fetchone()
+                self.assertIsNotNone(audit_row)
+                self.assertEqual(audit_row["outcome"], "failed")
+                self.assertEqual(audit_row["reason"], "invalid_page_geometry")
+
+                cur.execute(
+                    "SELECT count(*) AS cnt FROM outbox_events WHERE project_id = %s",
+                    (project_id,),
+                )
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+
+        # 1. Identical request with same Idempotency-Key replays original 422 and exact response
+        with patch("lab_api.documents.extract_pages", side_effect=failing_extract_pages):
+            res_replay = self.client.post(
+                f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
+                headers={
+                    "Authorization": f"Bearer {owner_token}",
+                    "Content-Type": "application/pdf",
+                    "Idempotency-Key": "geom-idemp-1",
+                },
+                content=self.f01_1,
+            )
+            self.assertEqual(res_replay.status_code, 422)
+            self.assertEqual(res_replay.json()["error"]["code"], "invalid_page_geometry")
+            self.assertEqual(
+                res_replay.json()["error"]["message"],
+                res_bad_geom.json()["error"]["message"],
+            )
+            self.assertEqual(
+                res_replay.json()["error"]["details"],
+                res_bad_geom.json()["error"]["details"],
+            )
+
+        # 2. Changed body with same Idempotency-Key returns 409 conflict
+        res_conflict = self.client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "geom-idemp-1",
+            },
+            content=self.f01_21,
+        )
+        self.assertEqual(res_conflict.status_code, 409)
+        self.assertEqual(res_conflict.json()["error"]["code"], "conflict")
+
+        # 3. Authorization must precede disclosure: unauthorized caller gets 403
+        res_unauth = self.client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
+            headers={
+                "Authorization": f"Bearer {unauth_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "geom-idemp-1",
+            },
+            content=self.f01_1,
+        )
+        self.assertEqual(res_unauth.status_code, 403)
+        self.assertEqual(res_unauth.json()["error"]["code"], "permission_denied")
+
+        # 4. Final verification: rejection and replays did not create outbox records or extra operations
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT count(*) AS cnt FROM outbox_events WHERE project_id = %s",
+                    (project_id,),
+                )
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+                cur.execute(
+                    "SELECT count(*) AS cnt FROM operations WHERE project_id = %s AND kind = 'document.import'",
+                    (project_id,),
+                )
+                self.assertEqual(cur.fetchone()["cnt"], 1)
+                cur.execute(
+                    "SELECT count(*) AS cnt FROM audit_events WHERE project_id = %s AND action = 'document.rejected'",
+                    (project_id,),
+                )
+                self.assertEqual(cur.fetchone()["cnt"], 1)
 
     def test_rollback_on_ingest_failure_leaves_no_visible_version_or_stranded_intent(self) -> None:
         """Negative test: if database transaction rolls back, no document version, operation, or idempotency key is stranded."""
