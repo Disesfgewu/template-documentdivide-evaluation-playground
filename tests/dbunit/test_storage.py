@@ -347,10 +347,59 @@ class LocalArtifactStoreTests(unittest.TestCase):
             return original_open(file, flags, *args, **kwargs)
 
         with patch("lab_db.storage.os.open", side_effect=swapped_open):
-            stored = self.store.put(data)
+            with self.assertRaises(StorageCorruption):
+                self.store.put(data)
 
         self.assertEqual(list(outside_dir.iterdir()), [])
-        self.assertEqual(stored.sha256, digest)
+
+    def test_swapped_directory_race_on_existing_object_fails_closed(self) -> None:
+        data = b"existing object swapped dir test payload"
+        stored = self.store.put(data)
+        digest = stored.sha256
+        prefix = digest[:2]
+
+        prefix_path = self.root / "sha256" / prefix
+        outside_dir = self.root.parent / "outside_existing_target"
+        outside_dir.mkdir(exist_ok=True)
+
+        real_verify_existing = LocalArtifactStore._verify_existing_in_prefix
+
+        def swapped_verify(*args, **kwargs):
+            res = real_verify_existing(self.store, *args, **kwargs)
+            hidden_path = self.root / "sha256" / f"hidden_exist_{prefix}"
+            prefix_path.rename(hidden_path)
+            prefix_path.symlink_to(outside_dir)
+            return res
+
+        with patch.object(
+            self.store,
+            "_verify_existing_in_prefix",
+            side_effect=swapped_verify,
+        ):
+            with self.assertRaises(StorageCorruption):
+                self.store.put(data)
+
+    def test_directory_identity_mismatch_fails_closed(self) -> None:
+        data = b"directory identity mismatch test payload"
+        digest = hashlib.sha256(data).hexdigest()
+        prefix = digest[:2]
+
+        prefix_path = self.root / "sha256" / prefix
+        prefix_path.mkdir(parents=True, exist_ok=True)
+
+        original_open = os.open
+
+        def replace_with_new_dir(file, flags, *args, **kwargs):
+            if isinstance(file, str) and file.startswith(f".tmp-{digest[:8]}-"):
+                if prefix_path.exists() and not prefix_path.is_symlink():
+                    hidden_path = self.root / "sha256" / f"hidden_inode_{prefix}"
+                    prefix_path.rename(hidden_path)
+                    prefix_path.mkdir()  # New directory has different inode
+            return original_open(file, flags, *args, **kwargs)
+
+        with patch("lab_db.storage.os.open", side_effect=replace_with_new_dir):
+            with self.assertRaises(StorageCorruption):
+                self.store.put(data)
 
     def test_fifo_object_fails_closed_and_does_not_hang(self) -> None:
         data = b"fifo test payload"

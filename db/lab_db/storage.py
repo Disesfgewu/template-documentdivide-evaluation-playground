@@ -1,4 +1,26 @@
-"""Local content-addressed artifact storage and DB registration workflow (SPEC 10.2)."""
+"""Local content-addressed artifact storage and DB registration workflow (SPEC 10.2).
+
+Security guarantees:
+- Descriptor-relative traversal with ``O_NOFOLLOW`` starting from filesystem root ``/``
+  prevents symlink traversal across all path components (root, sha256, prefix, and object).
+- Direct descriptor-relative temporary file creation (``dir_fd=prefix_fd``) and atomic link
+  publication (``os.link`` with ``follow_symlinks=False``) prevent race-condition overwriting
+  and ensure concurrent writers cannot clobber existing objects.
+- Newly created directory entries are fsynced to their respective parent directory descriptors
+  for crash durability.
+- Canonical path and directory identity verification (device and inode) at operation
+  completion guarantees that if intermediate directories are swapped or redirected during
+  publication, the operation fails closed with ``StorageCorruption``.
+
+Threat model and operational limits:
+- The store relies on standard filesystem permissions (DAC/MAC) to protect the store root
+  and its parent directories against unauthorized concurrent modification.
+- Protection is guaranteed during and within store operations; however, this cannot protect
+  against an attacker with write permissions who alters, deletes, or swaps directories *after*
+  an operation has successfully completed and descriptors are closed. Deployments must enforce
+  strict directory permissions (e.g. 0700/0750 owned by the service user) on the store root
+  and its ancestors.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,6 +50,11 @@ class StoredObject:
     object_version: str
     sha256: str
     size_bytes: int
+
+
+def _dir_id(fd: int) -> tuple[int, int]:
+    st = os.fstat(fd)
+    return (st.st_dev, st.st_ino)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -114,10 +141,14 @@ def _open_dir_no_follow(parent_fd: int, name: str, desc: str) -> int:
 
 
 def _ensure_dir_no_follow(parent_fd: int, name: str, desc: str) -> int:
+    created = False
     try:
         os.mkdir(name, dir_fd=parent_fd)
+        created = True
     except FileExistsError:
         pass
+    if created:
+        os.fsync(parent_fd)
     return _open_dir_no_follow(parent_fd, name, desc)
 
 
@@ -256,6 +287,109 @@ class LocalArtifactStore:
                 f"got ({actual_sha256}, {actual_size})"
             )
 
+    def _verify_canonical_completion(
+        self,
+        object_key: str,
+        prefix: str,
+        digest: str,
+        expected_size: int,
+        expected_root_id: tuple[int, int],
+        expected_sha256_id: tuple[int, int],
+        expected_prefix_id: tuple[int, int],
+    ) -> None:
+        try:
+            canonical_root_fd = _open_root_no_follow(self.root)
+        except ValueError as e:
+            raise StorageCorruption(
+                f"canonical root traversal failed or contains symlink: {e}"
+            ) from e
+        except OSError as e:
+            raise StorageCorruption(
+                f"canonical root access failed: {e}"
+            ) from e
+        try:
+            if _dir_id(canonical_root_fd) != expected_root_id:
+                raise StorageCorruption(
+                    f"canonical root directory identity changed during publication of {object_key}"
+                )
+            try:
+                canonical_sha256_fd = _open_dir_no_follow(
+                    canonical_root_fd, "sha256", "sha256"
+                )
+            except (StorageCorruption, OSError) as e:
+                raise StorageCorruption(
+                    f"canonical sha256 directory access failed during publication: {e}"
+                ) from e
+        finally:
+            os.close(canonical_root_fd)
+
+        try:
+            if _dir_id(canonical_sha256_fd) != expected_sha256_id:
+                raise StorageCorruption(
+                    f"canonical sha256 directory identity changed during publication of {object_key}"
+                )
+            try:
+                canonical_prefix_fd = _open_dir_no_follow(
+                    canonical_sha256_fd, prefix, "prefix"
+                )
+            except (StorageCorruption, OSError) as e:
+                raise StorageCorruption(
+                    f"canonical prefix directory access failed during publication: {e}"
+                ) from e
+        finally:
+            os.close(canonical_sha256_fd)
+
+        try:
+            if _dir_id(canonical_prefix_fd) != expected_prefix_id:
+                raise StorageCorruption(
+                    f"canonical prefix directory identity changed during publication of {object_key}"
+                )
+            try:
+                st = os.stat(digest, dir_fd=canonical_prefix_fd, follow_symlinks=False)
+            except OSError as e:
+                raise StorageCorruption(
+                    f"canonical stat for {object_key} failed: {e}"
+                ) from e
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                raise StorageCorruption(
+                    f"canonical path for {object_key} is invalid or symlink"
+                )
+            try:
+                file_fd = os.open(
+                    digest,
+                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=canonical_prefix_fd,
+                )
+            except OSError as e:
+                raise StorageCorruption(
+                    f"canonical open for {object_key} failed: {e}"
+                ) from e
+            try:
+                with os.fdopen(file_fd, "rb") as f:
+                    fst = os.fstat(f.fileno())
+                    if not stat.S_ISREG(fst.st_mode):
+                        raise StorageCorruption(
+                            f"canonical path for {object_key} is not a regular file"
+                        )
+                    raw = f.read()
+            except BaseException:
+                try:
+                    os.close(file_fd)
+                except OSError:
+                    pass
+                raise
+        finally:
+            os.close(canonical_prefix_fd)
+
+        actual_sha256 = hashlib.sha256(raw).hexdigest()
+        actual_size = len(raw)
+        if actual_sha256 != digest or actual_size != expected_size:
+            raise StorageCorruption(
+                f"canonical content verification failed for {object_key}: "
+                f"expected ({digest}, {expected_size}), "
+                f"got ({actual_sha256}, {actual_size})"
+            )
+
     def put(self, data: bytes) -> StoredObject:
         if not isinstance(data, bytes):
             raise TypeError("data must be bytes")
@@ -277,13 +411,16 @@ class LocalArtifactStore:
                     f"root directory is invalid or symlink: {self.root!r}"
                 ) from e
             raise
+        root_id = _dir_id(root_fd)
         try:
             sha256_fd = _ensure_dir_no_follow(root_fd, "sha256", "sha256")
+            sha256_id = _dir_id(sha256_fd)
         finally:
             os.close(root_fd)
 
         try:
             prefix_fd = _ensure_dir_no_follow(sha256_fd, prefix, "prefix")
+            prefix_id = _dir_id(prefix_fd)
         finally:
             os.close(sha256_fd)
 
@@ -300,6 +437,15 @@ class LocalArtifactStore:
                     )
                 self._verify_existing_in_prefix(
                     prefix_fd, object_key, digest, size_bytes
+                )
+                self._verify_canonical_completion(
+                    object_key,
+                    prefix,
+                    digest,
+                    size_bytes,
+                    root_id,
+                    sha256_id,
+                    prefix_id,
                 )
                 return StoredObject(
                     object_key=object_key,
@@ -356,6 +502,15 @@ class LocalArtifactStore:
                     self._verify_existing_in_prefix(
                         prefix_fd, object_key, digest, size_bytes
                     )
+                    self._verify_canonical_completion(
+                        object_key,
+                        prefix,
+                        digest,
+                        size_bytes,
+                        root_id,
+                        sha256_id,
+                        prefix_id,
+                    )
                     return StoredObject(
                         object_key=object_key,
                         object_version="1",
@@ -368,19 +523,27 @@ class LocalArtifactStore:
                     except OSError:
                         pass
                     os.fsync(prefix_fd)
+                    self._verify_canonical_completion(
+                        object_key,
+                        prefix,
+                        digest,
+                        size_bytes,
+                        root_id,
+                        sha256_id,
+                        prefix_id,
+                    )
+                    return StoredObject(
+                        object_key=object_key,
+                        object_version="1",
+                        sha256=digest,
+                        size_bytes=size_bytes,
+                    )
             except BaseException:
                 try:
                     os.unlink(tmp_name, dir_fd=prefix_fd)
                 except OSError:
                     pass
                 raise
-
-            return StoredObject(
-                object_key=object_key,
-                object_version="1",
-                sha256=digest,
-                size_bytes=size_bytes,
-            )
         finally:
             os.close(prefix_fd)
 
