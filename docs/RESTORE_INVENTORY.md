@@ -10,12 +10,12 @@
   1. JSON envelope: `{"format": "lab-artifact-inventory-1", "artifacts": [...]}`
   2. JSON array: `[{"object_key": "sha256/...", "size_bytes": 1234}, ...]`
   3. JSONL stream / file: newline-delimited JSON objects matching exported database rows.
-  4. In-memory Python iterables of `Mapping[str, Any]` or `InventoryItem` instances.
+  4. In-memory Python iterables of `Mapping[str, Any]` or `InventoryItem` instances (bounded iteration).
 - **Entry schema**:
-  - `object_key` (or `key`): required `sha256/<2-hex-prefix>/<64-hex-digest>`.
-  - `size_bytes` (or `size`): non-negative integer within `max_file_bytes`.
+  - `object_key` (or `key`): required `sha256/<2-hex-prefix>/<64-hex-digest>`. Contradictory aliases (`object_key` != `key`) fail closed.
+  - `size_bytes` (or `size`): non-negative integer within `max_file_bytes`. Contradictory aliases (`size_bytes` != `size`) fail closed.
   - `sha256`: optional or checked; if present, must match key digest.
-  - `state`: optional; if present, MUST be `'committed'`. Staged or tombstoned states fail closed.
+  - `state`: optional; if present, MUST be `'committed'`. Explicit `null`/`None` or non-committed states fail closed.
   - Optional metadata: `object_version`, `id`, `project_id`, `mime`, `retention`, `created_at`, `committed_at`.
   - Unrecognized fields: fail closed.
 
@@ -29,12 +29,20 @@
 3. **Non-regular file defense**:
    - Files are opened with `O_NONBLOCK` and verified with `stat.S_ISREG`.
    - Named pipes (FIFOs), character/block devices, sockets, and directories fail closed without blocking or hanging reader threads.
-4. **Untrusted input bounding**:
+4. **Untrusted input bounding and memory safety**:
    - Default limits: 32 MiB max inventory file, 10,000 items per batch, 512 MiB max per file, 10 GiB aggregate verified bytes.
+   - Bounded iteration: consumes at most `max_items + 1` entries, defending against infinite adversarial generator streams.
+   - Pre-read aggregate bounds: total expected bytes across all items are checked before reading any files.
    - Streaming hash calculation: chunked 64 KiB reads avoid loading large objects into memory.
    - Duplicate rejection: duplicate JSON fields and duplicate `object_key` entries fail closed.
-5. **Canonical directory identity verification**:
-   - Directory device (`st_dev`) and inode (`st_ino`) of `store_root` are checked before and after verification to detect directory substitution races.
+5. **Canonical directory & object identity verification (race defense)**:
+   - For every verified artifact, the tool canonically re-traverses from `/` through `store_root`, `sha256`, and `<prefix>` down to `<digest>`, verifying that device (`st_dev`) and inode (`st_ino`) match the opened descriptors and that the canonical file is present and regular.
+   - If an intermediate directory (such as `<prefix>`) is renamed and replaced with an empty directory during or after opening, verification fails closed immediately.
+
+## Threat Model and Post-Operation Boundary
+
+- **In-process atomic verification**: The tool verifies canonical directory and file identities (`st_dev`, `st_ino`) and file content during verification, preventing directory-swap and symlink-substitution races during execution.
+- **Post-operation DAC/MAC boundary**: Like any user-space verification tool, once file descriptors are closed and the process exits, the tool cannot prevent an attacker with filesystem write access from subsequently mutating, deleting, or swapping directories or files. Deployments must enforce strict operating system discretionary and mandatory access controls (DAC/MAC, e.g. mode 0700/0750 owned exclusively by the runtime service user) on `<store_root>` and all ancestor paths to protect the store after verification.
 
 ## Operator CLI Usage
 

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import tools.governance.restore_inventory as ri
 from tools.governance.restore_inventory import (
     DEFAULT_MAX_FILE_BYTES,
     DEFAULT_MAX_INVENTORY_BYTES,
@@ -176,6 +177,69 @@ class RestoredInventoryVerificationTests(unittest.TestCase):
             verify_restored_inventory([{"object_key": key, "size_bytes": size, "unexpected_payload": 123}], self.store_root)
         self.assertIn("unrecognized field", str(ctx.exception))
 
+    def test_state_null_explicitly_supplied_is_rejected(self) -> None:
+        key, dig, size = _make_object(b"test state null")
+        # Python None
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory([{"object_key": key, "size_bytes": size, "state": None}], self.store_root)
+        self.assertIn("must be 'committed'", str(ctx.exception))
+
+        # JSON null
+        json_null = f'[{{"object_key": "{key}", "size_bytes": {size}, "state": null}}]'
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory(json_null, self.store_root)
+        self.assertIn("must be 'committed'", str(ctx.exception))
+
+    def test_contradictory_aliases_rejected(self) -> None:
+        key1, dig1, size1 = _make_object(b"one")
+        key2, dig2, size2 = _make_object(b"two")
+
+        # Contradictory key vs object_key
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory([{"object_key": key1, "key": key2, "size_bytes": 10}], self.store_root)
+        self.assertIn("contradictory key aliases", str(ctx.exception))
+
+        # Contradictory size vs size_bytes
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory([{"object_key": key1, "size_bytes": 10, "size": 20}], self.store_root)
+        self.assertIn("contradictory size aliases", str(ctx.exception))
+
+        # Matching aliases succeed
+        _write_store_object(self.store_root, key1, b"one")
+        rep = verify_restored_inventory([{"object_key": key1, "key": key1, "size_bytes": size1, "size": size1}], self.store_root)
+        self.assertEqual(rep.verified_count, 1)
+
+    def test_nonexistent_and_directory_path_input_clean_error(self) -> None:
+        nonexistent_path = Path(self.tmp_dir.name) / "does_not_exist.json"
+        # Nonexistent Path
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory(nonexistent_path, self.store_root)
+        self.assertIn("inventory file not found", str(ctx.exception))
+
+        # Nonexistent string path
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory(str(nonexistent_path), self.store_root)
+        self.assertIn("inventory file not found", str(ctx.exception))
+
+        # Directory Path
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory(Path(self.tmp_dir.name), self.store_root)
+        self.assertIn("is not a regular file", str(ctx.exception))
+
+    def test_bounded_iteration_infinite_generator(self) -> None:
+        key, dig, size = _make_object(b"item")
+
+        def infinite_generator():
+            count = 0
+            while True:
+                count += 1
+                yield {"object_key": f"sha256/{count:02x}/{count:064x}", "size_bytes": 10}
+
+        # Must fail closed at max_items without hanging or exhausting memory
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory(infinite_generator(), self.store_root, max_items=5)
+        self.assertIn("exceeds maximum 5", str(ctx.exception))
+
     def test_bounds_enforcement(self) -> None:
         key, dig, size = _make_object(b"test bytes")
         _write_store_object(self.store_root, key, b"test bytes")
@@ -191,10 +255,19 @@ class RestoredInventoryVerificationTests(unittest.TestCase):
             verify_restored_inventory([{"object_key": key, "size_bytes": size}], self.store_root, max_file_bytes=5)
         self.assertIn("exceeds limit 5", str(ctx.exception))
 
-        # Exceeds max_total_bytes
+        # Exceeds max_total_bytes (pre-read check)
         with self.assertRaises(InventoryVerificationError) as ctx:
             verify_restored_inventory([{"object_key": key, "size_bytes": size}], self.store_root, max_total_bytes=5)
         self.assertIn("exceeds limit 5", str(ctx.exception))
+
+        # Aggregate total exceeding bound across multiple items (pre-read check)
+        inv_multi = [
+            {"object_key": key, "size_bytes": 6},
+            {"object_key": f"sha256/00/{'0'*64}", "size_bytes": 6},
+        ]
+        with self.assertRaises(InventoryVerificationError) as ctx:
+            verify_restored_inventory(inv_multi, self.store_root, max_total_bytes=10)
+        self.assertIn("exceeds limit 10", str(ctx.exception))
 
         # Exceeds max_inventory_bytes
         large_json = json.dumps([{"object_key": key, "size_bytes": size}])
@@ -330,6 +403,66 @@ class RestoredInventoryVerificationTests(unittest.TestCase):
             verify_restored_inventory([{"object_key": key, "sha256": dig, "size_bytes": size}], self.store_root)
         self.assertIn("not a regular file", str(ctx.exception))
 
+    def test_prefix_directory_renamed_race_fails_closed(self) -> None:
+        """Regression test for host-reproduced finding:
+
+        Rename opened prefix directory and create empty replacement immediately after
+        _open_dir_no_follow returns; verify_restored_inventory must fail closed because
+        canonical path reachability/identity verification detects the substitution.
+        """
+        data = b"race payload"
+        key, dig, size = _make_object(data)
+        _write_store_object(self.store_root, key, data)
+
+        original_open_dir = ri._open_dir_no_follow
+        prefix = dig[:2]
+        intercepted = False
+
+        def racing_open_dir(parent_fd: int, name: str, desc: str) -> int:
+            nonlocal intercepted
+            fd = original_open_dir(parent_fd, name, desc)
+            if name == prefix and not intercepted and not desc.startswith("canonical"):
+                intercepted = True
+                # Move the real prefix directory away and substitute with an empty directory
+                real_prefix_path = self.store_root / "sha256" / prefix
+                moved_prefix_path = self.store_root / "sha256" / (prefix + "_moved")
+                os.rename(real_prefix_path, moved_prefix_path)
+                os.mkdir(real_prefix_path)
+            return fd
+
+        with mock.patch("tools.governance.restore_inventory._open_dir_no_follow", side_effect=racing_open_dir):
+            with self.assertRaises(InventoryVerificationError) as ctx:
+                verify_restored_inventory([{"object_key": key, "sha256": dig, "size_bytes": size}], self.store_root)
+            self.assertTrue(intercepted)
+            self.assertTrue(
+                "canonical prefix directory identity changed" in str(ctx.exception)
+                or "canonical artifact file missing after read" in str(ctx.exception)
+            )
+
+    def test_canonical_object_file_deleted_or_swapped_fails_closed(self) -> None:
+        """Regression test: object file removed or modified after descriptor open."""
+        data = b"swapped file test"
+        key, dig, size = _make_object(data)
+        obj_path = _write_store_object(self.store_root, key, data)
+
+        original_open = os.open
+        intercepted = False
+
+        def racing_open(path, flags, *args, **kwargs):
+            nonlocal intercepted
+            fd = original_open(path, flags, *args, **kwargs)
+            if path == dig and not intercepted:
+                intercepted = True
+                # Replace file with empty file having different inode
+                obj_path.unlink()
+                obj_path.write_bytes(b"")
+            return fd
+
+        with mock.patch("os.open", side_effect=racing_open):
+            with self.assertRaises(InventoryVerificationError):
+                verify_restored_inventory([{"object_key": key, "sha256": dig, "size_bytes": size}], self.store_root)
+            self.assertTrue(intercepted)
+
     def test_read_only_invariant_no_mutations_or_leftovers(self) -> None:
         data = b"content to verify no side effects"
         key, dig, size = _make_object(data)
@@ -362,7 +495,7 @@ class RestoredInventoryVerificationTests(unittest.TestCase):
         # 1. Success with flags and --json
         stdout_buf = io.StringIO()
         stderr_buf = io.StringIO()
-        with unittest.mock.patch("sys.stdout", stdout_buf), unittest.mock.patch("sys.stderr", stderr_buf):
+        with mock.patch("sys.stdout", stdout_buf), mock.patch("sys.stderr", stderr_buf):
             ret = main(["--inventory", str(inv_file), "--store-root", str(self.store_root), "--json"])
         self.assertEqual(ret, 0)
         report_data = json.loads(stdout_buf.getvalue())
@@ -371,14 +504,14 @@ class RestoredInventoryVerificationTests(unittest.TestCase):
 
         # 2. Success with positional arguments
         stdout_pos = io.StringIO()
-        with unittest.mock.patch("sys.stdout", stdout_pos):
+        with mock.patch("sys.stdout", stdout_pos):
             ret_pos = main([str(inv_file), str(self.store_root)])
         self.assertEqual(ret_pos, 0)
         self.assertIn("Verified 1 committed artifact(s)", stdout_pos.getvalue())
 
         # 3. Missing arguments exits with code 2
         stderr_usage = io.StringIO()
-        with unittest.mock.patch("sys.stderr", stderr_usage):
+        with mock.patch("sys.stderr", stderr_usage):
             ret_usage = main([])
         self.assertEqual(ret_usage, 2)
 
@@ -386,7 +519,7 @@ class RestoredInventoryVerificationTests(unittest.TestCase):
         corrupt_inv = Path(self.tmp_dir.name) / "bad_inv.json"
         corrupt_inv.write_text(json.dumps([{"object_key": key, "size_bytes": 99999}]), encoding="utf-8")
         stderr_fail = io.StringIO()
-        with unittest.mock.patch("sys.stderr", stderr_fail):
+        with mock.patch("sys.stderr", stderr_fail):
             ret_fail = main([str(corrupt_inv), str(self.store_root)])
         self.assertEqual(ret_fail, 1)
         self.assertIn("verification failed", stderr_fail.getvalue())
