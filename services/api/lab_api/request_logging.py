@@ -436,15 +436,25 @@ class RequestLoggingMiddleware:
         child_scope["state"] = state
 
         response_started = False
+        body_finished = False
+        trailers_expected = False
+        trailers_finished = False
         raw_status: Any = None
 
         async def send_wrapper(message: Any) -> None:
-            nonlocal response_started, raw_status
+            nonlocal response_started, raw_status, body_finished, trailers_expected, trailers_finished
+            await send(message)
             if isinstance(message, dict) and message.get("type") == "http.response.start":
                 if not response_started:
                     response_started = True
                     raw_status = message.get("status")
-            await send(message)
+                    trailers_expected = message.get("trailers", False) is True
+            elif isinstance(message, dict) and message.get("type") == "http.response.body":
+                if response_started and message.get("more_body", False) is False:
+                    body_finished = True
+            elif isinstance(message, dict) and message.get("type") == "http.response.trailers":
+                if body_finished and message.get("more_trailers", False) is False:
+                    trailers_finished = True
 
         caught_exc: BaseException | None = None
         try:
@@ -465,13 +475,12 @@ class RequestLoggingMiddleware:
                 level = LEVEL_ERROR
                 event_name = EVENT_FAILED
                 status = OUTCOME_ABORTED if error_code == ERROR_CODE_CANCELLED else OUTCOME_EXCEPTION
-            elif not response_started:
+            elif not response_started or not body_finished or (trailers_expected and not trailers_finished):
                 error_code = ERROR_CODE_INCOMPLETE
                 error_type = None
                 level = LEVEL_ERROR
                 event_name = EVENT_FAILED
                 status = OUTCOME_ABORTED
-                http_status = None
             elif not status_valid or http_status is None:
                 error_code = ERROR_CODE_INVALID_STATUS
                 error_type = None

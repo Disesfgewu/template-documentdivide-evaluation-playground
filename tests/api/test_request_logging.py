@@ -632,6 +632,34 @@ class AdversarialLeakageAndBoundaryTests(unittest.TestCase):
         self.assertEqual(ev.error_code, ERROR_CODE_INCOMPLETE)
         self.assertIsNone(ev.error_type)
 
+    def test_response_completion_requires_final_body_and_requested_trailers(self):
+        start = {"type": "http.response.start", "status": 200, "headers": []}
+        chunk = {"type": "http.response.body", "body": b"part", "more_body": True}
+        final = {"type": "http.response.body", "body": b"done"}
+        cases = (
+            ([start], False),
+            ([start, chunk], False),
+            ([start, chunk, final], True),
+            ([dict(start, trailers=True), final], False),
+            ([dict(start, trailers=True), final, {"type": "http.response.trailers", "headers": [], "more_trailers": True}], False),
+            ([dict(start, trailers=True), final, {"type": "http.response.trailers", "headers": []}], True),
+        )
+        for messages, complete in cases:
+            with self.subTest(messages=messages):
+                events = []
+
+                async def app(scope, receive, send):
+                    for message in messages:
+                        await send(message)
+
+                mw = RequestLoggingMiddleware(app, env=Environment.test, provider_mode=ProviderMode.mock, sink=events.append)
+                asyncio.run(run_raw_asgi(mw, {"type": "http", "method": "GET", "path": "/healthz"}))
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].http_status, 200)
+                self.assertEqual(events[0].event_name, EVENT_COMPLETED if complete else EVENT_FAILED)
+                self.assertEqual(events[0].status, OUTCOME_OK if complete else OUTCOME_ABORTED)
+                self.assertEqual(events[0].error_code, None if complete else ERROR_CODE_INCOMPLETE)
+
     def test_exceptions_are_distinguished_reraised_and_never_leak_messages_or_custom_class_names(self):
         class CustomSecretException(Exception):
             pass
