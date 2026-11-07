@@ -26,3 +26,4 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 - `/readyz`：真的連資料庫並確認 `vector` extension 存在，並在 artifact 根目錄實際建立後刪除暫存檔。任一項失敗回 503 `not_ready`；檢查本身拋例外也算失敗。回應只帶例外類別名稱，不回傳連線字串或主機資訊。
 - 設定：`LAB_ENV`、`LAB_PROVIDER_MODE`、`LAB_DATABASE_URL`、`LAB_ARTIFACT_ROOT` 沒有預設值，缺少或不合法時啟動失敗。資料庫只接受 `postgresql://`（不以 SQLite 代替）。
 - mock 與真 provider 分開：`mock` 是本機決定性假回應；`real` 目前**直接拒絕啟動**，因為尚無真 provider adapter（T84 待後續）。`prod` 禁止搭配 `mock`。
+- PostgreSQL 備份與拋棄式空資料庫還原驗證：`python -m lab_api pg-backup | pg-verify-archive | pg-verify-restore`（條件、安全限制與非跨儲存協調還原點說明見 [POSTGRES_BACKUP.md](../../docs/POSTGRES_BACKUP.md)）。
