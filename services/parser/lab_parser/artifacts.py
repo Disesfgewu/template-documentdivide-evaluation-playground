@@ -501,8 +501,8 @@ def ingest_pdf_artifact(
                 prefix=STAGE_PREFIX,
                 dir=root_path,
             )
-            os.fchmod(stage_fd, 0o600)
             stage_path = Path(stage_name)
+            os.fchmod(stage_fd, 0o600)
         except OSError:
             raise PdfArtifactError("artifact_root_unavailable") from None
 

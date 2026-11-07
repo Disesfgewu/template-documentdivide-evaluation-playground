@@ -452,6 +452,17 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         for stg in self._stage_files():
             stg.unlink()
 
+    def test_stage_permission_failure_removes_stage_and_closes_descriptors(self) -> None:
+        before = len(os.listdir("/proc/self/fd"))
+        with patch.object(artifacts.os, "fchmod", side_effect=OSError(errno.EIO, "secret")):
+            for _ in range(5):
+                with self.assertRaises(PdfArtifactError) as ctx:
+                    ingest_pdf_artifact(self.source, self.artifact_root)
+                self.assertEqual(ctx.exception.code, "artifact_root_unavailable")
+                self.assertNotIn("secret", str(ctx.exception))
+                self.assertEqual(self._stage_files(), [])
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
     def test_cleanup_failure_closes_open_file_descriptors(self) -> None:
         self.source.write_bytes(b"not a pdf")
         before = len(os.listdir("/proc/self/fd"))
