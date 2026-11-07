@@ -21,5 +21,6 @@ mkdir -p "$LAB_PARSER_ARTIFACT_ROOT"
 - `lab_parser.geometry`：PDF user space（pt，左下原點）與 SourceRegion 空間（[0,1]，左上原點，已套用 `/Rotate` 與可見框）互轉，對應 SPEC 4.1。超出可見框的部分裁掉；完全在框外、零面積框、非 90 度倍數的旋轉一律報錯。
 - `lab_parser.pages`：逐頁讀出 MediaBox、CropBox、可見框（兩者交集）、旋轉與旋轉後的顯示尺寸。頁碼標籤只取文件本身的 `/PageLabels`；沒有時為 `None`，不用 pypdf 自動補的 "1"、"2"。
 - `lab_parser.render`：用 PDFium 把整頁或某個 SourceRegion 渲染成 L0 PNG（自帶的確定性 RGB 編碼器，不依賴 Pillow），附 sha256 與可重現的轉換資訊（renderer 版本、dpi、裁切 pt）；dpi 限 72–300，單張不超過 16 MP、最長邊 4096 px（SPEC 19.3.8）。
+- `lab_parser.batch_coverage`：500+ 頁分批規劃與覆蓋率核算（SPEC 2、4.2、16.6、19.4）。驗證正整數上限（預設每批 10 頁、前後各 1 頁相鄰 overlap、最大 2000 頁），確保每個核心實體頁只分配一次並保留原始 0-based `page_index`，提供確定性批次身份與順序；逐頁結果在任何核心頁缺漏、失敗、partial 或 `needs_review` 時絕不宣稱完整，且相鄰 overlap 產物不能冒充核心頁覆蓋率。詳見 [docs/BATCH_COVERAGE.md](../../docs/BATCH_COVERAGE.md)。
 
-測試（`tests/parser/test_geometry.py`、`test_pages.py`、`test_render.py`）都在測試裡即時產生小型 PDF，不依賴 fixture registry。關鍵測試會在 0/90/180/270 度旋轉、有無 CropBox 偏移的頁面上畫黑框，確認 `to_region_space` 算出的區域經 PDFium 實際渲染後確實是黑的。F02/F05 的 fixture 驗收、匯入檢查與上傳流程等 #34 與 #5/#6 合併後再接。
+測試（`tests/parser/test_geometry.py`、`test_pages.py`、`test_render.py`、`test_batch_coverage.py`）都在測試裡即時產生小型 PDF 或確定性批次資料，不依賴 fixture registry。關鍵測試會在 0/90/180/270 度旋轉、有無 CropBox 偏移的頁面上畫黑框，確認 `to_region_space` 算出的區域經 PDFium 實際渲染後確實是黑的。F02/F05 的 fixture 驗收、匯入檢查與上傳流程等 #34 與 #5/#6 合併後再接。
