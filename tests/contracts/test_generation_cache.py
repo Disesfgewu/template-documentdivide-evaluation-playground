@@ -336,13 +336,18 @@ class CanonicalizationTests(unittest.TestCase):
             rng.shuffle(shuffled["parse_provenance"][0]["postprocess_flags"])
             rng.shuffle(shuffled["parse_provenance"][0]["model_revisions"])
             rng.shuffle(shuffled["source_evidence"])
-            # Note: if we swap regions on e247, we must update region_index in visual_provenance to match
+            for u in shuffled["source_evidence"]:
+                if u["evidence_id"] == "e247" and rng.randrange(2):
+                    u["regions"].reverse()
+                    for vp in shuffled["visual_provenance"]:
+                        for ref in vp["region_refs"]:
+                            if ref["evidence_id"] == "e247":
+                                ref["region_index"] = 1 - ref["region_index"]
+                rng.shuffle(u["asset_refs"])
             rng.shuffle(shuffled["context_manifest"]["relations"])
             rng.shuffle(shuffled["context_manifest"]["input_artifacts"])
             rng.shuffle(shuffled["target"]["modality_requirements"])
             rng.shuffle(shuffled["visual_provenance"])
-            for u in shuffled["source_evidence"]:
-                rng.shuffle(u["asset_refs"])
             got = build_generation_cache_key(parse_generation_cache_input(json.dumps(shuffled)))
             with self.subTest(seed=seed):
                 self.assertEqual(got.cache_key, expected.cache_key)
@@ -575,6 +580,65 @@ class CacheInvalidationTests(unittest.TestCase):
                 self.assertNotEqual(got.visual_provenance_sha256, base.visual_provenance_sha256)
                 self.assertNotEqual(got.cache_key, base.cache_key)
 
+    def test_swapping_visual_regions_without_updating_region_refs_invalidates_key(self):
+        # Regression for positional region_index collision: one evidence unit has two
+        # visual regions A (page 246 table) and B (page 17 figure). Artifact art_crop_247
+        # points to index 0 and art_crop_18 points to index 1. Swapping the two regions in
+        # unit.regions while keeping region_refs pointing to index 0 and index 1 swaps
+        # which physical region each visual crop represents, so visual_provenance_sha256
+        # and cache_key MUST change even though source_set_sha256 is order-independent.
+        raw_ab = _make_visual_input()
+        raw_ab["source_evidence"][1]["regions"].append(
+            {
+                "document_id": "doc_001",
+                "document_sha256": DOC_SHA,
+                "page_index": 17,
+                "page_label": "18",
+                "bbox": [0.1, 0.6, 0.9, 0.85],
+                "kind": "figure",
+                "quote": None,
+            }
+        )
+        raw_ab["source_evidence"][1]["asset_refs"] = ["art_crop_18", "art_crop_247"]
+        raw_ab["visual_provenance"].append(
+            {
+                "visual_object_id": "vo_18_1",
+                "artifact_id": "art_crop_18",
+                "image_sha256": "e" * 64,
+                "size_bytes": 32_000,
+                "dpi": 150,
+                "pixel_width": 900,
+                "pixel_height": 600,
+                "crop_bbox": [0.1, 0.6, 0.9, 0.85],
+                "rotation_degrees": 0,
+                "transform_id": "pdfium-crop-v1@150dpi",
+                "region_refs": [{"evidence_id": "e247", "region_index": 1}],
+            }
+        )
+        desc_ab = build_generation_cache_key(parse_generation_cache_input(json.dumps(raw_ab)))
+
+        # Swap regions [A, B] -> [B, A] in e247 without changing region_refs (0 and 1):
+        # now vo_247_1 (index 0) points to B instead of A, and vo_18_1 (index 1) points to A.
+        raw_swapped_binding = copy.deepcopy(raw_ab)
+        raw_swapped_binding["source_evidence"][1]["regions"].reverse()
+        desc_swapped_binding = build_generation_cache_key(
+            parse_generation_cache_input(json.dumps(raw_swapped_binding))
+        )
+        self.assertEqual(desc_swapped_binding.source_set_sha256, desc_ab.source_set_sha256)
+        self.assertNotEqual(desc_swapped_binding.visual_provenance_sha256, desc_ab.visual_provenance_sha256)
+        self.assertNotEqual(desc_swapped_binding.cache_key, desc_ab.cache_key)
+
+        # Conversely, if region_refs are also updated to follow their same regions,
+        # the canonical visual provenance and cache_key remain identical.
+        raw_consistent = copy.deepcopy(raw_swapped_binding)
+        raw_consistent["visual_provenance"][0]["region_refs"][0]["region_index"] = 1
+        raw_consistent["visual_provenance"][1]["region_refs"][0]["region_index"] = 0
+        desc_consistent = build_generation_cache_key(
+            parse_generation_cache_input(json.dumps(raw_consistent))
+        )
+        self.assertEqual(desc_consistent.visual_provenance_sha256, desc_ab.visual_provenance_sha256)
+        self.assertEqual(desc_consistent.cache_key, desc_ab.cache_key)
+
 
 class ValidationAndRejectionTests(unittest.TestCase):
     def test_rejects_unpinned_or_floating_revisions(self):
@@ -662,6 +726,15 @@ class ValidationAndRejectionTests(unittest.TestCase):
         m5["context_manifest"]["relations"][0]["validation_status"] = "unresolved"
         with self.assertRaises(ValidationError):
             parse_generation_cache_input(json.dumps(m5))
+
+        # Duplicate region inside a single evidence unit rejected
+        m6 = _make_text_input()
+        dup_reg = copy.deepcopy(m6["source_evidence"][0]["regions"][0])
+        dup_reg["page_label"] = "different-display-label"
+        m6["source_evidence"][0]["regions"].append(dup_reg)
+        with self.assertRaises(ValidationError) as cm:
+            parse_generation_cache_input(json.dumps(m6))
+        self.assertIn("duplicate evidence region", str(cm.exception))
 
     def test_rejects_page_not_covered_by_parse_provenance_or_single_page_cross_page(self):
         m1 = _make_text_input()

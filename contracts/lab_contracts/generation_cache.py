@@ -447,6 +447,10 @@ class GenerationCacheInput(Contract):
             if len(unit.asset_refs) > MAX_ASSETS_PER_UNIT:
                 raise ValueError(f"evidence[{unit.evidence_id}] exceeds asset_refs limit")
             check_unique(unit.asset_refs, "evidence asset_ref")
+            check_unique(
+                [(r.document_id, r.document_sha256, r.page_index, r.bbox, r.kind, r.quote) for r in unit.regions],
+                "evidence region",
+            )
             unit_bytes = len(unit.raw_content.encode("utf-8")) + len(unit.normalized_content.encode("utf-8"))
             if unit_bytes > MAX_UNIT_CONTENT_BYTES:
                 raise ValueError(f"evidence[{unit.evidence_id}] content exceeds {MAX_UNIT_CONTENT_BYTES} bytes")
@@ -601,27 +605,32 @@ def _hash_canonical(obj: Any) -> tuple[str, bytes]:
     return hashlib.sha256(raw).hexdigest(), raw
 
 
+def _canonical_region(r: SourceRegion) -> dict[str, Any]:
+    return {
+        "document_id": r.document_id,
+        "document_sha256": r.document_sha256,
+        "page_index": r.page_index,
+        "bbox": list(r.bbox),
+        "kind": r.kind.value,
+        "quote": r.quote,
+    }
+
+
+def _region_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        item["document_id"],
+        item["page_index"],
+        item["bbox"],
+        item["kind"],
+        item["quote"] is None,
+        item["quote"] or "",
+    )
+
+
 def _canonical_unit(unit: EvidenceUnit) -> dict[str, Any]:
     regions = sorted(
-        (
-            {
-                "document_id": r.document_id,
-                "document_sha256": r.document_sha256,
-                "page_index": r.page_index,
-                "bbox": list(r.bbox),
-                "kind": r.kind.value,
-                "quote": r.quote,
-            }
-            for r in unit.regions
-        ),
-        key=lambda item: (
-            item["document_id"],
-            item["page_index"],
-            item["bbox"],
-            item["kind"],
-            item["quote"] is None,
-            item["quote"] or "",
-        ),
+        (_canonical_region(r) for r in unit.regions),
+        key=_region_sort_key,
     )
     return {
         "evidence_id": unit.evidence_id,
@@ -767,6 +776,14 @@ def build_generation_cache_key(cache_input: GenerationCacheInput) -> GenerationC
     visual_sha: Optional[str] = None
     visual_payload: Optional[list[dict[str, Any]]] = None
     if validated.visual_provenance:
+        evidence_by_id = {u.evidence_id: u for u in validated.source_evidence}
+        canonical_region_index_map: dict[tuple[str, int], tuple[int, dict[str, Any]]] = {}
+        for eid, u in evidence_by_id.items():
+            indexed_regions = [(idx, _canonical_region(r)) for idx, r in enumerate(u.regions)]
+            indexed_regions.sort(key=lambda pair: _region_sort_key(pair[1]))
+            for canon_idx, (orig_idx, canon_reg) in enumerate(indexed_regions):
+                canonical_region_index_map[(eid, orig_idx)] = (canon_idx, canon_reg)
+
         visual_payload = [
             {
                 "visual_object_id": v.visual_object_id,
@@ -780,8 +797,18 @@ def build_generation_cache_key(cache_input: GenerationCacheInput) -> GenerationC
                 "rotation_degrees": v.rotation_degrees,
                 "transform_id": v.transform_id,
                 "region_refs": [
-                    {"evidence_id": r.evidence_id, "region_index": r.region_index}
-                    for r in sorted(v.region_refs, key=lambda item: (item.evidence_id, item.region_index))
+                    {
+                        "evidence_id": r.evidence_id,
+                        "canonical_region_index": canonical_region_index_map[(r.evidence_id, r.region_index)][0],
+                        "region": canonical_region_index_map[(r.evidence_id, r.region_index)][1],
+                    }
+                    for r in sorted(
+                        v.region_refs,
+                        key=lambda item: (
+                            item.evidence_id,
+                            canonical_region_index_map[(item.evidence_id, item.region_index)][0],
+                        ),
+                    )
                 ],
             }
             for v in sorted(validated.visual_provenance, key=lambda item: item.visual_object_id)

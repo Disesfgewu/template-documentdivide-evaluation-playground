@@ -53,8 +53,12 @@ A `GenerationCacheInput` requires and cross-validates five components:
    binds `visual_object_id`, `artifact_id`, `image_sha256`, `size_bytes`,
    `dpi`, `pixel_width`, `pixel_height` ($\le 16\text{ MP}$), `crop_bbox`,
    `rotation_degrees`, pinned `transform_id` and `region_refs`, and must match
-   `EvidenceUnit.asset_refs` 1-to-1. Conversely, text-only inputs reject stray
-   `vision_reader_model` settings.
+   `EvidenceUnit.asset_refs` 1-to-1. Each `region_ref` is resolved against its
+   evidence unit's canonical region order and identity (`canonical_region_index`
+   plus the referenced canonical region descriptor) before hashing, and duplicate
+   regions within an evidence unit are rejected, preventing positional index
+   collisions when regions are reordered. Conversely, text-only inputs reject
+   stray `vision_reader_model` settings.
 
 ## Canonicalization and Untrusted Data
 
