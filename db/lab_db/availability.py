@@ -18,20 +18,21 @@ def _check_artifact(
     object_key: str,
     expected_sha256: str,
     store: LocalArtifactStore | None,
+    expected_size: int | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     if state == "tombstoned":
         reasons.append("artifact_tombstoned")
     if store is not None:
         try:
-            actual_sha256, _size = store.verify(object_key)
+            actual_sha256, actual_size = store.verify(object_key, expected_size=expected_size)
         except StorageCorruption:
             reasons.append("artifact_corrupt")
         except (FileNotFoundError, OSError):
             reasons.append("artifact_missing")
         else:
             # verify() reports what is on disk; comparing is the caller's job.
-            if actual_sha256 != expected_sha256:
+            if actual_sha256 != expected_sha256 or (expected_size is not None and actual_size != expected_size):
                 reasons.append("artifact_corrupt")
     return reasons
 
@@ -58,7 +59,8 @@ def describe(
                a.id AS artifact_id,
                a.state AS artifact_state,
                a.object_key,
-               a.sha256 AS artifact_sha256
+               a.sha256 AS artifact_sha256,
+               a.size_bytes AS artifact_size_bytes
           FROM resource_versions rv
           LEFT JOIN method_revisions mr
                  ON mr.project_id = rv.project_id
@@ -84,9 +86,15 @@ def describe(
     for rid in resource_ids:
         if rid in out:
             continue
-        _, mr_visibility, artifact_id, artifact_state, object_key, artifact_sha256 = by_id[rid]
+        _, mr_visibility, artifact_id, artifact_state, object_key, artifact_sha256, artifact_size_bytes = by_id[rid]
         if artifact_id is not None:
-            reasons = _check_artifact(artifact_state, object_key, artifact_sha256, store)
+            reasons = _check_artifact(
+                artifact_state,
+                object_key,
+                artifact_sha256,
+                store,
+                expected_size=artifact_size_bytes,
+            )
             if reasons:
                 out[rid] = Availability("unavailable", tuple(reasons))
             else:
@@ -113,6 +121,7 @@ def describe_submission(
         SELECT a.state,
                a.object_key,
                a.sha256,
+               a.size_bytes,
                mr.visibility
           FROM submissions s
           JOIN runs r
@@ -132,8 +141,14 @@ def describe_submission(
     if row is None:
         raise LookupError(f"submission not found in project: {submission_id}")
 
-    artifact_state, object_key, artifact_sha256, mr_visibility = row
-    artifact_reasons = _check_artifact(artifact_state, object_key, artifact_sha256, store)
+    artifact_state, object_key, artifact_sha256, artifact_size_bytes, mr_visibility = row
+    artifact_reasons = _check_artifact(
+        artifact_state,
+        object_key,
+        artifact_sha256,
+        store,
+        expected_size=artifact_size_bytes,
+    )
     reasons = list(artifact_reasons)
     if mr_visibility == "declared_only":
         reasons.append("method_internals_not_observed")

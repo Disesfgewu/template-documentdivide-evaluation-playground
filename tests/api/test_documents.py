@@ -448,9 +448,10 @@ class AuthenticatedBoundedDownloadRegressionTests(unittest.TestCase):
                         self.mock_store.open.assert_not_called()
 
     def test_corrupt_or_growing_storage_fails_closed_with_bounded_read(self) -> None:
-        """Storage corruption or concurrent growth raises 500 storage_corruption; open is called with expected_size."""
+        """Storage corruption or concurrent growth raises 500 storage_corruption; open is called with expected_size and max_bytes."""
         from lab_db.repo import Decision
         from lab_db.storage import StorageCorruption
+        from lab_api.pdf_body import DEFAULT_MAX_PDF_BYTES
 
         self._set_db_row(size_bytes=self.size_bytes)
         self.mock_store.open.side_effect = StorageCorruption("object grew concurrently")
@@ -465,11 +466,16 @@ class AuthenticatedBoundedDownloadRegressionTests(unittest.TestCase):
                     res = self.client.get(url, headers=headers)
                     self.assertEqual(res.status_code, 500)
                     self.assertEqual(res.json()["error"]["code"], "storage_corruption")
-                    self.mock_store.open.assert_called_once_with(self.obj_key, expected_size=self.size_bytes)
+                    self.mock_store.open.assert_called_once_with(
+                        self.obj_key,
+                        expected_size=self.size_bytes,
+                        max_bytes=DEFAULT_MAX_PDF_BYTES,
+                    )
 
     def test_successful_download_on_both_representations(self) -> None:
         """Both download representations validate committed size and hash and return 200 with matching bytes."""
         from lab_db.repo import Decision
+        from lab_api.pdf_body import DEFAULT_MAX_PDF_BYTES
 
         self._set_db_row(size_bytes=self.size_bytes)
         self.mock_store.open.return_value = self.pdf_bytes
@@ -493,7 +499,11 @@ class AuthenticatedBoundedDownloadRegressionTests(unittest.TestCase):
                         f'attachment; filename="{self.doc_id}.pdf"',
                     )
                     self.assertEqual(res.content, self.pdf_bytes)
-                    self.mock_store.open.assert_called_once_with(self.obj_key, expected_size=self.size_bytes)
+                    self.mock_store.open.assert_called_once_with(
+                        self.obj_key,
+                        expected_size=self.size_bytes,
+                        max_bytes=DEFAULT_MAX_PDF_BYTES,
+                    )
 
             # 2. Document endpoint with Accept: application/pdf
             for path in [
@@ -511,7 +521,11 @@ class AuthenticatedBoundedDownloadRegressionTests(unittest.TestCase):
                         f'attachment; filename="{self.doc_id}.pdf"',
                     )
                     self.assertEqual(res.content, self.pdf_bytes)
-                    self.mock_store.open.assert_called_once_with(self.obj_key, expected_size=self.size_bytes)
+                    self.mock_store.open.assert_called_once_with(
+                        self.obj_key,
+                        expected_size=self.size_bytes,
+                        max_bytes=DEFAULT_MAX_PDF_BYTES,
+                    )
 
             # 3. Document endpoint without Accept: application/pdf returns metadata JSON without opening store
             self.mock_store.open.reset_mock()
@@ -520,6 +534,77 @@ class AuthenticatedBoundedDownloadRegressionTests(unittest.TestCase):
             self.assertEqual(res_meta.json()["sha256"], self.doc_sha)
             self.assertEqual(res_meta.json()["size_bytes"], self.size_bytes)
             self.mock_store.open.assert_not_called()
+
+    def test_database_size_exceeding_server_ceiling_fails_closed_before_storage(self) -> None:
+        """A database size exceeding the server-controlled ceiling fails closed with 500 storage_corruption without touching storage."""
+        from lab_db.repo import Decision
+        from lab_api.pdf_body import DEFAULT_MAX_PDF_BYTES
+
+        # 1. Size exceeding default ceiling (512 MiB + 1 or huge terabyte size)
+        for oversized in (DEFAULT_MAX_PDF_BYTES + 1, 10**12):
+            self._set_db_row(size_bytes=oversized)
+            with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+                for url, headers in [
+                    (f"/api/v1/documents/{self.doc_id}/original", {}),
+                    (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+                ]:
+                    self.mock_store.open.reset_mock()
+                    with self.subTest(oversized=oversized, url=url):
+                        res = self.client.get(url, headers=headers)
+                        self.assertEqual(res.status_code, 500)
+                        self.assertEqual(res.json()["error"]["code"], "storage_corruption")
+                        self.mock_store.open.assert_not_called()
+
+        # 2. Custom server-controlled ceiling via app.state.max_pdf_bytes
+        self.app.state.max_pdf_bytes = 1000
+        self._set_db_row(size_bytes=1001)
+        with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            res = self.client.get(f"/api/v1/documents/{self.doc_id}/original")
+            self.assertEqual(res.status_code, 500)
+            self.assertEqual(res.json()["error"]["code"], "storage_corruption")
+            self.mock_store.open.assert_not_called()
+
+        # Exact ceiling size succeeds
+        payload_1000 = b"x" * 1000
+        sha_1000 = hashlib.sha256(payload_1000).hexdigest()
+        self.mock_store.open.return_value = payload_1000
+        self._set_db_row(size_bytes=1000, art_sha=sha_1000)
+        self.doc_sha = sha_1000
+        with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            res_ok = self.client.get(f"/api/v1/documents/{self.doc_id}/original")
+            self.assertEqual(res_ok.status_code, 200)
+            self.assertEqual(res_ok.content, payload_1000)
+
+    def test_adversarial_truncated_and_growing_objects_rejected(self) -> None:
+        """Adversarial objects that grew or truncated fail closed with 500 storage_corruption on both download representations."""
+        from lab_db.repo import Decision
+        from lab_db.storage import StorageCorruption
+
+        self._set_db_row(size_bytes=self.size_bytes)
+
+        # 1. Object truncated
+        self.mock_store.open.side_effect = StorageCorruption("object truncated")
+        with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            for url, headers in [
+                (f"/api/v1/documents/{self.doc_id}/original", {}),
+                (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+            ]:
+                with self.subTest(case="truncated", url=url):
+                    res = self.client.get(url, headers=headers)
+                    self.assertEqual(res.status_code, 500)
+                    self.assertEqual(res.json()["error"]["code"], "storage_corruption")
+
+        # 2. Object grew concurrently beyond expected size
+        self.mock_store.open.side_effect = StorageCorruption("object grew concurrently")
+        with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            for url, headers in [
+                (f"/api/v1/documents/{self.doc_id}/original", {}),
+                (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+            ]:
+                with self.subTest(case="grew_concurrently", url=url):
+                    res = self.client.get(url, headers=headers)
+                    self.assertEqual(res.status_code, 500)
+                    self.assertEqual(res.json()["error"]["code"], "storage_corruption")
 
 
 if __name__ == "__main__":

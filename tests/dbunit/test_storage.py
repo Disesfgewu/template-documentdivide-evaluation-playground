@@ -465,6 +465,53 @@ class LocalArtifactStoreTests(unittest.TestCase):
         with self.assertRaises(StorageCorruption):
             self.store.verify(key, expected_size=expected_size)
 
+    def test_server_controlled_ceiling_max_bytes(self) -> None:
+        data = b"server ceiling max_bytes payload"
+        stored = self.store.put(data)
+        key = stored.object_key
+        size = len(data)
+
+        # 1. Matching or larger max_bytes succeeds
+        self.assertEqual(self.store.open(key, max_bytes=size), data)
+        self.assertEqual(self.store.open(key, max_bytes=size + 100), data)
+        self.assertEqual(self.store.verify(key, max_bytes=size), (stored.sha256, size))
+
+        # 2. max_bytes smaller than object size raises StorageCorruption before unbounded read
+        with self.assertRaises(StorageCorruption):
+            self.store.open(key, max_bytes=size - 1)
+        with self.assertRaises(StorageCorruption):
+            self.store.verify(key, max_bytes=size - 1)
+
+        # 3. expected_size exceeding max_bytes raises StorageCorruption
+        with self.assertRaises(StorageCorruption):
+            self.store.open(key, expected_size=size, max_bytes=size - 1)
+        with self.assertRaises(StorageCorruption):
+            self.store.verify(key, expected_size=size, max_bytes=size - 1)
+
+    def test_availability_check_artifact_bounded_verify(self) -> None:
+        from lab_db.availability import _check_artifact
+
+        data = b"availability check artifact payload"
+        stored = self.store.put(data)
+        key = stored.object_key
+        size = len(data)
+
+        # 1. Valid artifact passes
+        reasons_ok = _check_artifact(
+            "committed", key, stored.sha256, self.store, expected_size=size
+        )
+        self.assertEqual(reasons_ok, [])
+
+        # 2. Corrupt/oversized artifact on disk detected via bounded verify
+        disk_file = self.root / "sha256" / stored.sha256[:2] / stored.sha256
+        with open(disk_file, "ab") as f:
+            f.write(b"EXTRABYTES")
+
+        reasons_corrupt = _check_artifact(
+            "committed", key, stored.sha256, self.store, expected_size=size
+        )
+        self.assertIn("artifact_corrupt", reasons_corrupt)
+
 
 if __name__ == "__main__":
     unittest.main()

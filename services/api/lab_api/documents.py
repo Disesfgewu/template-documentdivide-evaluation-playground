@@ -644,11 +644,23 @@ async def download_document_handler(
     if art_sha != doc_sha:
         raise ApiError(500, "storage_corruption", "document and artifact checksum mismatch")
 
-    if not isinstance(size_bytes, int) or size_bytes < 0:
+    server_max_bytes = getattr(
+        request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES
+    )
+
+    if (
+        not isinstance(size_bytes, int)
+        or size_bytes < 0
+        or size_bytes > server_max_bytes
+    ):
         raise ApiError(500, "storage_corruption", "invalid artifact size in database")
 
     try:
-        pdf_bytes = store.open(object_key, expected_size=size_bytes)
+        pdf_bytes = store.open(
+            object_key,
+            expected_size=size_bytes,
+            max_bytes=server_max_bytes,
+        )
     except StorageCorruption as exc:
         raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
     except Exception as exc:
@@ -724,13 +736,25 @@ async def get_document_handler(
     if art_sha != doc_sha:
         raise ApiError(500, "storage_corruption", "document and artifact checksum mismatch")
 
-    if not isinstance(size_bytes, int) or size_bytes < 0:
+    server_max_bytes = getattr(
+        request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES
+    )
+
+    if (
+        not isinstance(size_bytes, int)
+        or size_bytes < 0
+        or size_bytes > server_max_bytes
+    ):
         raise ApiError(500, "storage_corruption", "invalid artifact size in database")
 
     accept = request.headers.get("Accept", "")
     if "application/pdf" in accept:
         try:
-            pdf_bytes = store.open(obj_key, expected_size=size_bytes)
+            pdf_bytes = store.open(
+                obj_key,
+                expected_size=size_bytes,
+                max_bytes=server_max_bytes,
+            )
         except StorageCorruption as exc:
             raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
         except Exception as exc:

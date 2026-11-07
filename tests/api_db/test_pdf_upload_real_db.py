@@ -790,6 +790,19 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(res_unauth.status_code, 404)
         self.assertEqual(res_unauth.json()["error"]["code"], "not_found")
 
+        # 4. Adversarial database artifact size exceeding server-controlled ceiling fails closed
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE artifacts SET size_bytes = 1000000000000 WHERE id = (SELECT artifact_id FROM document_versions WHERE id = %s)",
+                (doc_id,),
+            )
+        res_ceiling = self.client.get(
+            f"/api/v1/documents/{doc_id}/original",
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        self.assertEqual(res_ceiling.status_code, 500)
+        self.assertEqual(res_ceiling.json()["error"]["code"], "storage_corruption")
+
 
 if __name__ == "__main__":
     unittest.main()
