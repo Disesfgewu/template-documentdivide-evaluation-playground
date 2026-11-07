@@ -70,7 +70,11 @@ A `GenerationCacheInput` requires and cross-validates five components:
   prompt context ordering and per-slot truncation change generation inputs.
 - `parse_generation_cache_input` runs `strict_loads` (rejecting UTF-8 BOM,
   duplicate keys, `NaN`/`Infinity` and out-of-range numbers) before Pydantic
-  validation. `build_generation_cache_key` re-validates Python inputs so
+  validation, preserves exact `Decimal` numbers inside
+  `generation_config.parameters` (top-level and nested) so high-precision JSON
+  numbers such as `9007199254740992.0` vs `9007199254740993.0` never collide
+  under binary64 rounding, and rejects lossy decimal tokens on fixed binary64
+  float fields. `build_generation_cache_key` re-validates Python inputs so
   in-place mutations or `model_construct` callers cannot bypass checks.
 - Untrusted PDF text, quotes and parameter strings are serialized strictly as
   JSON string values and never interpreted as policy or instructions.

@@ -379,6 +379,83 @@ class CanonicalizationTests(unittest.TestCase):
         self.assertEqual(d1.generation_config_sha256, d2.generation_config_sha256)
         self.assertEqual(d1.cache_key, d2.cache_key)
 
+    def test_exact_decimal_numbers_in_parameters_do_not_collide_under_binary64_rounding(self):
+        # Regression: 9007199254740992.0 and 9007199254740993.0 round to the same
+        # IEEE-754 binary64 float, but are distinct exact JSON numbers under lab-c14n-2.
+        # Top-level and nested parameter values must preserve their exact Decimal
+        # identity and produce distinct cache keys, while mathematically equal tokens
+        # (9007199254740992.0 vs 9007199254740992) produce identical keys.
+        base = _make_text_input()
+        base["generation_config"]["parameters"] = {
+            "threshold": "__THRESH__",
+            "nested": {"limits": ["__LIM__", {"inner_threshold": "__INNER__"}]},
+        }
+        template = json.dumps(base, ensure_ascii=False)
+        json_a = (
+            template.replace('"__THRESH__"', "9007199254740992.0")
+            .replace('"__LIM__"', "9007199254740992.0")
+            .replace('"__INNER__"', "0.10000000000000000001")
+        )
+        json_b = (
+            template.replace('"__THRESH__"', "9007199254740993.0")
+            .replace('"__LIM__"', "9007199254740992.0")
+            .replace('"__INNER__"', "0.10000000000000000001")
+        )
+        json_c_nested = (
+            template.replace('"__THRESH__"', "9007199254740992.0")
+            .replace('"__LIM__"', "9007199254740993.0")
+            .replace('"__INNER__"', "0.10000000000000000001")
+        )
+        json_d_inner = (
+            template.replace('"__THRESH__"', "9007199254740992.0")
+            .replace('"__LIM__"', "9007199254740992.0")
+            .replace('"__INNER__"', "0.10000000000000000002")
+        )
+        json_a_equiv = (
+            template.replace('"__THRESH__"', "9007199254740992")
+            .replace('"__LIM__"', "9007199254740992")
+            .replace('"__INNER__"', "1.0000000000000000001e-1")
+        )
+
+        inp_a = parse_generation_cache_input(json_a)
+        inp_b = parse_generation_cache_input(json_b)
+        inp_c = parse_generation_cache_input(json_c_nested)
+        inp_d = parse_generation_cache_input(json_d_inner)
+        inp_a_equiv = parse_generation_cache_input(json_a_equiv)
+
+        # Caller-facing parameters retain distinct exact values
+        self.assertNotEqual(
+            inp_a.generation_config.parameters["threshold"],
+            inp_b.generation_config.parameters["threshold"],
+        )
+        self.assertNotEqual(
+            inp_a.generation_config.parameters["nested"]["limits"][0],
+            inp_c.generation_config.parameters["nested"]["limits"][0],
+        )
+
+        desc_a = build_generation_cache_key(inp_a)
+        desc_b = build_generation_cache_key(inp_b)
+        desc_c = build_generation_cache_key(inp_c)
+        desc_d = build_generation_cache_key(inp_d)
+        desc_a_equiv = build_generation_cache_key(inp_a_equiv)
+
+        self.assertNotEqual(desc_a.generation_config_sha256, desc_b.generation_config_sha256)
+        self.assertNotEqual(desc_a.cache_key, desc_b.cache_key)
+        self.assertNotEqual(desc_a.generation_config_sha256, desc_c.generation_config_sha256)
+        self.assertNotEqual(desc_a.cache_key, desc_c.cache_key)
+        self.assertNotEqual(desc_a.generation_config_sha256, desc_d.generation_config_sha256)
+        self.assertNotEqual(desc_a.cache_key, desc_d.cache_key)
+        self.assertEqual(desc_a.generation_config_sha256, desc_a_equiv.generation_config_sha256)
+        self.assertEqual(desc_a.cache_key, desc_a_equiv.cache_key)
+
+        # Non-parameter float fields (e.g., temperature) reject lossy decimal tokens
+        lossy_temp = json.dumps(_make_text_input()).replace(
+            '"temperature": 0.0', '"temperature": 0.10000000000000000001'
+        )
+        with self.assertRaises(ValueError) as cm:
+            parse_generation_cache_input(lossy_temp)
+        self.assertIn("loses precision in binary64 float", str(cm.exception))
+
     def test_from_parse_manifest_ignores_transient_timestamps_and_cost(self):
         m1 = ParseManifest(
             parser_name="mineru",

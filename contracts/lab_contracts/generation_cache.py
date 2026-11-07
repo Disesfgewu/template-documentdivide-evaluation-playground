@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from decimal import Decimal
+import math
 from typing import Annotated, Any, Literal, Optional
 
 from pydantic import Field, StringConstraints, model_validator
@@ -88,8 +90,18 @@ def _check_json_value(value: Any, *, depth: int = 0) -> Any:
         raise ValueError(f"generation parameters exceed max depth {MAX_PARAMETER_DEPTH}")
     if value is None or isinstance(value, (bool, str, int)):
         return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("generation parameters must not contain NaN or Infinity")
+        try:
+            f = float(value)
+        except (ValueError, OverflowError):
+            raise ValueError("generation parameter number out of range") from None
+        if not math.isfinite(f) or (f == 0.0 and value != 0):
+            raise ValueError("generation parameter number out of range")
+        return value
     if isinstance(value, float):
-        if not (value == value and abs(value) != float("inf")):
+        if not math.isfinite(value):
             raise ValueError("generation parameters must not contain NaN or Infinity")
         return value
     if type(value) is list:
@@ -102,6 +114,25 @@ def _check_json_value(value: Any, *, depth: int = 0) -> Any:
             out[k] = _check_json_value(v, depth=depth + 1)
         return out
     raise ValueError(f"unsupported generation parameter type: {type(value).__name__}")
+
+
+def _check_lossless_numbers(raw_obj: Any, model_obj: Any, path: str = "") -> None:
+    """Reject any non-parameter JSON number token whose exact decimal value
+    would be rounded by binary64 float validation."""
+    if isinstance(raw_obj, dict) and isinstance(model_obj, dict):
+        for k, raw_v in raw_obj.items():
+            sub_path = f"{path}.{k}" if path else k
+            if sub_path == "generation_config.parameters":
+                # parameters preserves exact Decimal values directly.
+                continue
+            if k in model_obj:
+                _check_lossless_numbers(raw_v, model_obj[k], sub_path)
+    elif isinstance(raw_obj, list) and isinstance(model_obj, (list, tuple)):
+        for idx, (raw_v, mod_v) in enumerate(zip(raw_obj, model_obj)):
+            _check_lossless_numbers(raw_v, mod_v, f"{path}[{idx}]")
+    elif isinstance(raw_obj, (Decimal, int)) and not isinstance(raw_obj, bool) and isinstance(model_obj, float):
+        if Decimal(repr(model_obj)) != Decimal(raw_obj):
+            raise ValueError(f"{path} numeric value {raw_obj} loses precision in binary64 float")
 
 
 _RESERVED_PARAMETER_KEYS = frozenset({
@@ -847,7 +878,9 @@ def build_generation_cache_key(cache_input: GenerationCacheInput) -> GenerationC
 
 def parse_generation_cache_input(raw: bytes | str) -> GenerationCacheInput:
     """Parse strict UTF-8 JSON into ``GenerationCacheInput`` (rejecting duplicate
-    keys, NaN/Infinity and out-of-range numbers before Pydantic validation)."""
+    keys, NaN/Infinity and out-of-range numbers before Pydantic validation, and
+    preserving exact Decimal numbers in ``generation_config.parameters`` while
+    rejecting lossy binary64 rounding on float fields)."""
     if isinstance(raw, bytes):
         if len(raw) > MAX_SNAPSHOT_BYTES:
             raise ValueError("generation cache input exceeds 16 MiB")
@@ -863,5 +896,13 @@ def parse_generation_cache_input(raw: bytes | str) -> GenerationCacheInput:
         raise TypeError("raw input must be bytes or str")
     if text.startswith("\ufeff"):
         raise StrictJSONError("UTF-8 BOM is not permitted")
-    strict_loads(text)
-    return GenerationCacheInput.model_validate_json(text)
+    raw_parsed = strict_loads(text)
+    validated = GenerationCacheInput.model_validate_json(text)
+    if isinstance(raw_parsed, dict):
+        _check_lossless_numbers(raw_parsed, validated.model_dump(mode="python", warnings=False))
+        raw_gen_cfg = raw_parsed.get("generation_config")
+        if isinstance(raw_gen_cfg, dict) and "parameters" in raw_gen_cfg:
+            py_data = validated.model_dump(mode="python", warnings=False)
+            py_data["generation_config"]["parameters"] = raw_gen_cfg["parameters"]
+            validated = GenerationCacheInput.model_validate(py_data)
+    return validated
