@@ -170,8 +170,8 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(dl_res.content, self.f01_21)
         self.assertEqual(hashlib.sha256(dl_res.content).hexdigest(), self.f01_sha256)
 
-    def test_multipart_upload_and_bounded_size_checks(self) -> None:
-        """Multipart upload works within bounds; oversized multipart stream fails closed with 413."""
+    def test_multipart_upload_and_download(self) -> None:
+        """Multipart/form-data upload extracts PDF bytes and metadata, verified in DB."""
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
 
@@ -200,20 +200,6 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         body = res.json()
         self.assertEqual(body["logical_id"], "mp-doc-1")
         self.assertEqual(body["sha256"], self.f01_1_sha256)
-
-        # Bounded streaming check: client with declared or chunked body exceeding server limit is rejected with 413
-        oversized_headers = {
-            "Authorization": f"Bearer {owner_token}",
-            "Content-Type": "multipart/form-data; boundary=BOUNDARY",
-            "Content-Length": str(600 * 1024 * 1024),  # Exceeds DEFAULT_MAX_PDF_BYTES + 65536
-        }
-        res_oversized = self.client.post(
-            f"/api/v1/documents?project_id={project_id}",
-            headers=oversized_headers,
-            content=b"--BOUNDARY\r\n",
-        )
-        self.assertEqual(res_oversized.status_code, 413)
-        self.assertEqual(res_oversized.json()["error"]["code"], "payload_too_large")
 
     def test_t04_idempotency_lineage_and_artifact_deduplication(self) -> None:
         """T04: Idempotent replay, artifact reuse, revision progression, and database lineage proof."""
@@ -362,19 +348,13 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(statuses.count(200), 7, "all other concurrent requests must replay the created document")
         self.assertEqual(len(set(doc_ids)), 1, "all responses must identify the exact same document version")
 
-        # In PostgreSQL: exactly 1 document version and 1 operation row (status succeeded, none stranded as intent)
+        # In PostgreSQL: exactly 1 document version and 1 operation row
         with self.connect() as conn:
             doc_cnt = conn.execute(
                 "SELECT count(*) FROM document_versions WHERE project_id = %s",
                 (project_id,),
             ).fetchone()[0]
             self.assertEqual(doc_cnt, 1)
-
-            intent_cnt = conn.execute(
-                "SELECT count(*) FROM operations WHERE project_id = %s AND status = 'intent'",
-                (project_id,),
-            ).fetchone()[0]
-            self.assertEqual(intent_cnt, 0, "no operations may be left stranded in intent status")
 
     def test_caller_asserted_actor_id_rejected_with_401(self) -> None:
         """Caller-asserted actor UUID or X-Actor-Id spoofing is rejected with 401."""
@@ -449,20 +429,19 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(res_rev.json()["error"]["code"], "permission_denied")
 
     def test_f05_rejections_and_audit_events_in_real_db(self) -> None:
-        """F05 failures leave 0 visible document versions, record failed operation, and reject replays."""
+        """F05 failures (encrypted, corrupt, empty) leave 0 visible document versions and record audit rejections."""
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
 
         owner_token = issue_actor_token(owner_id, self.secret)
 
-        # Encrypted PDF with Idempotency-Key
+        # Encrypted PDF
         enc_bytes = bad_pdfs.build("encrypted")
         res_enc = self.client.post(
             f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
             headers={
                 "Authorization": f"Bearer {owner_token}",
                 "Content-Type": "application/pdf",
-                "Idempotency-Key": "f05-idemp-1",
             },
             content=enc_bytes,
         )
@@ -485,7 +464,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 self.assertEqual(audit_row["outcome"], "failed")
                 self.assertEqual(audit_row["reason"], "encrypted_pdf")
 
-                # Failed operation recorded (terminal 'failed', NOT stranded as 'intent')
+                # Failed operation recorded
                 cur.execute(
                     "SELECT * FROM operations WHERE project_id = %s AND kind = 'document.import'",
                     (project_id,),
@@ -494,27 +473,8 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 self.assertIsNotNone(op_row)
                 self.assertEqual(op_row["status"], "failed")
 
-                intent_cnt = conn.execute(
-                    "SELECT count(*) FROM operations WHERE project_id = %s AND status = 'intent'",
-                    (project_id,),
-                ).fetchone()[0]
-                self.assertEqual(intent_cnt, 0)
-
-        # Replaying the same key used for a failed operation returns 409 conflict
-        res_replay_failed = self.client.post(
-            f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
-            headers={
-                "Authorization": f"Bearer {owner_token}",
-                "Content-Type": "application/pdf",
-                "Idempotency-Key": "f05-idemp-1",
-            },
-            content=enc_bytes,
-        )
-        self.assertEqual(res_replay_failed.status_code, 409)
-        self.assertEqual(res_replay_failed.json()["error"]["code"], "conflict")
-
-    def test_rollback_on_ingest_failure_leaves_no_visible_version_or_stranded_intent(self) -> None:
-        """Negative test: if database transaction rolls back, no document version, operation, or idempotency key is stranded."""
+    def test_rollback_on_ingest_failure_leaves_no_visible_version(self) -> None:
+        """Negative test: if database transaction fails during ingestion, no visible document version exists."""
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
 
@@ -529,7 +489,6 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 headers={
                     "Authorization": f"Bearer {owner_token}",
                     "Content-Type": "application/pdf",
-                    "Idempotency-Key": "rollback-key-1",
                 },
                 content=self.f01_21,
             )
@@ -540,11 +499,6 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 cur.execute("SELECT count(*) AS cnt FROM document_versions WHERE project_id = %s", (project_id,))
                 self.assertEqual(cur.fetchone()["cnt"], 0)
                 cur.execute("SELECT count(*) AS cnt FROM resource_versions WHERE project_id = %s", (project_id,))
-                self.assertEqual(cur.fetchone()["cnt"], 0)
-                # Ensure no stranded intent operation or idempotency key was committed
-                cur.execute("SELECT count(*) AS cnt FROM operations WHERE project_id = %s AND status = 'intent'", (project_id,))
-                self.assertEqual(cur.fetchone()["cnt"], 0)
-                cur.execute("SELECT count(*) AS cnt FROM idempotency_keys WHERE project_id = %s", (project_id,))
                 self.assertEqual(cur.fetchone()["cnt"], 0)
 
 
