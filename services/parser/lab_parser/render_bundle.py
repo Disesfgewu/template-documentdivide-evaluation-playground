@@ -145,7 +145,7 @@ def create_bundle(source: str | Path, output_dir: str | Path, *, page_index: int
         raise BundleError("invalid_byte_limit")
     try:
         region, resolution = _validate_region(bbox), _validate_dpi(dpi)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         raise BundleError("invalid_render_profile") from None
     try:
         source, destination = Path(source), Path(output_dir)

@@ -86,7 +86,8 @@ class RenderBundleTest(unittest.TestCase):
             with self.subTest(max_bytes=bad):
                 self.code("invalid_byte_limit", max_bytes=bad)
         for profile in ({"dpi": 301}, {"dpi": True}, {"bbox": [0, 0, float("nan"), 1]},
-                        {"bbox": [0, 0, True, 1]}, {"bbox": [0, 0, 0, 1]}):
+                        {"bbox": [0, 0, True, 1]}, {"bbox": [0, 0, 0, 1]},
+                        {"bbox": [0, 0, 10**309, 1]}):
             with self.subTest(profile=profile):
                 self.code("invalid_render_profile", **profile)
         for index in (-1, True, 1.0):
