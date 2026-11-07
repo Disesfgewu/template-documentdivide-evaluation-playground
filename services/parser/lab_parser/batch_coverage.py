@@ -83,7 +83,7 @@ def _require_non_empty_id(value: Any, name: str, *, max_len: int = 128) -> str:
 
 
 def _require_sha256(value: Any, name: str = "document_sha256") -> str:
-    if not isinstance(value, str) or not _SHA256_RE.match(value):
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
         raise ValueError(
             f"invalid_{name}: must be 64 lowercase hexadecimal characters"
         )

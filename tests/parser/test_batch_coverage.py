@@ -268,7 +268,7 @@ class TestPlanBatchesPartitionAndOverlap(unittest.TestCase):
                         page_count=10,
                     )
 
-        for bad_sha in ("", "A" * 64, "g" * 64, "a" * 63, "a" * 65, None):
+        for bad_sha in ("", "A" * 64, "g" * 64, "a" * 63, "a" * 65, "a" * 64 + "\n", None):
             with self.subTest(document_sha256=bad_sha):
                 with self.assertRaises(ValueError):
                     plan_batches(
