@@ -115,9 +115,30 @@ class LocalArtifactStore:
             size_bytes=size_bytes,
         )
 
+    def _read_target_nofollow(self, target: Path, object_key: str) -> bytes:
+        import stat
+        try:
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            raise StorageCorruption(
+                f"failed to open artifact {object_key} safely: {type(exc).__name__}"
+            ) from exc
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise StorageCorruption(f"path for {object_key} is not a regular file")
+            with os.fdopen(fd, "rb") as f:
+                return f.read()
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+
     def open(self, object_key: str) -> bytes:
         target, expected_sha256 = self._resolve_key(object_key)
-        raw = target.read_bytes()
+        raw = self._read_target_nofollow(target, object_key)
         actual_sha256 = hashlib.sha256(raw).hexdigest()
         if actual_sha256 != expected_sha256:
             raise StorageCorruption(
@@ -128,7 +149,7 @@ class LocalArtifactStore:
 
     def verify(self, object_key: str) -> tuple[str, int]:
         target, _ = self._resolve_key(object_key)
-        raw = target.read_bytes()
+        raw = self._read_target_nofollow(target, object_key)
         actual_sha256 = hashlib.sha256(raw).hexdigest()
         return actual_sha256, len(raw)
 
