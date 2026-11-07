@@ -228,19 +228,12 @@ def ingest_document(
         conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                      (f"document_version:{project_id}:{logical_id}",))
         rev_row = conn.execute(
-            "SELECT id, revision "
+            "SELECT COALESCE(MAX(revision), 0) + 1 "
             "FROM resource_versions "
-            "WHERE project_id = %s AND resource_type = 'document_version' AND logical_id = %s "
-            "ORDER BY revision DESC LIMIT 1",
+            "WHERE project_id = %s AND resource_type = 'document_version' AND logical_id = %s",
             (project_id, logical_id),
         ).fetchone()
-        if rev_row is not None:
-            prev_id, max_rev = rev_row[0], int(rev_row[1])
-            next_revision = max_rev + 1
-            lineage_list = [(prev_id, "supersedes")]
-        else:
-            next_revision = 1
-            lineage_list = []
+        next_revision = int(rev_row[0]) if rev_row is not None else 1
 
         resource_id = record_change(
             conn,
@@ -255,7 +248,6 @@ def ingest_document(
                 c14n_version="raw-bytes",
                 audit_action="document.imported",
                 reason=audit_reason,
-                lineage=lineage_list,
                 outbox_topic="document.imported",
                 outbox_payload=outbox_payload,
             ),
