@@ -38,6 +38,9 @@ Threat Model and Post-Operation Boundary:
   directories to prevent post-verification modification.
 
 Operational Scope and Limitations:
+- The restored store must be quiescent and protected from all writers during
+  verification and until the result is used. Checks are sequential, not an
+  atomic snapshot; identity checks cannot prevent same-inode content changes.
 - This tool verifies restored filesystem bytes against a supplied inventory.
 - It does NOT claim that the supplied inventory is a consistent database snapshot.
   The operator must obtain and authenticate the inventory from a consistent database snapshot.

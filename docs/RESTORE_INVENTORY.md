@@ -42,6 +42,7 @@
 ## Threat Model and Post-Operation Boundary
 
 - **In-process atomic verification**: The tool verifies canonical directory and file identities (`st_dev`, `st_ino`) and file content during verification, preventing directory-swap and symlink-substitution races during execution.
+- **Quiescent store required**: Exclude all writers before verification begins and until its result is used. Individual files are checked sequentially; a writer can alter an earlier file during later checks or change bytes between hashing and the identity check. The result is not an atomic filesystem snapshot. Protect the store and its ancestors with DAC/MAC and use a trusted, isolated restore target.
 - **Post-operation DAC/MAC boundary**: Like any user-space verification tool, once file descriptors are closed and the process exits, the tool cannot prevent an attacker with filesystem write access from subsequently mutating, deleting, or swapping directories or files. Deployments must enforce strict operating system discretionary and mandatory access controls (DAC/MAC, e.g. mode 0700/0750 owned exclusively by the runtime service user) on `<store_root>` and all ancestor paths to protect the store after verification.
 
 ## Operator CLI Usage
