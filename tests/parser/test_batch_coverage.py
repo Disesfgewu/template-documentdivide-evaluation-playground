@@ -612,6 +612,128 @@ class TestCoverageAccountingAndInvariants(unittest.TestCase):
             )
             select_retry_batches(other_plan, rep_partial)
 
+    def test_host_review_repro_tampered_batch_count_and_report_integrity(self) -> None:
+        """Host review on PR #61 reproduced two defects:
+        (1) select_retry_batches only checked plan identity, not report integrity:
+            plan 2 pages batch_size=1, r = evaluate_coverage(plan, []),
+            select_retry_batches(plan, dataclasses.replace(r, retry_batch_ids=()))
+            returned () despite missing pages.
+        (2) _validate_plan_integrity ignored plan.batch_count and accepted
+            dataclasses.replace(plan, batch_count=0).
+        Both must fail closed, even if hashes are recomputed from inconsistent fields."""
+        from lab_parser.batch_coverage import _canonical_hash
+
+        plan = plan_batches(
+            document_id=DOC_ID,
+            document_sha256=DOC_SHA,
+            page_count=2,
+            limits=BatchLimits(batch_size=1, overlap_pages=0),
+        )
+        rep = evaluate_coverage(plan, [])
+
+        # Defect (2) reproduction: tampered batch_count on plan
+        for bad_count in (0, 1, 3, -1, True):
+            with self.subTest(bad_batch_count=bad_count):
+                bad_plan = dataclasses.replace(plan, batch_count=bad_count)  # type: ignore[arg-type]
+                with self.assertRaisesRegex(
+                    ValueError, "tampered_or_inconsistent_plan"
+                ):
+                    evaluate_coverage(bad_plan, [])
+                with self.assertRaisesRegex(
+                    ValueError, "tampered_or_inconsistent_plan"
+                ):
+                    select_retry_batches(bad_plan, rep)
+
+        # Defect (1) exact reproduction: retry_batch_ids replaced with ()
+        tampered_retry_empty = dataclasses.replace(rep, retry_batch_ids=())
+        with self.assertRaisesRegex(ValueError, "tampered_or_inconsistent_report"):
+            select_retry_batches(plan, tampered_retry_empty)
+
+        # Even if an attacker recomputes report_sha256 over inconsistent retry_batch_ids=(),
+        # full structural consistency checks must still reject it.
+        forged_payload = {
+            "rule_version": rep.rule_version,
+            "plan_id": rep.plan_id,
+            "plan_sha256": rep.plan_sha256,
+            "document_id": rep.document_id,
+            "document_sha256": rep.document_sha256,
+            "page_count": rep.page_count,
+            "status": rep.status,
+            "can_claim_complete": rep.can_claim_complete,
+            "can_freeze_benchmark": rep.can_freeze_benchmark,
+            "total_core_pages": rep.total_core_pages,
+            "covered_core_pages": rep.covered_core_pages,
+            "ok_pages": list(rep.ok_pages),
+            "partial_pages": list(rep.partial_pages),
+            "needs_review_pages": list(rep.needs_review_pages),
+            "failed_pages": list(rep.failed_pages),
+            "missing_pages": list(rep.missing_pages),
+            "retry_page_indices": list(rep.retry_page_indices),
+            "retry_batch_ids": [],
+            "completed_batch_ids": list(rep.completed_batch_ids),
+            "missing_batch_ids": list(rep.missing_batch_ids),
+            "pages": [
+                {
+                    "page_index": item.page_index,
+                    "owner_batch_id": item.owner_batch_id,
+                    "owner_batch_index": item.owner_batch_index,
+                    "status": item.status,
+                    "diagnostics": list(item.diagnostics),
+                    "overlap_observations": [
+                        [b_id, st] for b_id, st in item.overlap_observations
+                    ],
+                    "counts_as_covered": item.counts_as_covered,
+                    "requires_retry": item.requires_retry,
+                    "requires_review": item.requires_review,
+                }
+                for item in rep.pages
+            ],
+        }
+        forged_rep = dataclasses.replace(
+            rep,
+            retry_batch_ids=(),
+            report_sha256=_canonical_hash(forged_payload),
+        )
+        with self.assertRaisesRegex(ValueError, "tampered_or_inconsistent_report"):
+            select_retry_batches(plan, forged_rep)
+
+        # Other tampered report fields: page status/flags, summary lists, ratio, hash
+        p0_tampered = dataclasses.replace(rep.pages[0], status="ok")
+        with self.assertRaisesRegex(ValueError, "tampered_or_inconsistent_report"):
+            select_retry_batches(
+                plan, dataclasses.replace(rep, pages=(p0_tampered, rep.pages[1]))
+            )
+
+        p0_flags_tampered = dataclasses.replace(
+            rep.pages[0], status="ok", counts_as_covered=True, requires_retry=False
+        )
+        # Page 0 is in missing_batch_ids, so claiming status="ok" while its batch is in missing_batch_ids is inconsistent
+        with self.assertRaisesRegex(ValueError, "tampered_or_inconsistent_report"):
+            select_retry_batches(
+                plan,
+                dataclasses.replace(rep, pages=(p0_flags_tampered, rep.pages[1])),
+            )
+
+        for field_override in (
+            {"status": "complete_raw"},
+            {"can_claim_complete": True},
+            {"can_freeze_benchmark": True},
+            {"covered_core_pages": 2},
+            {"missing_pages": (0,)},
+            {"retry_page_indices": (0,)},
+            {"completed_batch_ids": (plan.batches[0].batch_id,)},
+            {"missing_batch_ids": ()},
+            {"coverage_ratio": 1.0},
+            {"report_sha256": "0" * 64},
+        ):
+            with self.subTest(field_override=field_override):
+                with self.assertRaisesRegex(
+                    ValueError, "tampered_or_inconsistent_report"
+                ):
+                    select_retry_batches(
+                        plan, dataclasses.replace(rep, **field_override)  # type: ignore[arg-type]
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

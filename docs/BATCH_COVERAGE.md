@@ -32,7 +32,7 @@ scripts/check.sh --scope "parser governance"
   - Any `failed` or `missing` core page forces `status="incomplete"`, `can_claim_complete=False`, and marks those pages (`retry_page_indices`) and their owning batches (`retry_batch_ids`) for retry.
   - Any `partial` or `needs_review` core page (with no `failed`/`missing` pages) transitions `status="needs_review"` and sets `can_claim_complete=False`.
   - Only when every core page in `0 .. page_count - 1` is reported `ok` by its owning batch does the report reach `status="complete_raw"` and `can_claim_complete=True`. `can_freeze_benchmark` is always `False` at the page-batch stage.
-  - `select_retry_batches(plan, report)` returns only batches with `failed` or `missing` core pages, reusing completed and `needs_review`/`partial` batches without re-running them (SPEC 4.2, T07).
+  - `select_retry_batches(plan, report)` validates full structural and cryptographic consistency of both `plan` (including `batch_count`) and `report` (including per-page statuses/flags, summary lists, `retry_batch_ids`, `completed_batch_ids`, `missing_batch_ids`, `coverage_ratio`, and `report_sha256`) before returning batches with `failed` or `missing` core pages, reusing completed and `needs_review`/`partial` batches without re-running them (SPEC 4.2, T07).
 - **Duplicate, conflicting, and out-of-plan results**:
   - Exact duplicate `BatchResultInput` submissions for the same `batch_id` (even with page reports in a different list order) are idempotently deduplicated.
   - Conflicting duplicate submissions for the same `batch_id` (differing page statuses, diagnostics, roles, or `operation_id`) fail closed with `ValueError("conflicting_duplicate_batch_result: ...")`.

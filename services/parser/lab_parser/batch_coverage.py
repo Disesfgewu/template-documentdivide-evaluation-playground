@@ -467,9 +467,306 @@ def _validate_plan_integrity(plan: BatchPlan) -> dict[str, BatchSpec]:
     )
     if plan.plan_sha256 != expected.plan_sha256 or plan.plan_id != expected.plan_id:
         raise ValueError("tampered_or_inconsistent_plan: plan hash mismatch")
-    if len(plan.batches) != expected.batch_count or plan.batches != expected.batches:
+    if (
+        isinstance(plan.batch_count, bool)
+        or not isinstance(plan.batch_count, int)
+        or plan.batch_count != expected.batch_count
+    ):
+        raise ValueError("tampered_or_inconsistent_plan: batch_count mismatch")
+    if (
+        not isinstance(plan.batches, tuple)
+        or len(plan.batches) != expected.batch_count
+        or plan.batches != expected.batches
+        or plan != expected
+    ):
         raise ValueError("tampered_or_inconsistent_plan: batches do not match canonical plan")
     return {b.batch_id: b for b in plan.batches}
+
+
+def _validate_report_integrity(plan: BatchPlan, report: CoverageReport) -> None:
+    if not isinstance(report, CoverageReport):
+        raise ValueError("invalid_report: must be a CoverageReport instance")
+    if (
+        report.plan_sha256 != plan.plan_sha256
+        or report.plan_id != plan.plan_id
+        or report.document_id != plan.document_id
+        or report.document_sha256 != plan.document_sha256
+        or isinstance(report.page_count, bool)
+        or report.page_count != plan.page_count
+        or isinstance(report.total_core_pages, bool)
+        or report.total_core_pages != plan.page_count
+    ):
+        raise ValueError("plan_report_mismatch: report does not belong to plan")
+    if report.rule_version != BATCH_PLAN_RULE_VERSION:
+        raise ValueError(
+            f"tampered_or_inconsistent_report: unsupported rule_version {report.rule_version!r}"
+        )
+    if not isinstance(report.can_freeze_benchmark, bool) or report.can_freeze_benchmark:
+        raise ValueError(
+            "tampered_or_inconsistent_report: can_freeze_benchmark must be False"
+        )
+    if not isinstance(report.can_claim_complete, bool):
+        raise ValueError(
+            "tampered_or_inconsistent_report: can_claim_complete must be a bool"
+        )
+    if not isinstance(report.pages, tuple) or len(report.pages) != plan.page_count:
+        raise ValueError(
+            "tampered_or_inconsistent_report: pages must be a tuple of length page_count"
+        )
+    if not isinstance(report.missing_batch_ids, tuple):
+        raise ValueError(
+            "tampered_or_inconsistent_report: missing_batch_ids must be a tuple"
+        )
+
+    plan_batch_ids = [b.batch_id for b in plan.batches]
+    plan_batch_set = set(plan_batch_ids)
+    if any(
+        not isinstance(b_id, str) or b_id not in plan_batch_set
+        for b_id in report.missing_batch_ids
+    ):
+        raise ValueError(
+            "tampered_or_inconsistent_report: unknown batch in missing_batch_ids"
+        )
+    if len(set(report.missing_batch_ids)) != len(report.missing_batch_ids):
+        raise ValueError(
+            "tampered_or_inconsistent_report: duplicate missing_batch_ids"
+        )
+    missing_batch_set = set(report.missing_batch_ids)
+    expected_missing_batch_ids = tuple(
+        b.batch_id for b in plan.batches if b.batch_id in missing_batch_set
+    )
+    if report.missing_batch_ids != expected_missing_batch_ids:
+        raise ValueError(
+            "tampered_or_inconsistent_report: missing_batch_ids out of canonical order"
+        )
+
+    owner_by_page: dict[int, BatchSpec] = {}
+    neighbor_overlap_batches: dict[int, list[str]] = {
+        p: [] for p in range(plan.page_count)
+    }
+    for spec in plan.batches:
+        for p_idx in spec.core_page_indices:
+            owner_by_page[p_idx] = spec
+        for entry in spec.page_entries:
+            if not entry.is_core:
+                neighbor_overlap_batches[entry.page_index].append(spec.batch_id)
+
+    ok_pages: list[int] = []
+    partial_pages: list[int] = []
+    needs_review_pages: list[int] = []
+    failed_pages: list[int] = []
+    missing_pages: list[int] = []
+    retry_pages: list[int] = []
+    covered_count = 0
+
+    for expected_idx, item in enumerate(report.pages):
+        if not isinstance(item, PageCoverageItem):
+            raise ValueError(
+                f"tampered_or_inconsistent_report: pages[{expected_idx}] is not PageCoverageItem"
+            )
+        if isinstance(item.page_index, bool) or item.page_index != expected_idx:
+            raise ValueError(
+                f"tampered_or_inconsistent_report: page_index mismatch at {expected_idx}"
+            )
+        owner = owner_by_page[expected_idx]
+        if (
+            item.owner_batch_id != owner.batch_id
+            or isinstance(item.owner_batch_index, bool)
+            or item.owner_batch_index != owner.batch_index
+        ):
+            raise ValueError(
+                f"tampered_or_inconsistent_report: owner batch mismatch for page {expected_idx}"
+            )
+        if not isinstance(item.diagnostics, tuple):
+            raise ValueError(
+                f"tampered_or_inconsistent_report: diagnostics for page {expected_idx} must be a tuple"
+            )
+        _require_diagnostics(item.diagnostics, f"pages[{expected_idx}].diagnostics")
+
+        if not isinstance(item.overlap_observations, tuple):
+            raise ValueError(
+                f"tampered_or_inconsistent_report: overlap_observations for page {expected_idx} must be a tuple"
+            )
+        allowed_neighbors = neighbor_overlap_batches[expected_idx]
+        seen_obs_batches: list[str] = []
+        for obs_entry in item.overlap_observations:
+            if not isinstance(obs_entry, tuple) or len(obs_entry) != 2:
+                raise ValueError(
+                    f"tampered_or_inconsistent_report: invalid overlap observation on page {expected_idx}"
+                )
+            obs_batch_id, obs_status = obs_entry
+            if (
+                not isinstance(obs_batch_id, str)
+                or obs_batch_id not in allowed_neighbors
+                or obs_batch_id in missing_batch_set
+            ):
+                raise ValueError(
+                    f"tampered_or_inconsistent_report: invalid overlap batch {obs_batch_id!r} on page {expected_idx}"
+                )
+            if (
+                not isinstance(obs_status, str)
+                or obs_status not in _VALID_REPORTED_STATUSES
+            ):
+                raise ValueError(
+                    f"tampered_or_inconsistent_report: invalid overlap status {obs_status!r} on page {expected_idx}"
+                )
+            seen_obs_batches.append(obs_batch_id)
+        if seen_obs_batches != [
+            b_id for b_id in allowed_neighbors if b_id in set(seen_obs_batches)
+        ] or len(seen_obs_batches) != len(set(seen_obs_batches)):
+            raise ValueError(
+                f"tampered_or_inconsistent_report: overlap_observations out of order or duplicated on page {expected_idx}"
+            )
+
+        status = item.status
+        if owner.batch_id in missing_batch_set:
+            if status != "missing" or item.diagnostics != ("batch_result_missing",):
+                raise ValueError(
+                    f"tampered_or_inconsistent_report: page {expected_idx} in missing batch must be missing with ('batch_result_missing',)"
+                )
+        else:
+            if status == "missing":
+                if item.diagnostics != ("core_page_omitted_from_batch_result",):
+                    raise ValueError(
+                        f"tampered_or_inconsistent_report: omitted page {expected_idx} must have ('core_page_omitted_from_batch_result',)"
+                    )
+            elif status in _VALID_REPORTED_STATUSES:
+                if status != "ok" and not item.diagnostics:
+                    raise ValueError(
+                        f"tampered_or_inconsistent_report: non-ok page {expected_idx} requires diagnostics"
+                    )
+            else:
+                raise ValueError(
+                    f"tampered_or_inconsistent_report: invalid status {status!r} on page {expected_idx}"
+                )
+
+        if status == "ok":
+            ok_pages.append(expected_idx)
+            exp_covered, exp_retry, exp_review = True, False, False
+        elif status == "partial":
+            partial_pages.append(expected_idx)
+            exp_covered, exp_retry, exp_review = True, False, True
+        elif status == "needs_review":
+            needs_review_pages.append(expected_idx)
+            exp_covered, exp_retry, exp_review = False, False, True
+        elif status == "failed":
+            failed_pages.append(expected_idx)
+            exp_covered, exp_retry, exp_review = False, True, False
+        else:  # "missing"
+            missing_pages.append(expected_idx)
+            exp_covered, exp_retry, exp_review = False, True, False
+
+        if (
+            not isinstance(item.counts_as_covered, bool)
+            or item.counts_as_covered != exp_covered
+            or not isinstance(item.requires_retry, bool)
+            or item.requires_retry != exp_retry
+            or not isinstance(item.requires_review, bool)
+            or item.requires_review != exp_review
+        ):
+            raise ValueError(
+                f"tampered_or_inconsistent_report: page {expected_idx} flags disagree with status {status!r}"
+            )
+
+        if exp_covered:
+            covered_count += 1
+        if exp_retry:
+            retry_pages.append(expected_idx)
+
+    retry_page_set = set(retry_pages)
+    expected_retry_batches: list[str] = []
+    expected_completed_batches: list[str] = []
+    for spec in plan.batches:
+        if any(p in retry_page_set for p in spec.core_page_indices):
+            expected_retry_batches.append(spec.batch_id)
+        else:
+            expected_completed_batches.append(spec.batch_id)
+
+    if failed_pages or missing_pages:
+        expected_status: CoverageStatus = "incomplete"
+    elif partial_pages or needs_review_pages:
+        expected_status = "needs_review"
+    else:
+        expected_status = "complete_raw"
+
+    expected_can_claim_complete = (
+        expected_status == "complete_raw"
+        and len(ok_pages) == plan.page_count
+        and not partial_pages
+        and not needs_review_pages
+        and not failed_pages
+        and not missing_pages
+    )
+    expected_ratio = covered_count / float(plan.page_count)
+
+    if (
+        report.status != expected_status
+        or report.can_claim_complete != expected_can_claim_complete
+        or isinstance(report.covered_core_pages, bool)
+        or report.covered_core_pages != covered_count
+        or report.ok_pages != tuple(ok_pages)
+        or report.partial_pages != tuple(partial_pages)
+        or report.needs_review_pages != tuple(needs_review_pages)
+        or report.failed_pages != tuple(failed_pages)
+        or report.missing_pages != tuple(missing_pages)
+        or report.retry_page_indices != tuple(retry_pages)
+        or report.retry_batch_ids != tuple(expected_retry_batches)
+        or report.completed_batch_ids != tuple(expected_completed_batches)
+        or not isinstance(report.coverage_ratio, float)
+        or not math.isfinite(report.coverage_ratio)
+        or report.coverage_ratio != expected_ratio
+    ):
+        raise ValueError(
+            "tampered_or_inconsistent_report: summary fields or retry lists disagree with per-page coverage"
+        )
+
+    expected_payload = {
+        "rule_version": BATCH_PLAN_RULE_VERSION,
+        "plan_id": plan.plan_id,
+        "plan_sha256": plan.plan_sha256,
+        "document_id": plan.document_id,
+        "document_sha256": plan.document_sha256,
+        "page_count": plan.page_count,
+        "status": expected_status,
+        "can_claim_complete": expected_can_claim_complete,
+        "can_freeze_benchmark": False,
+        "total_core_pages": plan.page_count,
+        "covered_core_pages": covered_count,
+        "ok_pages": ok_pages,
+        "partial_pages": partial_pages,
+        "needs_review_pages": needs_review_pages,
+        "failed_pages": failed_pages,
+        "missing_pages": missing_pages,
+        "retry_page_indices": retry_pages,
+        "retry_batch_ids": expected_retry_batches,
+        "completed_batch_ids": expected_completed_batches,
+        "missing_batch_ids": list(report.missing_batch_ids),
+        "pages": [
+            {
+                "page_index": item.page_index,
+                "owner_batch_id": item.owner_batch_id,
+                "owner_batch_index": item.owner_batch_index,
+                "status": item.status,
+                "diagnostics": list(item.diagnostics),
+                "overlap_observations": [
+                    [b_id, st] for b_id, st in item.overlap_observations
+                ],
+                "counts_as_covered": item.counts_as_covered,
+                "requires_retry": item.requires_retry,
+                "requires_review": item.requires_review,
+            }
+            for item in report.pages
+        ],
+    }
+    expected_sha256 = _canonical_hash(expected_payload)
+    if (
+        not isinstance(report.report_sha256, str)
+        or not _SHA256_RE.fullmatch(report.report_sha256)
+        or report.report_sha256 != expected_sha256
+    ):
+        raise ValueError(
+            "tampered_or_inconsistent_report: report_sha256 mismatch"
+        )
 
 
 def evaluate_coverage(
@@ -745,10 +1042,7 @@ def select_retry_batches(
     are reused and not re-scheduled (SPEC 4.2, T07).
     """
     _validate_plan_integrity(plan)
-    if not isinstance(report, CoverageReport):
-        raise ValueError("invalid_report: must be a CoverageReport instance")
-    if report.plan_sha256 != plan.plan_sha256 or report.plan_id != plan.plan_id:
-        raise ValueError("plan_report_mismatch: report does not belong to plan")
+    _validate_report_integrity(plan, report)
 
     retry_set = set(report.retry_batch_ids)
     return tuple(b for b in plan.batches if b.batch_id in retry_set)
