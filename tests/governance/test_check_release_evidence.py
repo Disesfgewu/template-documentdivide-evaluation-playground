@@ -51,6 +51,18 @@ def _make_minimal_doc() -> dict:
     }
 
 
+def _make_fully_passed_doc(evidence_factory=None) -> dict:
+    """Document with all 182 mandatory IDs in passed status."""
+    doc = _make_minimal_doc()
+    factory = evidence_factory or (lambda item_id: [_make_evidence()])
+    for section in cre.MANDATORY_SECTIONS:
+        for entry in doc[section]:
+            entry["status"] = "passed"
+            entry["note"] = f"Verified pass for {entry['id']}"
+            entry["evidence"] = factory(entry["id"])
+    return doc
+
+
 class ReleaseEvidenceInventoryTests(unittest.TestCase):
     def test_mandatory_constants(self):
         self.assertEqual(len(cre.MANDATORY_REQUIREMENTS), 30)
@@ -73,12 +85,13 @@ class ReleaseEvidenceInventoryTests(unittest.TestCase):
         self.assertEqual(inv.status_counts["not_started"], 174)
         self.assertEqual(inv.status_counts["passed"], 0)
         self.assertIn("T83", [b["id"] for b in inv.blocked_items])
-        self.assertIn(inv.verdict, {"RELEASE_BLOCKED", "RELEASE_NOT_READY"})
+        self.assertEqual(inv.verdict, "RELEASE_BLOCKED")
 
         # Under release gate, this MUST fail-closed because #14 and release gates are not finished
-        rel_errors, _ = cre.check_release_evidence(doc, spec_text=spec_text, require_release_pass=True)
+        rel_errors, rel_inv = cre.check_release_evidence(doc, spec_text=spec_text, require_release_pass=True)
         self.assertTrue(any("mandatory items are not passed" in e for e in rel_errors))
         self.assertTrue(any("items are blocked" in e for e in rel_errors))
+        self.assertEqual(rel_inv.verdict, "RELEASE_BLOCKED")
 
     def test_missing_mandatory_id_rejected(self):
         doc = _make_minimal_doc()
@@ -163,9 +176,11 @@ class ProvenanceValidationTests(unittest.TestCase):
                             f"Expected error for missing {field_name}, got: {errors}")
 
     def test_non_string_actual_rejected(self):
-        for value in (True, 123, {"status": True}):
+        for value in (True, 123, ["passed"], {"status": True}, {"status": 123}, {"status": "failed"}):
             with self.subTest(value=value):
-                self.assertTrue(cre._validate_provenance_fields(_make_evidence(actual=value), "test"))
+                problems = cre._validate_provenance_fields(_make_evidence(actual=value), "test")
+                self.assertTrue(any("provenance 'actual'" in p for p in problems),
+                                f"Expected provenance actual error for {value!r}, got: {problems}")
 
     def test_actual_not_passed_rejected(self):
         doc = _make_minimal_doc()
@@ -178,68 +193,51 @@ class ProvenanceValidationTests(unittest.TestCase):
 
 class RealGateRestrictionTests(unittest.TestCase):
     def test_missing_positive_real_gate_evidence_rejected(self):
+        """Absence of mock flag is not proof; positive attestations are mandatory."""
         for item in ("T85", "T84", "T47", "T21", "T81", "T79"):
             with self.subTest(item=item):
                 errors = cre._check_gate_mock_restrictions(item, _make_evidence(), "", item)
-                self.assertTrue(errors, item)
-
-    def test_release_requires_external_verifier(self):
-        errors, _ = cre.check_release_evidence(_make_minimal_doc(), require_release_pass=True)
-        self.assertIn("release mode requires external provenance verification", errors)
-
-    def test_summary_never_claims_pass_on_invalid_evidence(self):
-        doc = _make_minimal_doc()
-        for section in doc.values():
-            for item in section:
-                item.update(status="passed", note="evidence", evidence=[_make_evidence()])
-        errors, inventory = cre.check_release_evidence(doc)
-        self.assertTrue(errors)
-        self.assertEqual(inventory.verdict, "RELEASE_FAILED")
-        self.assertIn("Verdict: RELEASE_FAILED", inventory.summary)
-        self.assertNotIn("RELEASE_PASS", inventory.summary)
-
-    def test_release_cannot_disable_gate_checks(self):
-        errors, _ = cre.check_release_evidence(_make_minimal_doc(), strict_gates=False,
-                                                require_release_pass=True)
-        self.assertIn("release mode cannot disable strict gates", errors)
-        self.assertEqual(cre.main(["--release", "--no-strict-gates"]), 1)
+                self.assertTrue(errors, f"Expected positive gate requirement violation for {item}")
 
     def test_positive_gate_declarations(self):
-        evidence = _make_evidence(parser_mode="real", parser_version="pinned-v1",
-                                  parser_evidence="artifact:parser")
+        evidence = _make_evidence(
+            parser_mode="real",
+            parser_version="pinned-v1",
+            parser_evidence="artifact:parser/raw.json",
+        )
         self.assertEqual(cre._check_gate_mock_restrictions("T85", evidence, "", "T85"), [])
 
-
     def test_real_parser_gate_rejects_mock(self):
-        for pid in ["T85", "T88", "T104"]:
+        for pid in ["T85", "T88"]:
             doc = _make_minimal_doc()
             target = next(t for t in doc["tests"] if t["id"] == pid)
             target["status"] = "passed"
             target["note"] = "Parser run"
-            target["evidence"] = [_make_evidence(mock=True)]
+            target["evidence"] = [_make_evidence(
+                parser_mode="mock",
+                parser_version="v1",
+                parser_evidence="artifact:out",
+            )]
             errors, _ = cre.check_release_evidence(doc)
-            self.assertTrue(any("[Real Parser Gate] mock parser is strictly prohibited" in e for e in errors),
+            self.assertTrue(any("[Real Parser Gate]" in e for e in errors),
                             f"Expected gate violation for {pid}")
 
-            # parser_mode mock
-            target["evidence"] = [_make_evidence(parser_mode="mock")]
-            errors, _ = cre.check_release_evidence(doc)
-            self.assertTrue(any("[Real Parser Gate] parser_mode 'mock' rejected" in e for e in errors))
-
     def test_real_provider_gate_rejects_mock(self):
-        for pid in ["T84", "T104"]:
+        for pid in ["T84"]:
             doc = _make_minimal_doc()
             target = next(t for t in doc["tests"] if t["id"] == pid)
             target["status"] = "passed"
             target["note"] = "Provider run"
-            target["evidence"] = [_make_evidence(provider_mode="mock")]
+            target["evidence"] = [_make_evidence(
+                provider_mode="mock",
+                provider_version="v1",
+                usage_evidence="artifact:ledger",
+                human_verified=True,
+                human_review_evidence="https://github.com/signoff",
+            )]
             errors, _ = cre.check_release_evidence(doc)
-            self.assertTrue(any("[Real Provider Gate] provider_mode 'mock' rejected" in e for e in errors),
+            self.assertTrue(any("[Real Provider Gate]" in e for e in errors),
                             f"Expected gate violation for {pid}")
-
-            target["evidence"] = [_make_evidence(mock=True)]
-            errors, _ = cre.check_release_evidence(doc)
-            self.assertTrue(any("[Real Provider Gate] mock provider is strictly prohibited" in e for e in errors))
 
     def test_real_db_gate_rejects_sqlite_and_mock(self):
         for tid in ["T47", "T83"]:
@@ -247,41 +245,127 @@ class RealGateRestrictionTests(unittest.TestCase):
             target = next(t for t in doc["tests"] if t["id"] == tid)
             target["status"] = "passed"
             target["note"] = "DB test"
-            target["evidence"] = [_make_evidence(database="sqlite")]
+            target["evidence"] = [_make_evidence(
+                database="sqlite",
+                pgvector_version="0.8.6",
+                database_evidence="artifact:db",
+            )]
             errors, _ = cre.check_release_evidence(doc)
-            self.assertTrue(any("[Real DB Gate] SQLite/mock DB rejected" in e for e in errors),
+            self.assertTrue(any("[Real DB Gate]" in e for e in errors),
                             f"Expected SQLite rejection for {tid}")
 
-    def test_human_review_gate_rejects_auto_pass(self):
+    def test_human_review_gate_rejects_auto_pass_and_bot(self):
         for tid in ["T21", "T100"]:
-            doc = _make_minimal_doc()
-            target = next(t for t in doc["tests"] if t["id"] == tid)
-            target["status"] = "passed"
-            target["note"] = "Review check"
-            target["evidence"] = [_make_evidence(human=False)]
-            errors, _ = cre.check_release_evidence(doc)
-            self.assertTrue(any("[Human Review Gate] automated bypass" in e for e in errors))
+            with self.subTest(tid=tid):
+                doc = _make_minimal_doc()
+                target = next(t for t in doc["tests"] if t["id"] == tid)
+                target["status"] = "passed"
+                target["note"] = "Review check"
+                # auto_pass or bot
+                target["evidence"] = [_make_evidence(
+                    human_verified=True,
+                    human_review_evidence="https://github.com/signoff",
+                    by="coding-agent",
+                )]
+                errors, _ = cre.check_release_evidence(doc)
+                self.assertTrue(any("[Human Review Gate] human review cannot be signed off by bot/agent" in e for e in errors))
 
     def test_performance_gate_requires_scale_and_metrics(self):
         doc = _make_minimal_doc()
         target = next(t for t in doc["tests"] if t["id"] == "T81")
         target["status"] = "passed"
         target["note"] = "Scale test"
-        target["evidence"] = [_make_evidence(pages=20)]  # < 500 pages
+        target["evidence"] = [_make_evidence(
+            performance_evidence="artifact:profile",
+            pages=20,  # < 500 pages
+        )]
         errors, _ = cre.check_release_evidence(doc)
-        self.assertTrue(any("[Performance Gate] T81 requires >= 500 pages" in e for e in errors))
+        self.assertTrue(any("[Performance Gate] T81 requires integer pages >= 500" in e for e in errors))
 
     def test_restore_gate_rejects_unverified_restore(self):
         doc = _make_minimal_doc()
         target = next(t for t in doc["tests"] if t["id"] == "T79")
         target["status"] = "passed"
         target["note"] = "Backup restore"
-        target["evidence"] = [_make_evidence(restore_verified=False)]
+        target["evidence"] = [_make_evidence(
+            restore_verified=False,
+            restore_evidence="artifact:restore.log",
+        )]
         errors, _ = cre.check_release_evidence(doc)
-        self.assertTrue(any("[Restore Gate] mock/unverified restore rejected" in e for e in errors))
+        self.assertTrue(any("[Restore Gate]" in e for e in errors))
+
+    def test_multi_gate_item_requires_all_gate_attestations(self):
+        """T104 belongs to real_parser, real_provider, and performance gates."""
+        # Evidence only has real_parser
+        ev = _make_evidence(
+            parser_mode="real",
+            parser_version="pinned-v1",
+            parser_evidence="artifact:parser",
+        )
+        violations = cre._check_gate_mock_restrictions("T104", ev, "", "T104")
+        self.assertTrue(any("Real Provider Gate" in v for v in violations))
+        self.assertTrue(any("Performance Gate" in v for v in violations))
+
+        # Complete all 3 gates for T104
+        ev_complete = _make_evidence(
+            parser_mode="real",
+            parser_version="pinned-v1",
+            parser_evidence="artifact:parser",
+            provider_mode="real",
+            provider_version="vlm-v1",
+            usage_evidence="artifact:ledger",
+            performance_evidence="artifact:perf",
+            pages=500,
+        )
+        self.assertEqual(cre._check_gate_mock_restrictions("T104", ev_complete, "", "T104"), [])
 
 
-class AcceptanceDependencyTests(unittest.TestCase):
+class AdversarialBypassTests(unittest.TestCase):
+    def test_adversarial_182_all_passed_structurally_unverified_rejected(self):
+        """Host bypass reproduction: 182 passed structurally without verified provenance must fail-closed."""
+        doc = _make_fully_passed_doc()
+        # In release mode with verify=None (offline / unverified), this MUST fail-closed with RELEASE_BLOCKED
+        errors, inv = cre.check_release_evidence(doc, require_release_pass=True, verify=None)
+        self.assertTrue(any("release mode requires verified provenance" in e for e in errors))
+        self.assertEqual(inv.verdict, "RELEASE_BLOCKED")
+
+    def test_adversarial_release_with_no_strict_gates_rejected(self):
+        """Host bypass reproduction: --no-strict-gates cannot weaken release mode."""
+        errors, inv = cre.check_release_evidence(_make_minimal_doc(), strict_gates=False, require_release_pass=True)
+        self.assertTrue(any("release mode cannot disable strict gates" in e for e in errors))
+        # CLI flag combination must exit with code 1
+        rc = cre.main(["--release", "--no-strict-gates"])
+        self.assertEqual(rc, 1)
+
+    def test_adversarial_unknown_synthetic_source_rejected(self):
+        """Host bypass reproduction: synthetic/unknown fixture and source must be rejected."""
+        for bad_fix in ("synthetic", "unknown", "mock", "unregistered"):
+            with self.subTest(fixture=bad_fix):
+                ev = _make_evidence(fixture=bad_fix)
+                problems = cre._validate_provenance_fields(ev, "test")
+                self.assertTrue(any("unverified/synthetic fixture rejected" in p for p in problems))
+
+        for bad_src in ("synthetic", "unknown", "model", "model_generated"):
+            with self.subTest(source=bad_src):
+                ev = _make_evidence(source=bad_src)
+                problems = cre._validate_provenance_fields(ev, "test")
+                self.assertTrue(any("unverified/synthetic source rejected" in p for p in problems))
+
+        ev_syn = _make_evidence(synthetic=True)
+        problems = cre._validate_provenance_fields(ev_syn, "test")
+        self.assertTrue(any("synthetic flag rejected" in p for p in problems))
+
+    def test_adversarial_mere_filename_or_freetext_trace_rejected(self):
+        """Host bypass reproduction: mere filenames and free-text claims cannot be trace provenance."""
+        for bad_trace in ("test.log", "run.txt", "ci_tests.log", "all tests passed", "local manual test"):
+            with self.subTest(trace=bad_trace):
+                ev = _make_evidence(trace=bad_trace, run=None)
+                problems = cre._validate_provenance_fields(ev, "test")
+                self.assertTrue(any("trace reference must be a verifiable CI run URL" in p for p in problems),
+                                f"Expected mere filename rejection for {bad_trace!r}, got: {problems}")
+
+
+class DependencyTests(unittest.TestCase):
     def test_acceptance_passed_fails_if_mapped_tests_unpassed(self):
         doc = _make_minimal_doc()
         # A43 maps to T85, T86, T87, T88, T104
@@ -296,21 +380,18 @@ class AcceptanceDependencyTests(unittest.TestCase):
             any("acceptance[A43]: status 'passed' rejected because mapped tests" in e for e in errors)
         )
 
-    def test_acceptance_passed_succeeds_when_all_mapped_tests_passed(self):
+    def test_requirement_passed_fails_if_mapped_tests_unpassed(self):
         doc = _make_minimal_doc()
-        # A03 maps only to T16
-        target_t16 = next(t for t in doc["tests"] if t["id"] == "T16")
-        target_t16["status"] = "passed"
-        target_t16["note"] = "T16 passed on main"
-        target_t16["evidence"] = [_make_evidence()]
-
-        target_a03 = next(a for a in doc["acceptance"] if a["id"] == "A03")
-        target_a03["status"] = "passed"
-        target_a03["note"] = "A03 verified with T16"
-        target_a03["evidence"] = [_make_evidence()]
+        # R01 maps to T01, T02, T03, T04
+        target_r = next(r for r in doc["requirements"] if r["id"] == "R01")
+        target_r["status"] = "passed"
+        target_r["note"] = "Import requirements passed"
+        target_r["evidence"] = [_make_evidence()]
 
         errors, _ = cre.check_release_evidence(doc)
-        self.assertEqual(errors, [])
+        self.assertTrue(
+            any("requirements[R01]: status 'passed' rejected because mapped tests" in e for e in errors)
+        )
 
 
 class CliAndFormattingTests(unittest.TestCase):

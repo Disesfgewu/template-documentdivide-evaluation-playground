@@ -220,6 +220,23 @@ def _validate_provenance_fields(ev: Dict[str, Any], where: str) -> List[str]:
     fixture = ev.get("fixture") or ev.get("fixtures") or ev.get("fixture_hash") or ev.get("fixture_hashes")
     if not fixture:
         problems.append(f"{where}: missing provenance 'fixture' (fixture reference or hash)")
+    else:
+        fix_items = fixture if isinstance(fixture, list) else [fixture]
+        for f in fix_items:
+            if not isinstance(f, str) or not f.strip():
+                problems.append(f"{where}: fixture entry must be a non-empty string, got {type(f).__name__}")
+            elif f.strip().lower() in {"unknown", "synthetic", "mock", "none", "null", "undefined", "unregistered", "fake", "todo"}:
+                problems.append(f"{where}: unverified/synthetic fixture rejected: {f!r}")
+
+    # Source / origin check
+    source = ev.get("source") or ev.get("origin")
+    if source is not None:
+        if not isinstance(source, str) or not source.strip():
+            problems.append(f"{where}: source/origin must be a non-empty string")
+        elif source.strip().lower() in {"unknown", "synthetic", "mock", "model", "model_generated", "unverified", "fake"}:
+            problems.append(f"{where}: unverified/synthetic source rejected: {source!r}")
+    if ev.get("synthetic") is True:
+        problems.append(f"{where}: synthetic flag rejected for release evidence")
 
     # 4. Profile
     profile = ev.get("profile") or ev.get("environment") or ev.get("env")
@@ -228,23 +245,34 @@ def _validate_provenance_fields(ev: Dict[str, Any], where: str) -> List[str]:
 
     # 5. Actual
     actual = ev.get("actual")
-    if actual is None or (isinstance(actual, str) and not actual.strip()):
+    if actual is None or (type(actual) is str and not actual.strip()):
         problems.append(f"{where}: missing provenance 'actual' (test execution outcome)")
-    elif isinstance(actual, str) and actual.strip().lower() != "passed":
-        problems.append(f"{where}: provenance 'actual' must be passed, got {actual!r}")
+    elif type(actual) is str:
+        if actual.strip().lower() != "passed":
+            problems.append(f"{where}: provenance 'actual' must be passed, got {actual!r}")
     elif isinstance(actual, dict):
         status = actual.get("status")
-        if not isinstance(status, str) or status.strip().lower() != "passed":
+        if type(status) is not str or status.strip().lower() != "passed":
             problems.append(f"{where}: provenance 'actual' status must be passed, got {status!r}")
-    elif not isinstance(actual, str):
-        problems.append(f"{where}: provenance 'actual' must be a passed string or status mapping")
+    else:
+        problems.append(f"{where}: provenance 'actual' must be string 'passed' or mapping with status 'passed', got {type(actual).__name__}")
 
-    # 6. Trace
+    # 6. Trace: must be a verifiable CI run URL, artifact ref, or trace UUID
     trace = ev.get("trace") or ev.get("run") or ev.get("trace_id") or ev.get("artifact_ref")
     if not trace or not isinstance(trace, str) or not trace.strip():
         problems.append(f"{where}: missing provenance 'trace' (run URL, trace ID, or artifact ref)")
-    elif ev.get("run") and not ct.RUN_URL.fullmatch(str(ev.get("run"))):
-        problems.append(f"{where}: run must be a CI run URL of this repository")
+    else:
+        trace_str = trace.strip()
+        is_url = bool(re.match(r"^https?://[^\s]+$", trace_str))
+        is_artifact_ref = bool(re.match(r"^(artifact:[0-9a-zA-Z._\-/]+|urn:[0-9a-zA-Z._\-/:+]+|sha256:[0-9a-f]{64})$", trace_str))
+        is_trace_id = bool(re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", trace_str))
+        if ev.get("run") and not ct.RUN_URL.fullmatch(str(ev.get("run"))):
+            problems.append(f"{where}: run must be a CI run URL of this repository")
+        elif not (is_url or is_artifact_ref or is_trace_id):
+            problems.append(
+                f"{where}: trace reference must be a verifiable CI run URL, artifact URI, or trace UUID, "
+                f"not a mere filename or free-text claim: {trace!r}"
+            )
 
     # Tests discoverability
     tests = ev.get("tests")
@@ -271,34 +299,76 @@ def _validate_provenance_fields(ev: Dict[str, Any], where: str) -> List[str]:
 
 
 def _check_gate_mock_restrictions(item_id: str, ev: Dict[str, Any], note: str, where: str) -> List[str]:
-    """Reject mock/stub evidence for any designated real gate."""
+    """Reject mock/stub evidence and require positive attestations for designated real gates."""
     violations = []
     note_lower = (note or "").lower()
 
     # Positive declarations and a traceable evidence reference are required; absence
     # of a mock flag is not proof that the corresponding real gate was exercised.
     requirements = {
-        "real_parser": (("parser_mode", "real"), ("parser_version", None), ("parser_evidence", None)),
-        "real_provider": (("provider_mode", "real"), ("provider_version", None), ("usage_evidence", None)),
-        "real_db": (("database", "postgresql"), ("pgvector_version", None), ("database_evidence", None)),
-        "human_review": (("human_verified", True), ("human_review_evidence", None)),
-        "performance": (("performance_evidence", None),),
-        "restore": (("restore_verified", True), ("restore_evidence", None)),
+        "real_parser": (
+            ("parser_mode", "real"),
+            ("parser_version", None),
+            ("parser_evidence", None),
+        ),
+        "real_provider": (
+            ("provider_mode", "real"),
+            ("provider_version", None),
+            ("usage_evidence", None),
+        ),
+        "real_db": (
+            ("database", "postgresql"),
+            ("pgvector_version", None),
+            ("database_evidence", None),
+        ),
+        "human_review": (
+            ("human_verified", True),
+            ("human_review_evidence", None),
+        ),
+        "performance": (
+            ("performance_evidence", None),
+        ),
+        "restore": (
+            ("restore_verified", True),
+            ("restore_evidence", None),
+        ),
     }
+
     for gate, fields in requirements.items():
         if item_id not in REAL_GATES[gate]["ids"]:
             continue
+        gate_name = REAL_GATES[gate]["name"]
         for name, expected in fields:
             value = ev.get(name)
-            valid = (isinstance(value, str) and bool(value.strip()) if expected is None
-                     else type(value) is type(expected) and value == expected)
-            if not valid:
-                violations.append(f"{where}: [{REAL_GATES[gate]['name']}] missing or invalid {name} for {item_id}")
+            if expected is None:
+                # Must be a non-empty string that is not a placeholder
+                if not isinstance(value, str) or not value.strip():
+                    violations.append(f"{where}: [{gate_name}] missing or empty {name} for {item_id}")
+                elif value.strip().lower() in {"unknown", "synthetic", "mock", "none", "null", "n/a", "todo", "unverified", "fake"}:
+                    violations.append(f"{where}: [{gate_name}] placeholder/unverified {name} rejected for {item_id}: {value!r}")
+            elif type(expected) is bool:
+                if type(value) is not bool or value is not expected:
+                    violations.append(f"{where}: [{gate_name}] {name} must be {expected} for {item_id}, got {value!r}")
+            elif type(expected) is str:
+                if not isinstance(value, str) or value.strip().lower() != expected.lower():
+                    violations.append(f"{where}: [{gate_name}] {name} must be {expected!r} for {item_id}, got {value!r}")
+
+    # Scale check for performance gate
     if item_id in {"T81", "T104"}:
         pages = ev.get("pages")
         if type(pages) is not int or pages < 500:
-            violations.append(f"{where}: [Performance Gate] {item_id} requires >= 500 pages")
+            violations.append(f"{where}: [Performance Gate] {item_id} requires integer pages >= 500, got {pages!r}")
 
+    # Reviewer identity check for human review gate
+    if item_id in REAL_GATES["human_review"]["ids"]:
+        by = ev.get("by") or ev.get("reviewer")
+        if by is not None:
+            if not isinstance(by, str) or not by.strip():
+                violations.append(f"{where}: [Human Review Gate] reviewer name must be non-empty string")
+            elif by.strip().lower() in {"coding-agent", "bot", "github-actions[bot]", "agent", "automated"}:
+                violations.append(f"{where}: [Human Review Gate] human review cannot be signed off by bot/agent: {by!r}")
+
+    # Explicit mock flag rejections
     # Real Parser Gate
     if item_id in REAL_GATES["real_parser"]["ids"]:
         if ev.get("mock") is True or ev.get("mock_parser") is True or ev.get("is_mock") is True:
@@ -330,15 +400,9 @@ def _check_gate_mock_restrictions(item_id: str, ev: Dict[str, Any], note: str, w
         if ev.get("human_verified") is False or ev.get("human") is False or ev.get("auto_pass") is True:
             violations.append(f"{where}: [Human Review Gate] automated bypass or false human signoff rejected for {item_id}")
 
-    # Performance Gate
-    if item_id in REAL_GATES["performance"]["ids"]:
-        pages = ev.get("pages")
-        if isinstance(pages, int) and pages < 500 and item_id in {"T81", "T104"}:
-            violations.append(f"{where}: [Performance Gate] {item_id} requires >= 500 pages, got {pages}")
-
     # Restore Gate
     if item_id in REAL_GATES["restore"]["ids"]:
-        if ev.get("restore_verified") is False or ev.get("mock_restore") is True:
+        if ev.get("restore_verified") is not True or ev.get("mock_restore") is True:
             violations.append(f"{where}: [Restore Gate] mock/unverified restore rejected for {item_id}")
 
     return violations
@@ -504,8 +568,6 @@ def check_release_evidence(
             if isinstance(e, dict) and "id" in e:
                 all_entries[e["id"]] = e
 
-    if require_release_pass and verify is None:
-        errors.append("release mode requires external provenance verification")
     if require_release_pass and not strict_gates:
         errors.append("release mode cannot disable strict gates")
         strict_gates = True
@@ -525,7 +587,22 @@ def check_release_evidence(
                     f"acceptance[{a_id}]: status 'passed' rejected because mapped tests {unpassed_deps} are not passed"
                 )
 
-    # 2. Detailed check of each item's evidence
+    # 2. Dependency checks: Requirement items require their mapped tests to pass
+    for r_id, mapped_tests in REQUIREMENT_TEST_MAP.items():
+        r_entry = all_entries.get(r_id)
+        if not r_entry:
+            continue
+        if r_entry.get("status") == "passed":
+            unpassed_deps = [
+                t for t in mapped_tests
+                if t not in all_entries or all_entries[t].get("status") != "passed"
+            ]
+            if unpassed_deps:
+                errors.append(
+                    f"requirements[{r_id}]: status 'passed' rejected because mapped tests {unpassed_deps} are not passed"
+                )
+
+    # 3. Detailed check of each item's evidence
     for section in MANDATORY_SECTIONS:
         entries = doc.get(section, [])
         if not isinstance(entries, list):
@@ -573,7 +650,7 @@ def check_release_evidence(
                     prov_errs = _validate_provenance_fields(ev, ev_where)
                     errors.extend(prov_errs)
 
-                    # Strict Gate check: no mock on real gates
+                    # Strict Gate check: positive attestations and no mock on real gates
                     if strict_gates:
                         gv = _check_gate_mock_restrictions(item_id, ev, note, ev_where)
                         gate_violations.extend(gv)
@@ -586,8 +663,17 @@ def check_release_evidence(
 
     inventory.gate_violations = gate_violations
 
-    # Release mode requires 100% passed and ZERO blockers/unpassed items
+    # Release mode requires 100% passed, verified provenance, and ZERO blockers/unpassed items
     if require_release_pass:
+        if verify is None:
+            errors.append(
+                "RELEASE_PASS failed: release mode requires verified provenance tied to real main commit/CI (run with --verify-provenance); unverified evidence cannot pass release"
+            )
+            inventory.blocked_items.append({
+                "id": "RELEASE_PROVENANCE_VERIFIER",
+                "title": "Unverified offline evidence",
+                "note": "Release gate requires verified provenance tied to GitHub main commit and CI run reports",
+            })
         if inventory.unpassed_mandatory:
             errors.append(
                 f"RELEASE_PASS failed: {len(inventory.unpassed_mandatory)} mandatory items are not passed "
@@ -600,7 +686,7 @@ def check_release_evidence(
             skipped_ids = [s['id'] for s in inventory.skipped_items]
             errors.append(f"RELEASE_PASS failed: {len(skipped_ids)} items are skipped: {skipped_ids}")
         if gate_violations:
-            errors.append(f"RELEASE_PASS failed: {len(gate_violations)} real gate mock violations detected")
+            errors.append(f"RELEASE_PASS failed: {len(gate_violations)} real gate violations detected")
 
     if errors:
         inventory.verdict = "RELEASE_BLOCKED" if inventory.blocked_items else "RELEASE_FAILED"
@@ -611,7 +697,15 @@ def check_release_evidence(
     else:
         inventory.verdict = "RELEASE_PASS"
 
-    inventory.summary = re.sub(r"Verdict: \w+$", f"Verdict: {inventory.verdict}", inventory.summary)
+    summary_parts = [
+        f"{inventory.status_counts.get('passed', 0)} passed",
+        f"{inventory.status_counts.get('blocked', 0)} blocked",
+        f"{inventory.status_counts.get('partial', 0)} partial",
+        f"{inventory.status_counts.get('not_started', 0)} not_started",
+        f"{inventory.status_counts.get('skipped', 0)} skipped",
+        f"{inventory.status_counts.get('missing', 0)} missing",
+    ]
+    inventory.summary = f"Mandatory SPEC items: {len(ALL_MANDATORY_IDS)} total ({', '.join(summary_parts)}). Verdict: {inventory.verdict}"
     return errors, inventory
 
 
@@ -689,9 +783,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--release", action="store_true", help="Enforce full release pass (fail-closed if any unpassed)")
     parser.add_argument("--check", action="store_true", help="Check document validity and report status")
     parser.add_argument("--verify-provenance", action="store_true", help="Verify main commit & CI runs on GitHub")
-    parser.add_argument("--no-strict-gates", action="store_true", help="Disable strict mock gate prohibition")
+    parser.add_argument("--no-strict-gates", action="store_true", help="Disable strict mock gate prohibition (forbidden in release mode)")
 
     args = parser.parse_args(argv)
+
+    if args.release and args.no_strict_gates:
+        print("check_release_evidence: --release cannot disable strict gates", file=sys.stderr)
+        return 1
 
     doc_path = args.evidence if args.evidence else args.traceability
     if not doc_path.is_file():
@@ -706,10 +804,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     spec_text = args.spec.read_text(encoding="utf-8") if args.spec.is_file() else None
 
-    verify = ct.github_verifier() if args.verify_provenance or args.release else None
-    if args.release and args.no_strict_gates:
-        print("check_release_evidence: --release cannot disable strict gates", file=sys.stderr)
-        return 1
+    # In release mode, provenance MUST be verified with GitHub
+    verify = ct.github_verifier() if (args.verify_provenance or args.release) else None
     strict_gates = not args.no_strict_gates
 
     errors, inventory = check_release_evidence(
