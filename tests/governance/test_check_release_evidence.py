@@ -364,6 +364,117 @@ class AdversarialBypassTests(unittest.TestCase):
                 self.assertTrue(any("trace reference must be a verifiable CI run URL" in p for p in problems),
                                 f"Expected mere filename rejection for {bad_trace!r}, got: {problems}")
 
+    def test_adversarial_arbitrary_freetext_gate_evidence_rejected(self):
+        """Host bypass reproduction: arbitrary non-reference strings like 'not actually a reference' must be rejected."""
+        # 1. Host specific reproduction: T85 parser_mode=real, parser_version=1, parser_evidence="not actually a reference"
+        bad_evidence = _make_evidence(
+            parser_mode="real",
+            parser_version="1",
+            parser_evidence="not actually a reference",
+        )
+        violations = cre._check_gate_mock_restrictions("T85", bad_evidence, "", "T85")
+        self.assertTrue(any("parser_evidence must be a verifiable URI or artifact reference" in v for v in violations),
+                        f"Expected reference rejection for 'not actually a reference', got: {violations}")
+
+        # 2. Free-text strings across other gate proof fields
+        cases = [
+            ("T84", {"provider_mode": "real", "provider_version": "1.0", "usage_evidence": "not a reference"}),
+            ("T47", {"database": "postgresql", "pgvector_version": "0.8.6", "database_evidence": "tested locally"}),
+            ("T21", {"human_verified": True, "human_review_evidence": "I looked at it"}),
+            ("T81", {"performance_evidence": "fast run", "pages": 500}),
+            ("T79", {"restore_verified": True, "restore_evidence": "restore was successful"}),
+        ]
+        for item_id, fields in cases:
+            with self.subTest(item_id=item_id, fields=fields):
+                ev = _make_evidence(**fields)
+                v = cre._check_gate_mock_restrictions(item_id, ev, "", item_id)
+                self.assertTrue(any("must be a verifiable URI or artifact reference" in x for x in v),
+                                f"Expected reference error for {fields}, got: {v}")
+
+    def test_adversarial_unrelated_ci_and_unverified_attestations_cannot_pass_release(self):
+        """Host finding: Unrelated successful CI + free-text attestations must not produce release PASS."""
+        doc = _make_fully_passed_doc(lambda item_id: [_make_evidence(
+            parser_mode="real",
+            parser_version="1.0",
+            parser_evidence="artifact:parser/out.json",
+            provider_mode="real",
+            provider_version="1.0",
+            usage_evidence="artifact:provider/usage.json",
+            database="postgresql",
+            pgvector_version="0.8.6",
+            database_evidence="artifact:db/mig.json",
+            human_verified=True,
+            human_review_evidence="https://github.com/org/repo/pull/1#issuecomment-1",
+            performance_evidence="artifact:perf/run.json",
+            pages=500,
+            restore_verified=True,
+            restore_evidence="artifact:restore/drill.json",
+        )])
+        # Injected fake verifier simulates that all cited tests succeeded in CI on main
+        fake_ci_verifier = lambda ev: []
+        errors, inv = cre.check_release_evidence(doc, require_release_pass=True, verify=fake_ci_verifier)
+        self.assertTrue(any("independent evidence verification not established" in e for e in errors),
+                        f"Expected release pass blocker for unverified real gates, got: {errors}")
+        self.assertEqual(inv.verdict, "RELEASE_BLOCKED")
+
+    def test_check_mode_preserves_reporting_without_claiming_machine_verification(self):
+        """In check/inventory mode, unverified real gate attestations remain blocked without claiming verification."""
+        doc = _make_fully_passed_doc(lambda item_id: [_make_evidence(
+            parser_mode="real",
+            parser_version="1.0",
+            parser_evidence="artifact:parser/out.json",
+            provider_mode="real",
+            provider_version="1.0",
+            usage_evidence="artifact:provider/usage.json",
+            database="postgresql",
+            pgvector_version="0.8.6",
+            database_evidence="artifact:db/mig.json",
+            human_verified=True,
+            human_review_evidence="https://github.com/org/repo/pull/1#issuecomment-1",
+            performance_evidence="artifact:perf/run.json",
+            pages=500,
+            restore_verified=True,
+            restore_evidence="artifact:restore/drill.json",
+        )])
+        errors, inv = cre.check_release_evidence(doc, require_release_pass=False)
+        self.assertEqual(errors, [])
+        self.assertEqual(inv.verdict, "RELEASE_BLOCKED")
+        self.assertEqual(inv.gate_counts["real_parser"]["passed"], 0)
+        self.assertEqual(inv.gate_counts["real_parser"]["declared_passed"], len(cre.REAL_GATES["real_parser"]["ids"]))
+        self.assertFalse(inv.gate_counts["real_parser"]["independent_verification_established"])
+
+        report = cre.format_inventory_report(inv, fmt="text")
+        self.assertIn("BLOCKED: independent verification not established", report)
+        self.assertIn("Verification Boundaries & Known Limitations", report)
+
+    def test_gate_verifier_independent_verification_credits_gate(self):
+        """When an explicit independent gate verifier confirms evidence, gate is credited."""
+        ev = _make_evidence(
+            parser_mode="real",
+            parser_version="1.0",
+            parser_evidence="artifact:parser/out.json",
+        )
+        gate_verifiers = {
+            "real_parser": lambda item_id, evidence: [],
+        }
+        doc = _make_minimal_doc()
+        target = next(t for t in doc["tests"] if t["id"] == "T85")
+        target["status"] = "passed"
+        target["note"] = "Parser verified"
+        target["evidence"] = [ev]
+        errors, inv = cre.check_release_evidence(doc, gate_verifiers=gate_verifiers)
+        self.assertEqual(errors, [])
+        self.assertEqual(inv.gate_counts["real_parser"]["passed"], 1)
+        self.assertTrue(inv.gate_counts["real_parser"]["independent_verification_established"])
+
+        # When gate verifier reports a failure, it must be recorded as a gate violation
+        failing_verifiers = {
+            "real_parser": lambda item_id, evidence: ["corrupted artifact hash"],
+        }
+        err_f, inv_f = cre.check_release_evidence(doc, gate_verifiers=failing_verifiers)
+        self.assertTrue(any("corrupted artifact hash" in e for e in err_f))
+        self.assertTrue(any("corrupted artifact hash" in gv for gv in inv_f.gate_violations))
+
 
 class DependencyTests(unittest.TestCase):
     def test_acceptance_passed_fails_if_mapped_tests_unpassed(self):

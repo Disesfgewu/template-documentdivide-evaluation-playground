@@ -26,7 +26,19 @@
 4. **驗收項依賴約束（Acceptance Dependencies）**：
    - 依 SPEC 18.2 與 19.7 對照表，驗收項目（A01–A48）標示 `passed` 時，其所依賴之全部底層測試（T）必須均為 `passed`。
 
-各真實閘門的 passed 證據須提供明確宣告和可供人工核對的參照：parser 使用 `parser_mode: real`、`parser_version`、`parser_evidence`；provider 使用 `provider_mode: real`、`provider_version`、`usage_evidence`；資料庫使用 `database: postgresql`、`pgvector_version`、`database_evidence`；人工覆核使用 `human_verified: true`、`human_review_evidence`；效能使用 `performance_evidence`，T81/T104 另須整數 `pages >= 500`；還原使用 `restore_verified: true`、`restore_evidence`。同一項目若屬多個閘門須同時提供相應欄位。這些欄位僅檢查宣告與參照存在，不能自行證明服務或人工操作真實發生；發布仍須獨立核對原始證據。release 模式不得停用嚴格閘門，並自動要求 GitHub provenance 驗證；無法驗證時不得發布。
+各真實閘門的 passed 證據須提供明確宣告和可供獨立驗證的格式化參照：
+- parser 使用 `parser_mode: real`、`parser_version`、`parser_evidence`；
+- provider 使用 `provider_mode: real`、`provider_version`、`usage_evidence`；
+- 資料庫使用 `database: postgresql`、`pgvector_version`、`database_evidence`；
+- 人工覆核使用 `human_verified: true`、`human_review_evidence`；
+- 效能使用 `performance_evidence`，T81/T104 另須整數 `pages >= 500`；
+- 還原使用 `restore_verified: true`、`restore_evidence`。
+
+**嚴格防偽與保守 fail-closed 邊界**：
+1. **參照格式強制**：所有 gate evidence 欄位必須為可追溯之正規 URI 或 artifact 參照（`https://...`、`artifact:...`、`urn:...`、`sha256:...`、`s3://...` 或 UUID），嚴格拒絕 `"not actually a reference"`、`"tested locally"` 等非正規字串或空值。
+2. **版本格式強制**：所有 version 欄位必須為有效版本識別字串，禁止使用 placeholder 或空白字串。
+3. **拒絕不相干 CI 與純文字宣告充數**：不相干之 CI 測試成功加上純文字宣告，絕不構成真實閘門的發布 PASS。若該閘門未能建立證據專屬之獨立驗證機制（例如獨立解析器產物查驗、真實 token 扣款收據、真 pgvector 實體驗證、人工簽核紀錄、500 頁負載 profile、拋棄式還原演練），該閘門於發布門檻下一律維持 `BLOCKED`，不冒稱機器驗證通過。
+4. **release 模式強制約束**：release 模式不得停用嚴格閘門，並自動要求 GitHub provenance 驗證；無法獨立驗證時判定為 `RELEASE_BLOCKED`（exit 1）。
 
 ## 2. 查核工具使用指令
 

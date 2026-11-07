@@ -170,7 +170,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 class EvidenceInventory:
     total_mandatory: int
     status_counts: Dict[str, int]
-    gate_counts: Dict[str, Dict[str, int]]
+    gate_counts: Dict[str, Dict[str, Any]]
     provenance_passed_count: int
     items_by_status: Dict[str, List[str]]
     blocked_items: List[Dict[str, Any]]
@@ -180,6 +180,14 @@ class EvidenceInventory:
     gate_violations: List[str]
     verdict: str  # "RELEASE_PASS", "RELEASE_BLOCKED", "RELEASE_NOT_READY"
     summary: str
+    limitations: List[str] = field(default_factory=list)
+
+
+# Verifiable reference and version patterns for gate proof and trace lineage
+EVIDENCE_REF_PATTERN = re.compile(
+    r"^(https?://[^\s]+|artifact:[0-9a-zA-Z._\-/]+|urn:[0-9a-zA-Z._\-/:+]+|sha256:[0-9a-f]{64}|s3://[0-9a-zA-Z._\-/]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+VERSION_PATTERN = re.compile(r"^[a-zA-Z0-9_\-+.]+$")
 
 
 def _validate_commit_sha(commit: Any) -> Optional[str]:
@@ -308,29 +316,29 @@ def _check_gate_mock_restrictions(item_id: str, ev: Dict[str, Any], note: str, w
     requirements = {
         "real_parser": (
             ("parser_mode", "real"),
-            ("parser_version", None),
-            ("parser_evidence", None),
+            ("parser_version", "version"),
+            ("parser_evidence", "reference"),
         ),
         "real_provider": (
             ("provider_mode", "real"),
-            ("provider_version", None),
-            ("usage_evidence", None),
+            ("provider_version", "version"),
+            ("usage_evidence", "reference"),
         ),
         "real_db": (
             ("database", "postgresql"),
-            ("pgvector_version", None),
-            ("database_evidence", None),
+            ("pgvector_version", "version"),
+            ("database_evidence", "reference"),
         ),
         "human_review": (
             ("human_verified", True),
-            ("human_review_evidence", None),
+            ("human_review_evidence", "reference"),
         ),
         "performance": (
-            ("performance_evidence", None),
+            ("performance_evidence", "reference"),
         ),
         "restore": (
             ("restore_verified", True),
-            ("restore_evidence", None),
+            ("restore_evidence", "reference"),
         ),
     }
 
@@ -340,12 +348,27 @@ def _check_gate_mock_restrictions(item_id: str, ev: Dict[str, Any], note: str, w
         gate_name = REAL_GATES[gate]["name"]
         for name, expected in fields:
             value = ev.get(name)
-            if expected is None:
-                # Must be a non-empty string that is not a placeholder
+            if expected == "reference":
+                # Must be a non-empty string that matches verifiable evidence reference pattern
                 if not isinstance(value, str) or not value.strip():
                     violations.append(f"{where}: [{gate_name}] missing or empty {name} for {item_id}")
                 elif value.strip().lower() in {"unknown", "synthetic", "mock", "none", "null", "n/a", "todo", "unverified", "fake"}:
                     violations.append(f"{where}: [{gate_name}] placeholder/unverified {name} rejected for {item_id}: {value!r}")
+                elif not EVIDENCE_REF_PATTERN.match(value.strip()):
+                    violations.append(
+                        f"{where}: [{gate_name}] {name} must be a verifiable URI or artifact reference "
+                        f"(URL, artifact:, urn:, sha256:), got {value!r}"
+                    )
+            elif expected == "version":
+                # Must be a non-empty string matching version pattern
+                if not isinstance(value, str) or not value.strip():
+                    violations.append(f"{where}: [{gate_name}] missing or empty {name} for {item_id}")
+                elif value.strip().lower() in {"unknown", "synthetic", "mock", "none", "null", "n/a", "todo", "unverified", "fake"}:
+                    violations.append(f"{where}: [{gate_name}] placeholder/unverified {name} rejected for {item_id}: {value!r}")
+                elif not VERSION_PATTERN.match(value.strip()):
+                    violations.append(
+                        f"{where}: [{gate_name}] {name} must be a valid version format, got {value!r}"
+                    )
             elif type(expected) is bool:
                 if type(value) is not bool or value is not expected:
                     violations.append(f"{where}: [{gate_name}] {name} must be {expected} for {item_id}, got {value!r}")
@@ -502,14 +525,16 @@ def build_inventory(doc: Dict[str, Any], spec_text: Optional[str] = None) -> Tup
                     errors.append(f"{prefix_key}: extra vs parsed SPEC: {extra_from_spec}")
 
     # Gate statistics
-    gate_counts: Dict[str, Dict[str, int]] = {}
+    gate_counts: Dict[str, Dict[str, Any]] = {}
     for gate_key, gate_info in REAL_GATES.items():
         gate_ids = gate_info["ids"]
-        passed_count = sum(1 for i in gate_ids if i in all_entries and all_entries[i].get("status") == "passed")
+        declared_passed_count = sum(1 for i in gate_ids if i in all_entries and all_entries[i].get("status") == "passed")
         gate_counts[gate_key] = {
             "total": len(gate_ids),
-            "passed": passed_count,
-            "unpassed": len(gate_ids) - passed_count,
+            "passed": 0,
+            "declared_passed": declared_passed_count,
+            "unpassed": len(gate_ids),
+            "independent_verification_established": False,
         }
 
     unpassed = sorted(ALL_MANDATORY_IDS - set(items_by_status.get("passed", [])))
@@ -554,6 +579,7 @@ def check_release_evidence(
     doc: Dict[str, Any],
     spec_text: Optional[str] = None,
     verify: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
+    gate_verifiers: Optional[Dict[str, Callable[[str, Dict[str, Any]], List[str]]]] = None,
     strict_gates: bool = True,
     require_release_pass: bool = False,
 ) -> Tuple[List[str], EvidenceInventory]:
@@ -561,6 +587,9 @@ def check_release_evidence(
     structural_errors, inventory = build_inventory(doc, spec_text)
     errors: List[str] = list(structural_errors)
     gate_violations: List[str] = []
+
+    verified_gate_items: Dict[str, Set[str]] = {gk: set() for gk in REAL_GATES}
+    unverified_gate_items: Dict[str, Set[str]] = {gk: set() for gk in REAL_GATES}
 
     all_entries: Dict[str, Dict[str, Any]] = {}
     for section in MANDATORY_SECTIONS:
@@ -656,14 +685,68 @@ def check_release_evidence(
                         gate_violations.extend(gv)
                         errors.extend(gv)
 
+                        # Check independent evidence verification for real gates
+                        for gk, ginfo in REAL_GATES.items():
+                            if item_id in ginfo["ids"]:
+                                if gate_verifiers and gk in gate_verifiers:
+                                    try:
+                                        gv_errs = gate_verifiers[gk](item_id, ev)
+                                        if gv_errs:
+                                            for msg in gv_errs:
+                                                gate_violations.append(f"{ev_where}: [{ginfo['name']}] {msg}")
+                                                errors.append(f"{ev_where}: [{ginfo['name']}] {msg}")
+                                        else:
+                                            verified_gate_items[gk].add(item_id)
+                                    except Exception as exc:
+                                        msg = f"gate verifier exception: {exc}"
+                                        gate_violations.append(f"{ev_where}: [{ginfo['name']}] {msg}")
+                                        errors.append(f"{ev_where}: [{ginfo['name']}] {msg}")
+                                else:
+                                    # No established independent verifier exists for this gate
+                                    unverified_gate_items[gk].add(item_id)
+
                     # External verifier (GitHub API) if provided
                     if verify is not None:
                         ver_errs = verify(ev)
                         errors.extend(f"{ev_where}: {msg}" for msg in ver_errs)
 
+    # Update gate statistics based on established independent verification
+    for gate_key, gate_info in REAL_GATES.items():
+        gate_ids = gate_info["ids"]
+        declared_passed = sum(1 for i in gate_ids if i in all_entries and all_entries[i].get("status") == "passed")
+        verified_passed = len(verified_gate_items[gate_key])
+        est = bool(gate_verifiers and gate_key in gate_verifiers)
+        inventory.gate_counts[gate_key] = {
+            "total": len(gate_ids),
+            "passed": verified_passed,
+            "declared_passed": declared_passed,
+            "unpassed": len(gate_ids) - verified_passed,
+            "independent_verification_established": est,
+        }
+
+    # Conservative fail-closed boundary: where evidence-specific independent verification
+    # cannot actually be established, keep those gates blocked rather than claim machine verification.
+    for gk, items in unverified_gate_items.items():
+        if items:
+            gname = REAL_GATES[gk]["name"]
+            blocker_note = (
+                f"[{gname}] independent evidence verification not established for {sorted(items)}; "
+                f"unrelated successful CI execution and unverified textual attestations cannot claim machine verification"
+            )
+            if require_release_pass:
+                errors.append(f"RELEASE_PASS failed: {blocker_note}")
+                gate_violations.append(blocker_note)
+            if gk not in [b.get("gate") for b in inventory.blocked_items]:
+                inventory.blocked_items.append({
+                    "id": f"UNVERIFIED_{gk.upper()}",
+                    "gate": gk,
+                    "title": f"{gname} Independent Verification Not Established",
+                    "note": blocker_note,
+                })
+
     inventory.gate_violations = gate_violations
 
-    # Release mode requires 100% passed, verified provenance, and ZERO blockers/unpassed items
+    # Release mode requires 100% passed, verified provenance, established gate verification, and ZERO blockers/unpassed items
     if require_release_pass:
         if verify is None:
             errors.append(
@@ -688,11 +771,17 @@ def check_release_evidence(
         if gate_violations:
             errors.append(f"RELEASE_PASS failed: {len(gate_violations)} real gate violations detected")
 
+    all_gates_verified = all(
+        c.get("passed", 0) == c.get("total", 0) and c.get("independent_verification_established", False)
+        for c in inventory.gate_counts.values()
+    )
+    has_unverified_claims = any(len(items) > 0 for items in unverified_gate_items.values())
+
     if errors:
         inventory.verdict = "RELEASE_BLOCKED" if inventory.blocked_items else "RELEASE_FAILED"
-    elif inventory.blocked_items:
+    elif inventory.blocked_items or has_unverified_claims:
         inventory.verdict = "RELEASE_BLOCKED"
-    elif inventory.unpassed_mandatory:
+    elif inventory.unpassed_mandatory or not all_gates_verified:
         inventory.verdict = "RELEASE_NOT_READY"
     else:
         inventory.verdict = "RELEASE_PASS"
@@ -729,15 +818,36 @@ def format_inventory_report(inv: EvidenceInventory, fmt: str = "text") -> str:
 
     lines.extend([
         "-" * 80,
-        "Real Gate Status (Mock Strictly Prohibited):",
+        "Real Gate Status (Mock Strictly Prohibited; Independent Verification Required):",
     ])
     for gate_key, counts in sorted(inv.gate_counts.items()):
         gate_info = REAL_GATES.get(gate_key, {})
         name = gate_info.get("name", gate_key)
-        passed = counts.get("passed", 0)
+        verified = counts.get("passed", 0)
+        declared = counts.get("declared_passed", 0)
         total = counts.get("total", 0)
-        status_str = "PASSED" if passed == total else f"BLOCKED ({total - passed} remaining)"
-        lines.append(f"  {name:38s}: {passed}/{total} [{status_str}]")
+        est = counts.get("independent_verification_established", False)
+        if not est:
+            if declared > 0:
+                status_str = f"BLOCKED: independent verification not established ({declared} unverified attestations)"
+            else:
+                status_str = f"BLOCKED: independent verification not established ({total} remaining)"
+        else:
+            status_str = "PASSED" if verified == total else f"BLOCKED ({total - verified} remaining)"
+        lines.append(f"  {name:38s}: {verified}/{total} verified [{status_str}]")
+
+    lines.extend([
+        "-" * 80,
+        "Verification Boundaries & Known Limitations:",
+        "  1. CI Test Runner Boundary: GitHub Actions / local runners only verify test discovery and unit test execution.",
+        "     Unrelated successful CI runs and free-text attestations DO NOT constitute verification for Real Gates.",
+        "  2. Real Parser Gate: Requires pinned Unstructured OSS / MinerU execution and artifact inspection (Issue #8).",
+        "  3. Real Provider Gate: Requires real API token expenditure logs and provider receipts (Issue #6/#11).",
+        "  4. Real PostgreSQL/pgvector Gate: Requires real PostgreSQL instance with pgvector extension (Issue #14).",
+        "  5. Human Review Gate: Requires signed human audit records; machine bots and coding agents cannot sign off.",
+        "  6. Performance & Scale Gate: Requires 500+ page benchmark runs with measured RSS, VRAM, and latency profiles.",
+        "  7. Restore Gate: Requires isolated disposable restore drills with verified checksums and RTO/RPO timing (Issue #14).",
+    ])
 
     if inv.blocked_items:
         lines.extend([
