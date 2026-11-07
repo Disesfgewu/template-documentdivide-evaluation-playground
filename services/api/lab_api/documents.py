@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from lab_db.ingest import IngestRejected, Inspection, PageGeometry, ingest_document
 from lab_db.repo import NotFound, PermissionDenied, authorize
-from lab_db.storage import LocalArtifactStore
+from lab_db.storage import LocalArtifactStore, StorageCorruption
 from lab_parser.importer import Limits, inspect_pdf
 from lab_parser.pages import extract_pages
 
@@ -614,7 +614,7 @@ async def download_document_handler(
     """Authorized project-scoped original PDF download endpoint."""
     row = conn.execute(
         """
-        SELECT dv.project_id, dv.sha256, a.object_key, a.size_bytes, a.state::text
+        SELECT dv.project_id, dv.sha256, a.sha256, a.object_key, a.size_bytes, a.state::text
         FROM document_versions dv
         JOIN artifacts a ON a.id = dv.artifact_id
         WHERE dv.id = %s
@@ -625,10 +625,7 @@ async def download_document_handler(
     if row is None:
         raise ApiError(404, "not_found", "document not found")
 
-    project_id, sha256, object_key, size_bytes, artifact_state = row
-
-    if artifact_state != "committed":
-        raise ApiError(404, "not_found", "document artifact not committed")
+    project_id, doc_sha, art_sha, object_key, size_bytes, artifact_state = row
 
     try:
         decision = authorize(
@@ -641,16 +638,26 @@ async def download_document_handler(
     except PermissionDenied as exc:
         raise ApiError(403, "permission_denied", str(exc))
 
+    if artifact_state != "committed":
+        raise ApiError(404, "not_found", "document artifact not committed")
+
+    if art_sha != doc_sha:
+        raise ApiError(500, "storage_corruption", "document and artifact checksum mismatch")
+
+    if not isinstance(size_bytes, int) or size_bytes < 0:
+        raise ApiError(500, "storage_corruption", "invalid artifact size in database")
+
     try:
-        pdf_bytes = store.open(object_key)
+        pdf_bytes = store.open(object_key, expected_size=size_bytes)
+    except StorageCorruption as exc:
+        raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
     except Exception as exc:
         raise ApiError(
             500, "storage_error", f"failed to open artifact ({type(exc).__name__})"
         )
 
-    actual_sha = hashlib.sha256(pdf_bytes).hexdigest()
-    if actual_sha != sha256:
-        raise ApiError(500, "storage_corruption", "artifact checksum mismatch")
+    if len(pdf_bytes) != size_bytes or hashlib.sha256(pdf_bytes).hexdigest() != doc_sha:
+        raise ApiError(500, "storage_corruption", "artifact checksum or size mismatch")
 
     return Response(
         content=pdf_bytes,
@@ -673,7 +680,7 @@ async def get_document_handler(
     row = conn.execute(
         """
         SELECT dv.id, dv.project_id, dv.resource_id, dv.artifact_id, dv.sha256, dv.page_count,
-               rv.logical_id, rv.revision, a.size_bytes, a.object_key, a.state::text
+               rv.logical_id, rv.revision, a.sha256, a.size_bytes, a.object_key, a.state::text
         FROM document_versions dv
         JOIN resource_versions rv ON rv.id = dv.resource_id
         JOIN artifacts a ON a.id = dv.artifact_id
@@ -690,17 +697,15 @@ async def get_document_handler(
         project_id,
         res_id,
         art_id,
-        sha,
+        doc_sha,
         page_cnt,
         logical_id,
         rev,
+        art_sha,
         size_bytes,
         obj_key,
         art_state,
     ) = row
-
-    if art_state != "committed":
-        raise ApiError(404, "not_found", "document artifact not committed")
 
     try:
         decision = authorize(
@@ -713,14 +718,29 @@ async def get_document_handler(
     except PermissionDenied as exc:
         raise ApiError(403, "permission_denied", str(exc))
 
+    if art_state != "committed":
+        raise ApiError(404, "not_found", "document artifact not committed")
+
+    if art_sha != doc_sha:
+        raise ApiError(500, "storage_corruption", "document and artifact checksum mismatch")
+
+    if not isinstance(size_bytes, int) or size_bytes < 0:
+        raise ApiError(500, "storage_corruption", "invalid artifact size in database")
+
     accept = request.headers.get("Accept", "")
     if "application/pdf" in accept:
         try:
-            pdf_bytes = store.open(obj_key)
+            pdf_bytes = store.open(obj_key, expected_size=size_bytes)
+        except StorageCorruption as exc:
+            raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
         except Exception as exc:
             raise ApiError(
                 500, "storage_error", f"failed to open artifact ({type(exc).__name__})"
             )
+
+        if len(pdf_bytes) != size_bytes or hashlib.sha256(pdf_bytes).hexdigest() != doc_sha:
+            raise ApiError(500, "storage_corruption", "artifact checksum or size mismatch")
+
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -740,7 +760,7 @@ async def get_document_handler(
             "artifact_id": str(art_id),
             "logical_id": logical_id,
             "revision": rev,
-            "sha256": sha,
+            "sha256": doc_sha,
             "size_bytes": size_bytes,
             "page_count": page_cnt,
         },

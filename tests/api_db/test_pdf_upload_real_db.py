@@ -738,6 +738,58 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 cur.execute("SELECT count(*) AS cnt FROM idempotency_keys WHERE project_id = %s", (project_id,))
                 self.assertEqual(cur.fetchone()["cnt"], 0)
 
+    def test_oversized_or_corrupt_artifact_on_disk_fails_closed_on_download(self) -> None:
+        """Corrupt or oversized file on disk fails closed with 500 storage_corruption on both download paths; authorization check precedes storage access."""
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+            _, other_owner_id = self.make_project(conn, role="owner")
+
+        owner_token = issue_actor_token(owner_id, self.secret)
+        other_token = issue_actor_token(other_owner_id, self.secret)
+
+        res = self.client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-corrupt-test",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Content-Type": "application/pdf",
+            },
+            content=self.f01_1,
+        )
+        self.assertEqual(res.status_code, 201)
+        doc_id = res.json()["id"]
+
+        # Corrupt the file on disk by appending extra bytes (making it exceed size_bytes bound)
+        disk_file = self.artifact_root / "sha256" / self.f01_1_sha256[:2] / self.f01_1_sha256
+        with open(disk_file, "ab") as f:
+            f.write(b"CORRUPT_EXTRA_TRAILING_BYTES")
+
+        # 1. Dedicated download endpoint fails closed
+        res_dl = self.client.get(
+            f"/api/v1/documents/{doc_id}/original",
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        self.assertEqual(res_dl.status_code, 500)
+        self.assertEqual(res_dl.json()["error"]["code"], "storage_corruption")
+
+        # 2. Accept: application/pdf endpoint also fails closed
+        res_accept = self.client.get(
+            f"/api/v1/documents/{doc_id}",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Accept": "application/pdf",
+            },
+        )
+        self.assertEqual(res_accept.status_code, 500)
+        self.assertEqual(res_accept.json()["error"]["code"], "storage_corruption")
+
+        # 3. Authorization check precedes storage: an unauthorized actor gets 404 without storage error or disclosure
+        res_unauth = self.client.get(
+            f"/api/v1/documents/{doc_id}/original",
+            headers={"Authorization": f"Bearer {other_token}"},
+        )
+        self.assertEqual(res_unauth.status_code, 404)
+        self.assertEqual(res_unauth.json()["error"]["code"], "not_found")
+
 
 if __name__ == "__main__":
     unittest.main()

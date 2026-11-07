@@ -1,11 +1,13 @@
 """Unit tests for PDF intake, bounded multipart streaming, and error contracts."""
 from __future__ import annotations
 
+import hashlib
 import io
 import sys
 import unittest
+import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 for _sub in (_REPO_ROOT, _REPO_ROOT / "services" / "api", _REPO_ROOT / "contracts"):
@@ -273,6 +275,251 @@ class RejectionResponseContractTests(unittest.TestCase):
         err = body["error"]
         self.assertEqual(err["code"], "invalid_pdf")
         self.assertEqual(err["message"], "document rejected: unknown_anomaly")
+
+
+class AuthenticatedBoundedDownloadRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import os
+        from unittest import mock
+        from lab_api.config import load_settings
+        from lab_api.documents import get_authenticated_actor, get_db, get_store
+        from lab_api.main import create_app
+
+        env = {
+            "LAB_ENV": "test",
+            "LAB_PROVIDER_MODE": "mock",
+            "LAB_DATABASE_URL": "postgresql://lab:s3cret@127.0.0.1:5432/lab",
+            "LAB_ARTIFACT_ROOT": "/tmp/test-artifacts",
+            "LAB_DB_CONNECT_TIMEOUT_S": "2",
+            "LAB_AUTH_SECRET": "secret-signing-key-for-tests-only-32b",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.app = create_app(settings, checks={})
+        self.client = TestClient(self.app)
+        self.doc_id = uuid.uuid4()
+        self.proj_id = uuid.uuid4()
+        self.actor_id = uuid.uuid4()
+        self.pdf_bytes = b"%PDF-1.7 regression test valid payload"
+        self.doc_sha = hashlib.sha256(self.pdf_bytes).hexdigest()
+        self.size_bytes = len(self.pdf_bytes)
+        self.obj_key = f"sha256/{self.doc_sha[:2]}/{self.doc_sha}"
+
+        self.mock_conn = MagicMock()
+        self.mock_store = MagicMock()
+        self.app.dependency_overrides[get_db] = lambda: self.mock_conn
+        self.app.dependency_overrides[get_store] = lambda: self.mock_store
+        self.app.dependency_overrides[get_authenticated_actor] = lambda: self.actor_id
+
+    def _set_db_row(
+        self,
+        *,
+        art_sha: str | None = None,
+        size_bytes: int | str = 0,
+        artifact_state: str = "committed",
+        not_found: bool = False,
+    ) -> None:
+        if not_found:
+            self.mock_conn.execute.return_value.fetchone.return_value = None
+            return
+        actual_art_sha = art_sha if art_sha is not None else self.doc_sha
+
+        def fake_execute(query, params=None):
+            m = MagicMock()
+            if "resource_versions" in query:
+                m.fetchone.return_value = (
+                    self.doc_id,
+                    self.proj_id,
+                    uuid.uuid4(),
+                    uuid.uuid4(),
+                    self.doc_sha,
+                    1,
+                    "doc-1",
+                    1,
+                    actual_art_sha,
+                    size_bytes,
+                    self.obj_key,
+                    artifact_state,
+                )
+            else:
+                m.fetchone.return_value = (
+                    self.proj_id,
+                    self.doc_sha,
+                    actual_art_sha,
+                    self.obj_key,
+                    size_bytes,
+                    artifact_state,
+                )
+            return m
+
+        self.mock_conn.execute.side_effect = fake_execute
+
+    def test_authorization_precedes_storage_on_both_representations(self) -> None:
+        """Non-members get 404, forbidden roles get 403, and storage is NEVER accessed."""
+        from lab_db.repo import Decision, NotFound, PermissionDenied
+
+        self._set_db_row(size_bytes=self.size_bytes)
+
+        # 1. Non-member actor raises NotFound -> 404
+        with patch("lab_api.documents.authorize", side_effect=NotFound("project")):
+            for url, headers in [
+                (f"/api/v1/documents/{self.doc_id}/original", {}),
+                (f"/api/v1/documents/{self.doc_id}/download", {}),
+                (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+            ]:
+                with self.subTest(auth="non_member", url=url):
+                    res = self.client.get(url, headers=headers)
+                    self.assertEqual(res.status_code, 404)
+                    self.assertEqual(res.json()["error"]["code"], "not_found")
+                    self.mock_store.open.assert_not_called()
+
+        # 2. Forbidden role raises PermissionDenied -> 403
+        with patch("lab_api.documents.authorize", side_effect=PermissionDenied("forbidden")):
+            for url, headers in [
+                (f"/api/v1/documents/{self.doc_id}/original", {}),
+                (f"/api/v1/documents/{self.doc_id}/download", {}),
+                (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+            ]:
+                with self.subTest(auth="forbidden_role", url=url):
+                    res = self.client.get(url, headers=headers)
+                    self.assertEqual(res.status_code, 403)
+                    self.assertEqual(res.json()["error"]["code"], "permission_denied")
+                    self.mock_store.open.assert_not_called()
+
+        # 3. Observer requiring explicit grant -> 403
+        with patch("lab_api.documents.authorize", return_value=Decision(role="observer", condition="explicit_grant")):
+            for url, headers in [
+                (f"/api/v1/documents/{self.doc_id}/original", {}),
+                (f"/api/v1/documents/{self.doc_id}/download", {}),
+                (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+            ]:
+                with self.subTest(auth="explicit_grant", url=url):
+                    res = self.client.get(url, headers=headers)
+                    self.assertEqual(res.status_code, 403)
+                    self.assertEqual(res.json()["error"]["code"], "permission_denied")
+                    self.mock_store.open.assert_not_called()
+
+    def test_uncommitted_artifact_fails_closed_before_storage(self) -> None:
+        """Uncommitted artifacts return 404 without touching storage."""
+        from lab_db.repo import Decision
+
+        self._set_db_row(size_bytes=self.size_bytes, artifact_state="staged")
+
+        with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            for url, headers in [
+                (f"/api/v1/documents/{self.doc_id}/original", {}),
+                (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+            ]:
+                with self.subTest(url=url):
+                    res = self.client.get(url, headers=headers)
+                    self.assertEqual(res.status_code, 404)
+                    self.assertEqual(res.json()["error"]["code"], "not_found")
+                    self.mock_store.open.assert_not_called()
+
+    def test_database_checksum_or_size_mismatch_fails_closed_before_storage(self) -> None:
+        """Database checksum or size anomalies fail closed with 500 storage_corruption without touching storage."""
+        from lab_db.repo import Decision
+
+        # 1. Checksum mismatch in database
+        self._set_db_row(art_sha="0" * 64, size_bytes=self.size_bytes)
+        with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            for url, headers in [
+                (f"/api/v1/documents/{self.doc_id}/original", {}),
+                (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+            ]:
+                with self.subTest(defect="checksum_mismatch", url=url):
+                    res = self.client.get(url, headers=headers)
+                    self.assertEqual(res.status_code, 500)
+                    self.assertEqual(res.json()["error"]["code"], "storage_corruption")
+                    self.mock_store.open.assert_not_called()
+
+        # 2. Invalid size_bytes in database (negative or string)
+        for bad_size in (-1, "bad_size"):
+            self._set_db_row(size_bytes=bad_size)
+            with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+                for url, headers in [
+                    (f"/api/v1/documents/{self.doc_id}/original", {}),
+                    (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+                ]:
+                    with self.subTest(defect="invalid_size", size=bad_size, url=url):
+                        res = self.client.get(url, headers=headers)
+                        self.assertEqual(res.status_code, 500)
+                        self.assertEqual(res.json()["error"]["code"], "storage_corruption")
+                        self.mock_store.open.assert_not_called()
+
+    def test_corrupt_or_growing_storage_fails_closed_with_bounded_read(self) -> None:
+        """Storage corruption or concurrent growth raises 500 storage_corruption; open is called with expected_size."""
+        from lab_db.repo import Decision
+        from lab_db.storage import StorageCorruption
+
+        self._set_db_row(size_bytes=self.size_bytes)
+        self.mock_store.open.side_effect = StorageCorruption("object grew concurrently")
+
+        with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            for url, headers in [
+                (f"/api/v1/documents/{self.doc_id}/original", {}),
+                (f"/api/v1/documents/{self.doc_id}", {"Accept": "application/pdf"}),
+            ]:
+                self.mock_store.open.reset_mock()
+                with self.subTest(url=url):
+                    res = self.client.get(url, headers=headers)
+                    self.assertEqual(res.status_code, 500)
+                    self.assertEqual(res.json()["error"]["code"], "storage_corruption")
+                    self.mock_store.open.assert_called_once_with(self.obj_key, expected_size=self.size_bytes)
+
+    def test_successful_download_on_both_representations(self) -> None:
+        """Both download representations validate committed size and hash and return 200 with matching bytes."""
+        from lab_db.repo import Decision
+
+        self._set_db_row(size_bytes=self.size_bytes)
+        self.mock_store.open.return_value = self.pdf_bytes
+
+        with patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            # 1. Original / download endpoints
+            for path in [
+                f"/api/v1/documents/{self.doc_id}/original",
+                f"/documents/{self.doc_id}/original",
+                f"/api/v1/documents/{self.doc_id}/download",
+                f"/documents/{self.doc_id}/download",
+            ]:
+                self.mock_store.open.reset_mock()
+                with self.subTest(path=path):
+                    res = self.client.get(path)
+                    self.assertEqual(res.status_code, 200)
+                    self.assertEqual(res.headers["Content-Type"], "application/pdf")
+                    self.assertEqual(res.headers["Content-Length"], str(self.size_bytes))
+                    self.assertEqual(
+                        res.headers["Content-Disposition"],
+                        f'attachment; filename="{self.doc_id}.pdf"',
+                    )
+                    self.assertEqual(res.content, self.pdf_bytes)
+                    self.mock_store.open.assert_called_once_with(self.obj_key, expected_size=self.size_bytes)
+
+            # 2. Document endpoint with Accept: application/pdf
+            for path in [
+                f"/api/v1/documents/{self.doc_id}",
+                f"/documents/{self.doc_id}",
+            ]:
+                self.mock_store.open.reset_mock()
+                with self.subTest(path=path):
+                    res = self.client.get(path, headers={"Accept": "application/pdf"})
+                    self.assertEqual(res.status_code, 200)
+                    self.assertEqual(res.headers["Content-Type"], "application/pdf")
+                    self.assertEqual(res.headers["Content-Length"], str(self.size_bytes))
+                    self.assertEqual(
+                        res.headers["Content-Disposition"],
+                        f'attachment; filename="{self.doc_id}.pdf"',
+                    )
+                    self.assertEqual(res.content, self.pdf_bytes)
+                    self.mock_store.open.assert_called_once_with(self.obj_key, expected_size=self.size_bytes)
+
+            # 3. Document endpoint without Accept: application/pdf returns metadata JSON without opening store
+            self.mock_store.open.reset_mock()
+            res_meta = self.client.get(f"/api/v1/documents/{self.doc_id}")
+            self.assertEqual(res_meta.status_code, 200)
+            self.assertEqual(res_meta.json()["sha256"], self.doc_sha)
+            self.assertEqual(res_meta.json()["size_bytes"], self.size_bytes)
+            self.mock_store.open.assert_not_called()
 
 
 if __name__ == "__main__":
