@@ -371,12 +371,9 @@ def _metric_matches_golden(golden: MetricResult, actual: MetricResult) -> list[s
     a_den = Fraction(Decimal(repr(actual.denominator)))
     g_ratio = g_num / g_den
     a_ratio = a_num / a_den
-    if not (
-        math.isclose(actual.numerator, golden.numerator, rel_tol=1e-9, abs_tol=1e-9)
-        and math.isclose(actual.denominator, golden.denominator, rel_tol=1e-9, abs_tol=1e-9)
-    ):
+    if (actual.numerator, actual.denominator) != (golden.numerator, golden.denominator):
         reasons.append("numerator or denominator differs from golden")
-    if not math.isclose(float(a_ratio), float(g_ratio), rel_tol=1e-9, abs_tol=1e-9):
+    if g_ratio != a_ratio:
         reasons.append(
             f"ratio {actual.numerator}/{actual.denominator} != golden {golden.numerator}/{golden.denominator}"
         )
@@ -802,9 +799,9 @@ def evaluate_judge_calibration(
         expected_den_float = float(Decimal(den_frac.numerator) / Decimal(den_frac.denominator))
         if (
             actual_den == 0
-            or not math.isclose(jout.correctness_result.numerator, expected_num_float, rel_tol=1e-9, abs_tol=1e-9)
-            or not math.isclose(jout.correctness_result.denominator, expected_den_float, rel_tol=1e-9, abs_tol=1e-9)
-            or not math.isclose(float(actual_num / actual_den), float(num_frac / den_frac), rel_tol=1e-9, abs_tol=1e-9)
+            or not math.isclose(jout.correctness_result.numerator, expected_num_float, rel_tol=1e-12, abs_tol=0.0)
+            or not math.isclose(jout.correctness_result.denominator, expected_den_float, rel_tol=1e-12, abs_tol=0.0)
+            or not math.isclose(float(actual_num / actual_den), float(num_frac / den_frac), rel_tol=1e-12, abs_tol=0.0)
         ):
             add_diag(
                 f"{opath}.correctness_result",
