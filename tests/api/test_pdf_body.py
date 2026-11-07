@@ -551,6 +551,116 @@ class DisconnectAndMalformedStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cm.exception.status_code, 400)
         self.assertEqual(cm.exception.code, "invalid_request")
 
+    async def test_non_container_headers_rejected_safely(self):
+        """Reject non-container ASGI headers (int, None, str, bytes, dict, or missing)."""
+        bad_headers = [
+            1,
+            None,
+            "content-type: application/pdf",
+            b"content-type: application/pdf",
+            {"content-type": b"application/pdf"},
+        ]
+        for bh in bad_headers:
+            with self.subTest(headers=bh):
+                called = False
+
+                async def receive():
+                    nonlocal called
+                    called = True
+                    return {"type": "http.request", "body": b"%PDF-1.4\n"}
+
+                scope = {"type": "http", "method": "POST", "path": "/upload", "headers": bh}
+                with self.assertRaises(PdfRequestBodyError) as cm:
+                    await read_pdf_request_body(scope, receive)
+                self.assertEqual(cm.exception.status_code, 400)
+                self.assertEqual(cm.exception.code, "invalid_request")
+                self.assertFalse(called, "receive() must not be called when headers container is malformed")
+
+        # Missing 'headers' key entirely in scope
+        called = False
+
+        async def receive_missing():
+            nonlocal called
+            called = True
+            return {"type": "http.request", "body": b"%PDF-1.4\n"}
+
+        scope_missing = {"type": "http", "method": "POST", "path": "/upload"}
+        with self.assertRaises(PdfRequestBodyError) as cm:
+            await read_pdf_request_body(scope_missing, receive_missing)
+        self.assertEqual(cm.exception.status_code, 400)
+        self.assertEqual(cm.exception.code, "invalid_request")
+        self.assertFalse(called, "receive() must not be called when headers key is missing")
+
+    async def test_non_bytes_header_pairs_and_unicode_strings_rejected_safely(self):
+        """Reject non-pair items, non-bytes elements, and Unicode strings in headers without crashing."""
+        malformed_headers = [
+            # Non-pair / wrong arity
+            [1],
+            [(b"content-type",)],
+            [(b"content-type", b"application/pdf", b"unexpected")],
+            # Non-bytes elements
+            [(b"content-type", 123)],
+            [(123, b"application/pdf")],
+            [(b"content-type", None)],
+            # Unicode strings (str instead of bytes)
+            [("content-type", "application/pdf")],
+            [(b"content-type", "application/pdf")],
+            [("content-type", b"application/pdf")],
+            # Non-latin1 Unicode string (must not raise UnicodeEncodeError)
+            [(b"content-type", b"application/pdf"), (b"x-custom", "\u2603")],
+            [(b"content-type", b"application/pdf"), ("\u1234", b"val")],
+            [(b"content-type", b"application/pdf"), (b"\xff\xfe", "\U0001F600")],
+        ]
+        for mh in malformed_headers:
+            with self.subTest(headers=mh):
+                called = False
+
+                async def receive():
+                    nonlocal called
+                    called = True
+                    return {"type": "http.request", "body": b"%PDF-1.4\n"}
+
+                scope = {"type": "http", "method": "POST", "path": "/upload", "headers": mh}
+                with self.assertRaises(PdfRequestBodyError) as cm:
+                    await read_pdf_request_body(scope, receive)
+                self.assertEqual(cm.exception.status_code, 400)
+                self.assertEqual(cm.exception.code, "invalid_request")
+                self.assertFalse(called, "receive() must not be called when headers contain malformed pairs or strings")
+
+    async def test_malformed_more_body_rejected_without_extra_receive(self):
+        """Require more_body to be an exact boolean and reject malformed values without another receive."""
+        bad_more_bodies = [
+            "false",
+            "true",
+            1,
+            0,
+            None,
+            [],
+            {},
+            object(),
+        ]
+        for bad_mb in bad_more_bodies:
+            with self.subTest(more_body=bad_mb):
+                call_count = 0
+
+                async def receive():
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count == 1:
+                        return {
+                            "type": "http.request",
+                            "body": b"%PDF-1.4 header chunk\n",
+                            "more_body": bad_mb,
+                        }
+                    raise AssertionError("receive() should not be called again after malformed more_body")
+
+                scope = make_scope()
+                with self.assertRaises(PdfRequestBodyError) as cm:
+                    await read_pdf_request_body(scope, receive)
+                self.assertEqual(cm.exception.status_code, 400)
+                self.assertEqual(cm.exception.code, "invalid_request")
+                self.assertEqual(call_count, 1, "receive() should have been called exactly once")
+
 
 class ErrorRedactionAndContractTests(unittest.IsolatedAsyncioTestCase):
     """Verify error messages never leak sensitive canaries, paths, or body content."""
@@ -602,6 +712,47 @@ class ErrorRedactionAndContractTests(unittest.IsolatedAsyncioTestCase):
         err_text3 = str(cm3.exception) + " " + repr(cm3.exception) + " " + cm3.exception.detail
         self.assertNotIn("canary-confidential", err_text3)
         self.assertNotIn(self.CANARY_PATH, err_text3)
+
+        # 4. Malformed headers containing canary secret (str or Unicode)
+        scope4 = make_scope(
+            headers=[
+                (b"content-type", b"application/pdf"),
+                (f"canary-{self.CANARY_SECRET}", b"val"),
+            ],
+            path=self.CANARY_PATH,
+        )
+        with self.assertRaises(PdfRequestBodyError) as cm4:
+            await read_pdf_request_body(scope4, make_receive([]))
+        err_text4 = str(cm4.exception) + " " + repr(cm4.exception) + " " + cm4.exception.detail
+        self.assertNotIn(self.CANARY_SECRET, err_text4)
+        self.assertNotIn(self.CANARY_PATH, err_text4)
+        self.assertNotIn(self.CANARY_SECRET, json.dumps(cm4.exception.to_error_body()))
+
+        scope5 = make_scope(
+            headers=[
+                (b"content-type", b"application/pdf"),
+                (b"x-token", f"canary-unicode-\u2603-{self.CANARY_SECRET}"),
+            ],
+            path=self.CANARY_PATH,
+        )
+        with self.assertRaises(PdfRequestBodyError) as cm5:
+            await read_pdf_request_body(scope5, make_receive([]))
+        err_text5 = str(cm5.exception) + " " + repr(cm5.exception) + " " + cm5.exception.detail
+        self.assertNotIn(self.CANARY_SECRET, err_text5)
+        self.assertNotIn(self.CANARY_PATH, err_text5)
+        self.assertNotIn(self.CANARY_SECRET, json.dumps(cm5.exception.to_error_body()))
+
+        # 5. Malformed more_body containing canary secret
+        scope6 = make_scope(path=self.CANARY_PATH)
+        receive6 = make_receive([
+            {"type": "http.request", "body": b"chunk", "more_body": f"canary-{self.CANARY_SECRET}"}
+        ])
+        with self.assertRaises(PdfRequestBodyError) as cm6:
+            await read_pdf_request_body(scope6, receive6)
+        err_text6 = str(cm6.exception) + " " + repr(cm6.exception) + " " + cm6.exception.detail
+        self.assertNotIn(self.CANARY_SECRET, err_text6)
+        self.assertNotIn(self.CANARY_PATH, err_text6)
+        self.assertNotIn(self.CANARY_SECRET, json.dumps(cm6.exception.to_error_body()))
 
     def test_error_response_conforms_to_contract_structure(self):
         err = PdfRequestBodyError(413, "file_too_large", "request body exceeds size limit")

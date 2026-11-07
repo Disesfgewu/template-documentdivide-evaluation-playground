@@ -35,6 +35,7 @@ _CONTENT_TYPE_PDF = b"application/pdf"
 # Fixed, sanitized error messages (never interpolate headers, paths, or body).
 _MSG_INVALID_SCOPE = "invalid ASGI scope"
 _MSG_EXPECTED_HTTP = "expected HTTP ASGI scope"
+_MSG_INVALID_HEADERS = "invalid ASGI headers"
 _MSG_INVALID_RECEIVE = "receive callable must be provided"
 _MSG_INVALID_CONTENT_TYPE = "Content-Type must be application/pdf"
 _MSG_INVALID_CONTENT_LENGTH = "invalid Content-Length header"
@@ -179,15 +180,30 @@ async def read_pdf_request_body(
     content_types: list[bytes] = []
     content_lengths: list[bytes] = []
 
-    raw_headers = scope.get("headers") or ()
+    raw_headers = scope.get("headers")
+    if not isinstance(raw_headers, (list, tuple)):
+        raise PdfRequestBodyError(
+            status_code=400,
+            code="invalid_request",
+            message=_MSG_INVALID_HEADERS,
+        )
+
     for item in raw_headers:
         if not isinstance(item, (tuple, list)) or len(item) != 2:
-            continue
+            raise PdfRequestBodyError(
+                status_code=400,
+                code="invalid_request",
+                message=_MSG_INVALID_HEADERS,
+            )
         raw_name, raw_value = item
-        if not isinstance(raw_name, (bytes, str)) or not isinstance(raw_value, (bytes, str)):
-            continue
-        name = raw_name.lower() if isinstance(raw_name, bytes) else raw_name.encode("latin-1").lower()
-        val = raw_value if isinstance(raw_value, bytes) else raw_value.encode("latin-1")
+        if not isinstance(raw_name, bytes) or not isinstance(raw_value, bytes):
+            raise PdfRequestBodyError(
+                status_code=400,
+                code="invalid_request",
+                message=_MSG_INVALID_HEADERS,
+            )
+        name = raw_name.lower()
+        val = raw_value
         if name == b"content-type":
             content_types.append(val)
         elif name == b"content-length":
@@ -279,6 +295,14 @@ async def read_pdf_request_body(
                 message=_MSG_INVALID_MESSAGE_BODY,
             )
 
+        more_body = message.get("more_body", False)
+        if not isinstance(more_body, bool):
+            raise PdfRequestBodyError(
+                status_code=400,
+                code="invalid_request",
+                message=_MSG_INVALID_MESSAGE_FORMAT,
+            )
+
         chunk = bytes(body) if not isinstance(body, bytes) else body
         if chunk:
             total_bytes += len(chunk)
@@ -296,7 +320,6 @@ async def read_pdf_request_body(
                 )
             chunks.append(chunk)
 
-        more_body = bool(message.get("more_body", False))
         if not more_body:
             break
 
