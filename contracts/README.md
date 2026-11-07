@@ -158,3 +158,11 @@ scripts/check.sh --scope contracts
   - 刪除欄位。
 - 在同一版本內，只允許新增選填欄位，或不改變既有合法輸入的修正。
 - 擴充的值放在 `attributes`，不能用來覆寫核心語意。
+
+## Question generation cache identity
+
+`lab_contracts/generation_cache.py` defines the deterministic identity and
+provenance boundary for question generation cache keys (SPEC 6, 10.2, 16,
+19.6). See [generation cache identity](../docs/GENERATION_CACHE.md) for the
+canonicalization rules, invalidation invariants and remaining durable/workflow
+gates.
