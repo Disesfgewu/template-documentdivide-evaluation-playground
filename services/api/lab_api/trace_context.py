@@ -100,6 +100,25 @@ def request_trace_context(request: Any) -> TraceContext | None:
     return current_trace_context()
 
 
+class _OwnedTraceContext:
+    """Internal marker wrapper so nested TraceContextMiddleware detects only its own context."""
+
+    __slots__ = ("ctx",)
+
+    def __init__(self, ctx: TraceContext) -> None:
+        self.ctx = ctx
+
+
+def _scope_owned_trace_context(scope: dict[str, Any]) -> TraceContext | None:
+    """Read TraceContext strictly from an outer TraceContextMiddleware on this scope."""
+    scope_state = scope.get("state")
+    if isinstance(scope_state, dict):
+        owned = scope_state.get("_lab_trace_context_owned")
+        if isinstance(owned, _OwnedTraceContext) and isinstance(owned.ctx, TraceContext):
+            return owned.ctx
+    return None
+
+
 def _is_valid_hex(value: str, length: int) -> bool:
     if not isinstance(value, str) or len(value) != length:
         return False
@@ -310,24 +329,33 @@ class TraceContextMiddleware:
             await self.app(scope, receive, send)
             return
 
-        raw_headers = scope.get("headers", ())
-        trace_ctx = resolve_request_trace_context(
-            raw_headers,
-            trust_remote_traceparent=self.trust_remote_traceparent,
-        )
+        # Re-use already-established request TraceContext if an outer
+        # TraceContextMiddleware (such as FastAPI's outermost build_middleware_stack
+        # wrapper) already initialized this scope.
+        existing_ctx = _scope_owned_trace_context(scope)
+        if existing_ctx is not None:
+            trace_ctx = existing_ctx
+            child_scope = scope
+        else:
+            raw_headers = scope.get("headers", ())
+            trace_ctx = resolve_request_trace_context(
+                raw_headers,
+                trust_remote_traceparent=self.trust_remote_traceparent,
+            )
 
-        # Copy scope and state so caller-owned dictionaries are never mutated.
-        caller_state = scope.get("state")
-        child_state = dict(caller_state) if isinstance(caller_state, dict) else {}
-        child_state["trace_context"] = trace_ctx
-        child_state["request_id"] = trace_ctx.request_id
-        child_state["trace_id"] = trace_ctx.trace_id
-        child_state["span_id"] = trace_ctx.span_id
-        child_state["parent_span_id"] = trace_ctx.parent_span_id
+            # Copy scope and state so caller-owned dictionaries are never mutated.
+            caller_state = scope.get("state")
+            child_state = dict(caller_state) if isinstance(caller_state, dict) else {}
+            child_state["_lab_trace_context_owned"] = _OwnedTraceContext(trace_ctx)
+            child_state["trace_context"] = trace_ctx
+            child_state["request_id"] = trace_ctx.request_id
+            child_state["trace_id"] = trace_ctx.trace_id
+            child_state["span_id"] = trace_ctx.span_id
+            child_state["parent_span_id"] = trace_ctx.parent_span_id
 
-        child_scope = dict(scope)
-        child_scope["state"] = child_state
-        child_scope["headers"] = _sanitize_request_headers(raw_headers, trace_ctx)
+            child_scope = dict(scope)
+            child_scope["state"] = child_state
+            child_scope["headers"] = _sanitize_request_headers(raw_headers, trace_ctx)
 
         async def send_with_correlation(message: dict[str, Any]) -> None:
             if isinstance(message, dict) and message.get("type") == "http.response.start":

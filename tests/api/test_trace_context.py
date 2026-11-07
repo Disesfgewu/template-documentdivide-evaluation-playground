@@ -10,7 +10,7 @@ from typing import Any
 from unittest import mock
 
 import httpx
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
@@ -347,6 +347,108 @@ class FastAPITraceContextTests(unittest.TestCase):
                 "ingress",
             },
         )
+
+    def test_unhandled_endpoint_exception_500_emits_correlation_headers_and_preserves_reraise(self):
+        app, captured = self._build_observed_app(trust_remote=True)
+        self.assertIsInstance(app, FastAPI)
+        canary = "unhandled-exception-canary-4455"
+
+        @app.get("/_test/boom")
+        async def boom_endpoint(request: Request) -> JSONResponse:
+            captured.append(
+                {
+                    "req_ctx": request_trace_context(request),
+                    "var_ctx": current_trace_context(),
+                }
+            )
+            raise RuntimeError(f"boom {canary}")
+
+        # 1. With raise_server_exceptions=False, ServerErrorMiddleware returns HTTP 500
+        # and must still include X-Request-ID and traceparent without leaking canary.
+        client_no_raise = TestClient(app, raise_server_exceptions=False)
+        resp_500 = client_no_raise.get(
+            "/_test/boom",
+            headers={
+                "traceparent": VALID_TRACEPARENT_SAMPLED,
+                "X-Request-ID": f"spoofed-{canary}",
+            },
+        )
+        self.assertEqual(resp_500.status_code, 500)
+        self.assertEqual(len(captured), 1)
+        ctx_500: TraceContext = captured[0]["req_ctx"]
+        self.assertIsNotNone(ctx_500)
+        self.assertEqual(ctx_500, captured[0]["var_ctx"])
+        self.assertEqual(ctx_500.trace_id, VALID_TRACE_ID)
+        self.assertEqual(ctx_500.parent_span_id, VALID_SPAN_ID)
+        self.assertEqual(resp_500.headers.get(REQUEST_ID_HEADER), ctx_500.request_id)
+        self.assertEqual(resp_500.headers.get(TRACEPARENT_HEADER), ctx_500.traceparent)
+        self.assertEqual(
+            resp_500.headers.get_list(REQUEST_ID_HEADER),
+            [ctx_500.request_id],
+        )
+        self.assertEqual(
+            resp_500.headers.get_list(TRACEPARENT_HEADER),
+            [ctx_500.traceparent],
+        )
+        self.assertNotIn(canary, resp_500.text)
+        for h_name, h_val in resp_500.headers.items():
+            self.assertNotIn(canary, f"{h_name}:{h_val}")
+        self.assertIsNone(current_trace_context())
+
+        # 2. Normal response on the same app still returns 200 with exact single correlation headers.
+        resp_ok = client_no_raise.get(
+            "/_test/inspect",
+            headers={"traceparent": VALID_TRACEPARENT_UNSAMPLED},
+        )
+        self.assertEqual(resp_ok.status_code, 200)
+        ctx_ok: TraceContext = captured[-1]["req_ctx"]
+        self.assertEqual(resp_ok.headers.get_list(REQUEST_ID_HEADER), [ctx_ok.request_id])
+        self.assertEqual(resp_ok.headers.get_list(TRACEPARENT_HEADER), [ctx_ok.traceparent])
+
+        # 3. Default TestClient (raise_server_exceptions=True) still re-raises the unhandled exception
+        # and resets current_trace_context().
+        client_raise = TestClient(app, raise_server_exceptions=True)
+        with self.assertRaises(RuntimeError):
+            client_raise.get("/_test/boom")
+        self.assertIsNone(current_trace_context())
+
+    def test_prepopulated_caller_scope_trace_context_is_not_trusted(self):
+        observed: dict[str, Any] = {}
+
+        async def raw_app(scope, receive, send):
+            observed["ctx"] = request_trace_context(scope)
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        mw = TraceContextMiddleware(raw_app, trust_remote_traceparent=False)
+        forged_ctx = TraceContext(
+            schema_version=TRACE_SCHEMA_VERSION,
+            request_id="req_" + ("a" * 32),
+            trace_id=VALID_TRACE_ID,
+            span_id=VALID_SPAN_ID,
+            parent_span_id=None,
+            sampled=True,
+            ingress="accepted",
+        )
+        caller_scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [],
+            "state": {"trace_context": forged_ctx},
+        }
+
+        async def dummy():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def dummy_send(_msg):
+            pass
+
+        asyncio.run(mw(caller_scope, dummy, dummy_send))
+        actual_ctx: TraceContext = observed["ctx"]
+        self.assertNotEqual(actual_ctx, forged_ctx)
+        self.assertNotEqual(actual_ctx.trace_id, VALID_TRACE_ID)
+        self.assertEqual(caller_scope["state"], {"trace_context": forged_ctx})
 
 
 class ASGIBoundaryAndConcurrencyTests(unittest.TestCase):

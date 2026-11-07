@@ -14,6 +14,28 @@ from .trace_context import TraceContextMiddleware
 API_VERSION = "0.1.0"
 
 
+class _TraceCorrelatedFastAPI(FastAPI):
+    """FastAPI subclass that places TraceContextMiddleware outside ServerErrorMiddleware.
+
+    Starlette's default ``build_middleware_stack`` wraps ``ServerErrorMiddleware``
+    outside ``user_middleware`` (``add_middleware``), so unhandled endpoint
+    exceptions turned into HTTP 500 responses bypass ``add_middleware`` wrappers.
+    Wrapping the built stack in ``TraceContextMiddleware`` ensures 500 responses
+    and custom 500 exception handlers still receive the request's correlation
+    state and emit ``X-Request-ID`` and ``traceparent`` headers while preserving
+    ``ServerErrorMiddleware``'s re-raise semantics.
+    """
+
+    _trust_remote_traceparent: bool = False
+
+    def build_middleware_stack(self):
+        stack = super().build_middleware_stack()
+        return TraceContextMiddleware(
+            stack,
+            trust_remote_traceparent=self._trust_remote_traceparent,
+        )
+
+
 def create_app(
     settings: Settings | None = None,
     checks: dict[str, Check] | None = None,
@@ -28,7 +50,11 @@ def create_app(
         else bool(trust_remote_traceparent)
     )
 
-    app = FastAPI(title="document-seperater-playground LAB API", version=API_VERSION)
+    app = _TraceCorrelatedFastAPI(
+        title="document-seperater-playground LAB API",
+        version=API_VERSION,
+    )
+    app._trust_remote_traceparent = trust_traceparent
     app.state.settings = settings
     app.add_middleware(
         TraceContextMiddleware,
