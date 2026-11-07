@@ -9,16 +9,31 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings, load_settings
 from .readiness import Check, default_checks, run_checks
+from .trace_context import TraceContextMiddleware
 
 API_VERSION = "0.1.0"
 
 
-def create_app(settings: Settings | None = None, checks: dict[str, Check] | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    checks: dict[str, Check] | None = None,
+    *,
+    trust_remote_traceparent: bool | None = None,
+) -> FastAPI:
     settings = settings or load_settings()
     checks = checks if checks is not None else default_checks(settings)
+    trust_traceparent = (
+        settings.trust_remote_traceparent
+        if trust_remote_traceparent is None
+        else bool(trust_remote_traceparent)
+    )
 
     app = FastAPI(title="document-seperater-playground LAB API", version=API_VERSION)
     app.state.settings = settings
+    app.add_middleware(
+        TraceContextMiddleware,
+        trust_remote_traceparent=trust_traceparent,
+    )
 
     @app.get("/healthz")
     def healthz() -> dict:

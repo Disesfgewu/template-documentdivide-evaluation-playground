@@ -27,6 +27,20 @@ class ConfigTests(unittest.TestCase):
         self.assertIs(s.env, Environment.dev)
         self.assertIs(s.provider_mode, ProviderMode.mock)
         self.assertEqual(s.db_connect_timeout_s, 3.0)
+        self.assertFalse(s.trust_remote_traceparent)
+
+    def test_trust_remote_traceparent_strict_boolean(self):
+        for raw, expected in (("true", True), ("TRUE", True), ("1", True), ("false", False), ("0", False)):
+            with self.subTest(raw=raw):
+                self.assertIs(load({**GOOD, "LAB_TRUST_REMOTE_TRACEPARENT": raw}).trust_remote_traceparent, expected)
+        for bad in ("yes", "no", "on", "off", f"invalid-{SECRET}"):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError) as cm:
+                load({**GOOD, "LAB_TRUST_REMOTE_TRACEPARENT": bad})
+            self.assertEqual(
+                str(cm.exception),
+                "invalid LAB configuration: LAB_TRUST_REMOTE_TRACEPARENT: must be a boolean",
+            )
+            self.assertNotIn(SECRET, str(cm.exception))
 
     def test_every_required_var_is_required(self):
         for key in GOOD:
