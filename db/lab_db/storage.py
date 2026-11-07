@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import hashlib
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 import uuid
 
@@ -29,11 +31,45 @@ class StoredObject:
 
 
 def _fsync_dir(directory: Path) -> None:
-    dir_fd = os.open(directory, os.O_RDONLY)
+    dir_fd = os.open(
+        directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
     try:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
+
+def _open_dir_no_follow(parent_fd: int, name: str, desc: str) -> int:
+    try:
+        st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise
+    if stat.S_ISLNK(st.st_mode):
+        raise StorageCorruption(f"{desc} component {name!r} is a symlink")
+    if not stat.S_ISDIR(st.st_mode):
+        raise StorageCorruption(f"{desc} component {name!r} is not a directory")
+    try:
+        return os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise StorageCorruption(
+                f"{desc} component {name!r} is invalid or symlink"
+            ) from e
+        raise
+
+
+def _ensure_dir_no_follow(parent_fd: int, name: str, desc: str) -> int:
+    try:
+        os.mkdir(name, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    return _open_dir_no_follow(parent_fd, name, desc)
 
 
 class LocalArtifactStore:
@@ -45,6 +81,8 @@ class LocalArtifactStore:
         root_path = Path(root)
         if not root_path.is_absolute():
             raise ValueError(f"root must be an absolute path: {root!r}")
+        if root_path.is_symlink():
+            raise ValueError(f"root must not be a symlink: {root!r}")
         if not root_path.exists() or not root_path.is_dir():
             raise ValueError(f"root must be an existing directory: {root!r}")
         self.root: Path = root_path
@@ -63,61 +101,222 @@ class LocalArtifactStore:
         target = self.root / "sha256" / prefix / digest
         return target, digest
 
+    def _read_bytes(self, object_key: str, prefix: str, digest: str) -> bytes:
+        try:
+            root_fd = os.open(
+                self.root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise StorageCorruption(
+                    f"root directory is invalid or symlink: {self.root!r}"
+                ) from e
+            raise
+        try:
+            sha256_fd = _open_dir_no_follow(root_fd, "sha256", "sha256")
+        finally:
+            os.close(root_fd)
+
+        try:
+            prefix_fd = _open_dir_no_follow(sha256_fd, prefix, "prefix")
+        finally:
+            os.close(sha256_fd)
+
+        try:
+            try:
+                st = os.stat(digest, dir_fd=prefix_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                raise
+            if stat.S_ISLNK(st.st_mode):
+                raise StorageCorruption(f"object {object_key} is a symlink")
+            if not stat.S_ISREG(st.st_mode):
+                raise StorageCorruption(f"object {object_key} is not a regular file")
+            try:
+                file_fd = os.open(
+                    digest,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=prefix_fd,
+                )
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise StorageCorruption(
+                        f"object {object_key} is invalid or symlink"
+                    ) from e
+                raise
+            try:
+                with os.fdopen(file_fd, "rb") as f:
+                    fst = os.fstat(f.fileno())
+                    if not stat.S_ISREG(fst.st_mode):
+                        raise StorageCorruption(
+                            f"object {object_key} is not a regular file"
+                        )
+                    return f.read()
+            except BaseException:
+                try:
+                    os.close(file_fd)
+                except OSError:
+                    pass
+                raise
+        finally:
+            os.close(prefix_fd)
+
+    def _verify_existing_in_prefix(
+        self, prefix_fd: int, object_key: str, digest: str, expected_size: int
+    ) -> None:
+        try:
+            st = os.stat(digest, dir_fd=prefix_fd, follow_symlinks=False)
+        except OSError as e:
+            raise StorageCorruption(f"failed to stat existing object {object_key}") from e
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise StorageCorruption(
+                f"existing path for {object_key} is not a regular file"
+            )
+        try:
+            file_fd = os.open(
+                digest,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=prefix_fd,
+            )
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise StorageCorruption(
+                    f"existing path for {object_key} is not a regular file"
+                ) from e
+            raise StorageCorruption(f"failed to open existing object {object_key}") from e
+        try:
+            with os.fdopen(file_fd, "rb") as f:
+                fst = os.fstat(f.fileno())
+                if not stat.S_ISREG(fst.st_mode):
+                    raise StorageCorruption(
+                        f"existing path for {object_key} is not a regular file"
+                    )
+                raw = f.read()
+        except BaseException:
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
+            raise
+
+        actual_sha256 = hashlib.sha256(raw).hexdigest()
+        actual_size = len(raw)
+        if actual_sha256 != digest or actual_size != expected_size:
+            raise StorageCorruption(
+                f"existing object {object_key} is corrupted: "
+                f"expected ({digest}, {expected_size}), "
+                f"got ({actual_sha256}, {actual_size})"
+            )
+
     def put(self, data: bytes) -> StoredObject:
         if not isinstance(data, bytes):
             raise TypeError("data must be bytes")
         digest = hashlib.sha256(data).hexdigest()
         size_bytes = len(data)
         object_key = f"sha256/{digest[:2]}/{digest}"
+        prefix = digest[:2]
         target, _ = self._resolve_key(object_key)
 
-        if target.exists():
-            if not target.is_file():
+        try:
+            root_fd = os.open(
+                self.root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
                 raise StorageCorruption(
-                    f"existing path for {object_key} is not a regular file"
+                    f"root directory is invalid or symlink: {self.root!r}"
+                ) from e
+            raise
+        try:
+            sha256_fd = _ensure_dir_no_follow(root_fd, "sha256", "sha256")
+        finally:
+            os.close(root_fd)
+
+        try:
+            prefix_fd = _ensure_dir_no_follow(sha256_fd, prefix, "prefix")
+        finally:
+            os.close(sha256_fd)
+
+        try:
+            try:
+                st = os.stat(digest, dir_fd=prefix_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                st = None
+
+            if st is not None:
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                    raise StorageCorruption(
+                        f"existing path for {object_key} is not a regular file"
+                    )
+                self._verify_existing_in_prefix(
+                    prefix_fd, object_key, digest, size_bytes
                 )
-            actual_sha256, actual_size = self.verify(object_key)
-            if actual_sha256 != digest or actual_size != size_bytes:
-                raise StorageCorruption(
-                    f"existing object {object_key} is corrupted: "
-                    f"expected ({digest}, {size_bytes}), "
-                    f"got ({actual_sha256}, {actual_size})"
+                return StoredObject(
+                    object_key=object_key,
+                    object_version="1",
+                    sha256=digest,
+                    size_bytes=size_bytes,
                 )
+
+            parent = target.parent
+            fd, tmp_name = tempfile.mkstemp(dir=parent, prefix=f".tmp-{digest[:8]}-")
+            tmp_path = Path(tmp_name)
+            tmp_base = os.path.basename(tmp_name)
+            try:
+                with os.fdopen(fd, "wb") as tmp_file:
+                    tmp_file.write(data)
+                    tmp_file.flush()
+                    os.fsync(tmp_file.fileno())
+
+                try:
+                    os.link(
+                        tmp_base,
+                        digest,
+                        src_dir_fd=prefix_fd,
+                        dst_dir_fd=prefix_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    try:
+                        os.unlink(tmp_base, dir_fd=prefix_fd)
+                    except OSError:
+                        pass
+                    self._verify_existing_in_prefix(
+                        prefix_fd, object_key, digest, size_bytes
+                    )
+                    return StoredObject(
+                        object_key=object_key,
+                        object_version="1",
+                        sha256=digest,
+                        size_bytes=size_bytes,
+                    )
+                else:
+                    try:
+                        os.unlink(tmp_base, dir_fd=prefix_fd)
+                    except OSError:
+                        pass
+                    os.fsync(prefix_fd)
+            except BaseException:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+
             return StoredObject(
                 object_key=object_key,
                 object_version="1",
                 sha256=digest,
                 size_bytes=size_bytes,
             )
-
-        parent = target.parent
-        parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=parent, prefix=f".tmp-{digest[:8]}-")
-        tmp_path = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "wb") as tmp_file:
-                tmp_file.write(data)
-                tmp_file.flush()
-                os.fsync(tmp_file.fileno())
-            os.replace(tmp_path, target)
-            _fsync_dir(parent)
-        except BaseException:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
-
-        return StoredObject(
-            object_key=object_key,
-            object_version="1",
-            sha256=digest,
-            size_bytes=size_bytes,
-        )
+        finally:
+            os.close(prefix_fd)
 
     def open(self, object_key: str) -> bytes:
         target, expected_sha256 = self._resolve_key(object_key)
-        raw = target.read_bytes()
+        prefix = expected_sha256[:2]
+        raw = self._read_bytes(object_key, prefix, expected_sha256)
         actual_sha256 = hashlib.sha256(raw).hexdigest()
         if actual_sha256 != expected_sha256:
             raise StorageCorruption(
@@ -127,8 +326,9 @@ class LocalArtifactStore:
         return raw
 
     def verify(self, object_key: str) -> tuple[str, int]:
-        target, _ = self._resolve_key(object_key)
-        raw = target.read_bytes()
+        target, expected_sha256 = self._resolve_key(object_key)
+        prefix = expected_sha256[:2]
+        raw = self._read_bytes(object_key, prefix, expected_sha256)
         actual_sha256 = hashlib.sha256(raw).hexdigest()
         return actual_sha256, len(raw)
 

@@ -108,6 +108,201 @@ class LocalArtifactStoreTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.store.verify(bad_key)
 
+    def test_root_symlink_raises_value_error(self) -> None:
+        symlink_root = self.root / "symlink_root"
+        real_root = self.root / "real_root"
+        real_root.mkdir()
+        symlink_root.symlink_to(real_root)
+        with self.assertRaises(ValueError):
+            LocalArtifactStore(symlink_root)
+
+    def test_sha256_component_symlink_raises_storage_corruption(self) -> None:
+        outside = self.root.parent / "outside_dir"
+        outside.mkdir(exist_ok=True)
+        sha256_dir = self.root / "sha256"
+        sha256_dir.symlink_to(outside)
+
+        data = b"sample artifact bytes"
+        digest = hashlib.sha256(data).hexdigest()
+        key = f"sha256/{digest[:2]}/{digest}"
+
+        with self.assertRaises(StorageCorruption):
+            self.store.put(data)
+        with self.assertRaises(StorageCorruption):
+            self.store.open(key)
+        with self.assertRaises(StorageCorruption):
+            self.store.verify(key)
+
+    def test_prefix_component_symlink_raises_storage_corruption(self) -> None:
+        data = b"sample artifact bytes"
+        digest = hashlib.sha256(data).hexdigest()
+        prefix = digest[:2]
+        key = f"sha256/{prefix}/{digest}"
+
+        sha256_dir = self.root / "sha256"
+        sha256_dir.mkdir(parents=True)
+        outside = self.root.parent / "outside_prefix"
+        outside.mkdir(exist_ok=True)
+        (sha256_dir / prefix).symlink_to(outside)
+
+        with self.assertRaises(StorageCorruption):
+            self.store.put(data)
+        with self.assertRaises(StorageCorruption):
+            self.store.open(key)
+        with self.assertRaises(StorageCorruption):
+            self.store.verify(key)
+
+    def test_object_file_symlink_raises_storage_corruption_and_does_not_overwrite(
+        self,
+    ) -> None:
+        data = b"sample artifact bytes"
+        digest = hashlib.sha256(data).hexdigest()
+        prefix = digest[:2]
+        key = f"sha256/{prefix}/{digest}"
+
+        parent = self.root / "sha256" / prefix
+        parent.mkdir(parents=True)
+
+        target = parent / digest
+        outside_file = self.root.parent / "outside_file.txt"
+        outside_content = b"sensitive outside file content"
+        outside_file.write_bytes(outside_content)
+        target.symlink_to(outside_file)
+
+        with self.assertRaises(StorageCorruption):
+            self.store.put(data)
+        with self.assertRaises(StorageCorruption):
+            self.store.open(key)
+        with self.assertRaises(StorageCorruption):
+            self.store.verify(key)
+
+        self.assertEqual(outside_file.read_bytes(), outside_content)
+        self.assertTrue(target.is_symlink())
+
+    def test_dangling_symlink_raises_storage_corruption(self) -> None:
+        data = b"sample artifact bytes"
+        digest = hashlib.sha256(data).hexdigest()
+        prefix = digest[:2]
+        key = f"sha256/{prefix}/{digest}"
+
+        parent = self.root / "sha256" / prefix
+        parent.mkdir(parents=True)
+
+        target = parent / digest
+        target.symlink_to(self.root.parent / "nonexistent_file.txt")
+
+        with self.assertRaises(StorageCorruption):
+            self.store.put(data)
+        with self.assertRaises(StorageCorruption):
+            self.store.open(key)
+        with self.assertRaises(StorageCorruption):
+            self.store.verify(key)
+
+    def test_concurrent_writers_identical_bytes(self) -> None:
+        import concurrent.futures
+
+        data = b"concurrent multi-writer content addressed bytes"
+        expected_sha256 = hashlib.sha256(data).hexdigest()
+        key = f"sha256/{expected_sha256[:2]}/{expected_sha256}"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(self.store.put, data) for _ in range(16)]
+            results = [f.result() for f in futures]
+
+        for res in results:
+            self.assertEqual(res.object_key, key)
+            self.assertEqual(res.sha256, expected_sha256)
+            self.assertEqual(res.size_bytes, len(data))
+
+        self.assertEqual(self.store.open(key), data)
+        bucket_dir = self.root / "sha256" / expected_sha256[:2]
+        self.assertEqual(list(bucket_dir.iterdir()), [bucket_dir / expected_sha256])
+
+    def test_race_link_file_exists_verifies_existing_bytes_and_succeeds(self) -> None:
+        import os
+
+        data = b"racing artifact content"
+        digest = hashlib.sha256(data).hexdigest()
+        key = f"sha256/{digest[:2]}/{digest}"
+
+        original_link = os.link
+
+        def racing_link(src, dst, **kwargs):
+            parent = self.root / "sha256" / digest[:2]
+            parent.mkdir(parents=True, exist_ok=True)
+            target = parent / digest
+            target.write_bytes(data)
+            return original_link(src, dst, **kwargs)
+
+        with patch("lab_db.storage.os.link", side_effect=racing_link):
+            stored = self.store.put(data)
+
+        self.assertEqual(stored.sha256, digest)
+        self.assertEqual(self.store.open(key), data)
+
+    def test_race_link_file_exists_corrupted_fails_closed_and_does_not_overwrite(
+        self,
+    ) -> None:
+        import os
+
+        data = b"racing artifact content"
+        digest = hashlib.sha256(data).hexdigest()
+        corrupted_data = b"racing corrupted content"
+
+        original_link = os.link
+
+        def racing_link(src, dst, **kwargs):
+            parent = self.root / "sha256" / digest[:2]
+            parent.mkdir(parents=True, exist_ok=True)
+            target = parent / digest
+            target.write_bytes(corrupted_data)
+            return original_link(src, dst, **kwargs)
+
+        with patch("lab_db.storage.os.link", side_effect=racing_link):
+            with self.assertRaises(StorageCorruption):
+                self.store.put(data)
+
+        target = self.root / "sha256" / digest[:2] / digest
+        self.assertEqual(target.read_bytes(), corrupted_data)
+
+    def test_race_link_file_exists_symlink_fails_closed_and_does_not_overwrite(
+        self,
+    ) -> None:
+        import os
+
+        data = b"racing artifact content"
+        digest = hashlib.sha256(data).hexdigest()
+        outside_file = self.root.parent / "outside_target.txt"
+        outside_file.write_bytes(b"untouchable")
+
+        original_link = os.link
+
+        def racing_link(src, dst, **kwargs):
+            parent = self.root / "sha256" / digest[:2]
+            parent.mkdir(parents=True, exist_ok=True)
+            target = parent / digest
+            target.symlink_to(outside_file)
+            return original_link(src, dst, **kwargs)
+
+        with patch("lab_db.storage.os.link", side_effect=racing_link):
+            with self.assertRaises(StorageCorruption):
+                self.store.put(data)
+
+        self.assertEqual(outside_file.read_bytes(), b"untouchable")
+        target = self.root / "sha256" / digest[:2] / digest
+        self.assertTrue(target.is_symlink())
+
+    def test_verify_returns_actual_bytes_hash_on_disk(self) -> None:
+        data = b"original valid bytes"
+        stored = self.store.put(data)
+        target = self.root / stored.object_key
+        target.write_bytes(b"modified bytes on disk")
+        actual_sha256, actual_size = self.store.verify(stored.object_key)
+        self.assertEqual(
+            actual_sha256, hashlib.sha256(b"modified bytes on disk").hexdigest()
+        )
+        self.assertEqual(actual_size, len(b"modified bytes on disk"))
+
 
 if __name__ == "__main__":
     unittest.main()
