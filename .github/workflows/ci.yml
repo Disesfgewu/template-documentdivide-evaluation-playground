@@ -36,6 +36,16 @@ jobs:
           node-version: "22.23.4"
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-dev.txt -r services/api/requirements.lock -r services/parser/requirements.lock -r contracts/requirements.lock
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl --fail --silent --show-error --location https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc > /dev/null
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client-17
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
+          /usr/lib/postgresql/17/bin/pg_restore --version
       - name: Start PostgreSQL + pgvector (deploy/compose.dev.yml)
         run: docker compose -f deploy/compose.dev.yml up -d --wait
       - name: Scoped checks (PR)
