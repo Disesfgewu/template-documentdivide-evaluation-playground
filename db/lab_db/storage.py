@@ -41,6 +41,55 @@ def _fsync_dir(directory: Path) -> None:
         os.close(dir_fd)
 
 
+def _open_root_no_follow(root: Path) -> int:
+    """Traverse every absolute root component descriptor-relative from / with O_NOFOLLOW.
+
+    Fails closed if any path component (ancestor or target directory) is a symlink,
+    does not exist, or is not a directory.
+    """
+    if not isinstance(root, (Path, str)):
+        raise ValueError("root must be a Path or str")
+    root_path = Path(root)
+    if not root_path.is_absolute():
+        raise ValueError(f"root must be an absolute path: {root!r}")
+    parts = [p for p in root_path.parts if p and p != "/"]
+    if not parts:
+        return os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    curr_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in parts:
+            try:
+                st = os.stat(part, dir_fd=curr_fd, follow_symlinks=False)
+            except FileNotFoundError as e:
+                raise ValueError(
+                    f"root component {part!r} does not exist: {root!r}"
+                ) from e
+            if stat.S_ISLNK(st.st_mode):
+                raise ValueError(f"root component {part!r} is a symlink: {root!r}")
+            if not stat.S_ISDIR(st.st_mode):
+                raise ValueError(
+                    f"root component {part!r} is not a directory: {root!r}"
+                )
+            try:
+                next_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=curr_fd,
+                )
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError(
+                        f"root component {part!r} is a symlink or not a directory: {root!r}"
+                    ) from e
+                raise
+            os.close(curr_fd)
+            curr_fd = next_fd
+        return curr_fd
+    except BaseException:
+        os.close(curr_fd)
+        raise
+
+
 def _open_dir_no_follow(parent_fd: int, name: str, desc: str) -> int:
     try:
         st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -81,10 +130,8 @@ class LocalArtifactStore:
         root_path = Path(root)
         if not root_path.is_absolute():
             raise ValueError(f"root must be an absolute path: {root!r}")
-        if root_path.is_symlink():
-            raise ValueError(f"root must not be a symlink: {root!r}")
-        if not root_path.exists() or not root_path.is_dir():
-            raise ValueError(f"root must be an existing directory: {root!r}")
+        root_fd = _open_root_no_follow(root_path)
+        os.close(root_fd)
         self.root: Path = root_path
 
     def _resolve_key(self, object_key: str) -> tuple[Path, str]:
@@ -103,10 +150,11 @@ class LocalArtifactStore:
 
     def _read_bytes(self, object_key: str, prefix: str, digest: str) -> bytes:
         try:
-            root_fd = os.open(
-                self.root,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-            )
+            root_fd = _open_root_no_follow(self.root)
+        except ValueError as e:
+            raise StorageCorruption(
+                f"root directory traversal failed or contains symlink: {e}"
+            ) from e
         except OSError as e:
             if e.errno in (errno.ELOOP, errno.ENOTDIR):
                 raise StorageCorruption(
@@ -135,7 +183,7 @@ class LocalArtifactStore:
             try:
                 file_fd = os.open(
                     digest,
-                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
                     dir_fd=prefix_fd,
                 )
             except OSError as e:
@@ -175,7 +223,7 @@ class LocalArtifactStore:
         try:
             file_fd = os.open(
                 digest,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
                 dir_fd=prefix_fd,
             )
         except OSError as e:
@@ -218,10 +266,11 @@ class LocalArtifactStore:
         target, _ = self._resolve_key(object_key)
 
         try:
-            root_fd = os.open(
-                self.root,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-            )
+            root_fd = _open_root_no_follow(self.root)
+        except ValueError as e:
+            raise StorageCorruption(
+                f"root directory traversal failed or contains symlink: {e}"
+            ) from e
         except OSError as e:
             if e.errno in (errno.ELOOP, errno.ENOTDIR):
                 raise StorageCorruption(
@@ -259,10 +308,32 @@ class LocalArtifactStore:
                     size_bytes=size_bytes,
                 )
 
-            parent = target.parent
-            fd, tmp_name = tempfile.mkstemp(dir=parent, prefix=f".tmp-{digest[:8]}-")
-            tmp_path = Path(tmp_name)
-            tmp_base = os.path.basename(tmp_name)
+            # Create random temporary file descriptor-relative to prefix_fd
+            tmp_name = None
+            fd = None
+            for _ in range(128):
+                candidate = f".tmp-{digest[:8]}-{uuid.uuid4().hex}"
+                try:
+                    fd = os.open(
+                        candidate,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        mode=0o600,
+                        dir_fd=prefix_fd,
+                    )
+                    tmp_name = candidate
+                    break
+                except FileExistsError:
+                    continue
+                except OSError as e:
+                    if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise StorageCorruption(
+                            "prefix directory descriptor is invalid or symlink"
+                        ) from e
+                    raise
+
+            if fd is None or tmp_name is None:
+                raise StorageCorruption("failed to create temporary file in store")
+
             try:
                 with os.fdopen(fd, "wb") as tmp_file:
                     tmp_file.write(data)
@@ -271,7 +342,7 @@ class LocalArtifactStore:
 
                 try:
                     os.link(
-                        tmp_base,
+                        tmp_name,
                         digest,
                         src_dir_fd=prefix_fd,
                         dst_dir_fd=prefix_fd,
@@ -279,7 +350,7 @@ class LocalArtifactStore:
                     )
                 except FileExistsError:
                     try:
-                        os.unlink(tmp_base, dir_fd=prefix_fd)
+                        os.unlink(tmp_name, dir_fd=prefix_fd)
                     except OSError:
                         pass
                     self._verify_existing_in_prefix(
@@ -293,13 +364,13 @@ class LocalArtifactStore:
                     )
                 else:
                     try:
-                        os.unlink(tmp_base, dir_fd=prefix_fd)
+                        os.unlink(tmp_name, dir_fd=prefix_fd)
                     except OSError:
                         pass
                     os.fsync(prefix_fd)
             except BaseException:
                 try:
-                    tmp_path.unlink(missing_ok=True)
+                    os.unlink(tmp_name, dir_fd=prefix_fd)
                 except OSError:
                     pass
                 raise

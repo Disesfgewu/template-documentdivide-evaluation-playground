@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -115,6 +116,25 @@ class LocalArtifactStoreTests(unittest.TestCase):
         symlink_root.symlink_to(real_root)
         with self.assertRaises(ValueError):
             LocalArtifactStore(symlink_root)
+
+    def test_root_ancestor_symlink_raises_value_error(self) -> None:
+        base = self.root / "ancestor_base"
+        base.mkdir()
+        outside = self.root / "outside_dir"
+        outside.mkdir()
+        real_root = outside / "real_root"
+        real_root.mkdir()
+
+        link = base / "symlink_component"
+        link.symlink_to(outside)
+
+        traversed_root = base / "symlink_component" / "real_root"
+        self.assertTrue(traversed_root.exists())
+        self.assertTrue(traversed_root.is_dir())
+        self.assertFalse(traversed_root.is_symlink())
+
+        with self.assertRaises(ValueError):
+            LocalArtifactStore(traversed_root)
 
     def test_sha256_component_symlink_raises_storage_corruption(self) -> None:
         outside = self.root.parent / "outside_dir"
@@ -302,6 +322,55 @@ class LocalArtifactStoreTests(unittest.TestCase):
             actual_sha256, hashlib.sha256(b"modified bytes on disk").hexdigest()
         )
         self.assertEqual(actual_size, len(b"modified bytes on disk"))
+
+    def test_swapped_directory_race_before_temp_creation_does_not_write_outside(
+        self,
+    ) -> None:
+        data = b"swapped dir test payload"
+        digest = hashlib.sha256(data).hexdigest()
+        prefix = digest[:2]
+
+        prefix_path = self.root / "sha256" / prefix
+        prefix_path.mkdir(parents=True, exist_ok=True)
+
+        outside_dir = self.root.parent / "outside_swapped_target"
+        outside_dir.mkdir(exist_ok=True)
+
+        original_open = os.open
+
+        def swapped_open(file, flags, *args, **kwargs):
+            if isinstance(file, str) and file.startswith(f".tmp-{digest[:8]}-"):
+                if prefix_path.exists() and not prefix_path.is_symlink():
+                    hidden_path = self.root / "sha256" / f"hidden_{prefix}"
+                    prefix_path.rename(hidden_path)
+                    prefix_path.symlink_to(outside_dir)
+            return original_open(file, flags, *args, **kwargs)
+
+        with patch("lab_db.storage.os.open", side_effect=swapped_open):
+            stored = self.store.put(data)
+
+        self.assertEqual(list(outside_dir.iterdir()), [])
+        self.assertEqual(stored.sha256, digest)
+
+    def test_fifo_object_fails_closed_and_does_not_hang(self) -> None:
+        data = b"fifo test payload"
+        digest = hashlib.sha256(data).hexdigest()
+        prefix = digest[:2]
+        key = f"sha256/{prefix}/{digest}"
+
+        parent = self.root / "sha256" / prefix
+        parent.mkdir(parents=True, exist_ok=True)
+        fifo_path = parent / digest
+        os.mkfifo(fifo_path)
+
+        with self.assertRaises(StorageCorruption):
+            self.store.open(key)
+
+        with self.assertRaises(StorageCorruption):
+            self.store.verify(key)
+
+        with self.assertRaises(StorageCorruption):
+            self.store.put(data)
 
 
 if __name__ == "__main__":
