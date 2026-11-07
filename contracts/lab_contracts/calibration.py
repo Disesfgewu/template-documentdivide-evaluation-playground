@@ -348,6 +348,7 @@ class CalibrationEvaluationReport:
     fact_agreement_display: Optional[str]
     major_contradiction_full_correct_count: int
     deterministic_metric_mismatches: int
+    scored_deterministic_metric_counts: dict[str, int]
     repeat_instability_unreviewed_count: int
     blocking_reasons: tuple[str, ...]
     diagnostics: tuple[CalibrationDiagnostic, ...]
@@ -704,6 +705,7 @@ def evaluate_judge_calibration(
     fact_agree_den = 0
     major_contradiction_full_correct_count = 0
     deterministic_mismatches = 0
+    scored_deterministic_counts: Counter[str] = Counter({m: 0 for m in sorted(DETERMINISTIC_METRIC_SET)})
     repeat_instability_unreviewed = 0
 
     for case_id, (case, gold_fact_labels, gold_major_contradiction) in valid_gold_cases.items():
@@ -852,6 +854,8 @@ def evaluate_judge_calibration(
                         "deterministic_metric_mismatch",
                         f"metric {mname} mismatch: {'; '.join(diffs)}",
                     )
+                elif g_m.status == "scored" and a_m.status == "scored":
+                    scored_deterministic_counts[mname] += 1
 
         # 3x Repeat runs stability check (SPEC 17.6):
         # Fixed judge input re-run 3 times; first valid policy-compliant run is the primary output;
@@ -932,7 +936,16 @@ def evaluate_judge_calibration(
 
         evaluated_cases += 1
 
-    # 5. Fact label agreement gate (>= 90%).
+    # 5. Deterministic metric scored coverage gate (each required metric needs >= 1 scored matching comparison).
+    for mname in sorted(DETERMINISTIC_METRIC_SET):
+        if scored_deterministic_counts[mname] < 1:
+            add_diag(
+                f"judge_outputs.deterministic_metrics[{mname}]",
+                "missing_scored_deterministic_metric_coverage",
+                f"deterministic metric {mname!r} has 0 scored matching comparisons across valid evaluated cases (requires >= 1)",
+            )
+
+    # 6. Fact label agreement gate (>= 90%).
     fact_agreement_display: Optional[str] = None
     if fact_agree_den > 0:
         agree_ratio = Fraction(fact_agree_num, fact_agree_den)
@@ -976,6 +989,7 @@ def evaluate_judge_calibration(
         fact_agreement_display=fact_agreement_display,
         major_contradiction_full_correct_count=major_contradiction_full_correct_count,
         deterministic_metric_mismatches=deterministic_mismatches,
+        scored_deterministic_metric_counts=dict(scored_deterministic_counts),
         repeat_instability_unreviewed_count=repeat_instability_unreviewed,
         blocking_reasons=tuple(blocking_codes),
         diagnostics=tuple(diagnostics),

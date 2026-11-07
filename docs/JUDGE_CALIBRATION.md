@@ -49,11 +49,15 @@ validates and enforces:
    - **Zero major contradictions scored fully correct**: Any fact with
      `has_major_contradiction=True` scored `1.0`, or any case with confirmed
      major contradiction scored `100%` correctness, blocks the grader revision.
-   - **100% deterministic source/rule metric equality**: Every case must carry
-     golden `MetricResult` values for the 5 deterministic metrics
+   - **100% deterministic source/rule metric equality & scored coverage**: Every
+     case must carry golden `MetricResult` values for the 5 deterministic metrics
      (`recall_at_k`, `complete_at_k`, `textual_consistency`,
      `localization_precision`, `citation_precision`), and the grader output must
      match their exact status, rational ratio, and `lab-round-1` display value.
+     Legitimate per-case `not_applicable` is preserved, while each of the 5
+     required deterministic metrics must have at least 1 genuinely `scored`
+     matching comparison across valid evaluated cases (`missing_scored_deterministic_metric_coverage`
+     blocks all-`not_applicable` metrics).
    - **Missing / pending / error preservation**: Missing judge outputs or
      outputs with `status` in `("pending", "error")` are never coerced to zero
      or skipped; they are counted in `missing_or_pending_cases` and block

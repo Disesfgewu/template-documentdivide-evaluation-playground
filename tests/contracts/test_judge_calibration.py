@@ -81,10 +81,15 @@ def _make_metric(
     )
 
 
-def _default_deterministic_metrics(question_id: str, grader_revision: str = "grader@1") -> list[MetricResult]:
+def _default_deterministic_metrics(
+    question_id: str,
+    grader_revision: str = "grader@1",
+    *,
+    textual_applicable: bool = True,
+) -> list[MetricResult]:
     out: list[MetricResult] = []
     for m in sorted(DETERMINISTIC_METRIC_SET):
-        if m == "textual_consistency":
+        if m == "textual_consistency" and not textual_applicable:
             out.append(_make_metric(question_id, m, grader_revision=grader_revision, status="not_applicable"))
         else:
             out.append(_make_metric(question_id, m, grader_revision=grader_revision, numerator=1.0, denominator=1.0))
@@ -177,7 +182,10 @@ def _build_case_and_output(
             major_contradiction_confirmed=has_contradiction,
         )
 
-    det_metrics = _default_deterministic_metrics(qid, grader_revision=grader_revision)
+    textual_app = (index % 2 == 0)
+    det_metrics = _default_deterministic_metrics(
+        qid, grader_revision=grader_revision, textual_applicable=textual_app
+    )
     case = CalibrationCaseRecord(
         case_id=cid,
         question_id=qid,
@@ -221,7 +229,9 @@ def _build_case_and_output(
             )
         ],
         correctness_result=j_corr,
-        deterministic_metrics=_default_deterministic_metrics(qid, grader_revision=grader_revision),
+        deterministic_metrics=_default_deterministic_metrics(
+            qid, grader_revision=grader_revision, textual_applicable=textual_app
+        ),
         repeat_runs=[
             JudgeRepeatRun(
                 run_index=r_idx,
@@ -456,6 +466,56 @@ class CalibrationContradictionAndGoldenRulesTests(unittest.TestCase):
         self.assertEqual(rep.status, "ineligible")
         self.assertEqual(rep.deterministic_metric_mismatches, 1)
         self.assertIn("deterministic_metric_mismatch", rep.blocking_reasons)
+
+    def test_deterministic_metrics_all_na_or_single_metric_all_na_blocks_while_mixed_na_passes(self):
+        # 1. Mixed valid N/A (odd cases have textual_consistency N/A, even cases scored) is eligible
+        bundle = build_valid_40_case_bundle()
+        rep_mixed = evaluate_judge_calibration(bundle)
+        self.assertEqual(rep_mixed.status, "eligible")
+        self.assertEqual(rep_mixed.scored_deterministic_metric_counts["textual_consistency"], 20)
+        self.assertEqual(rep_mixed.scored_deterministic_metric_counts["recall_at_k"], 40)
+
+        # 2. One metric (textual_consistency) N/A across all 40 cases -> blocks with missing_scored_deterministic_metric_coverage
+        raw_one_na = json.loads(bundle.model_dump_json())
+        for c, o in zip(raw_one_na["cases"], raw_one_na["judge_outputs"]):
+            qid = c["question_id"]
+            na_tc = json.loads(_make_metric(qid, "textual_consistency", status="not_applicable").model_dump_json())
+            c["golden_deterministic_metrics"] = [
+                na_tc if m["metric"] == "textual_consistency" else m for m in c["golden_deterministic_metrics"]
+            ]
+            o["deterministic_metrics"] = [
+                na_tc if m["metric"] == "textual_consistency" else m for m in o["deterministic_metrics"]
+            ]
+        rep_one_na = evaluate_judge_calibration(CalibrationEvaluationInput.model_validate_json(json.dumps(raw_one_na)))
+        self.assertEqual(rep_one_na.status, "ineligible")
+        self.assertIn("missing_scored_deterministic_metric_coverage", rep_one_na.blocking_reasons)
+        self.assertEqual(rep_one_na.scored_deterministic_metric_counts["textual_consistency"], 0)
+        self.assertEqual(
+            [d.path for d in rep_one_na.diagnostics if d.code == "missing_scored_deterministic_metric_coverage"],
+            ["judge_outputs.deterministic_metrics[textual_consistency]"],
+        )
+
+        # 3. All 5 deterministic metrics N/A across all 40 cases -> blocks with all 5 diagnostics
+        raw_all_na = json.loads(bundle.model_dump_json())
+        for c, o in zip(raw_all_na["cases"], raw_all_na["judge_outputs"]):
+            qid = c["question_id"]
+            na_all = [
+                json.loads(_make_metric(qid, m, status="not_applicable").model_dump_json())
+                for m in sorted(DETERMINISTIC_METRIC_SET)
+            ]
+            c["golden_deterministic_metrics"] = na_all
+            o["deterministic_metrics"] = na_all
+        rep_all_na = evaluate_judge_calibration(CalibrationEvaluationInput.model_validate_json(json.dumps(raw_all_na)))
+        self.assertEqual(rep_all_na.status, "ineligible")
+        self.assertIn("missing_scored_deterministic_metric_coverage", rep_all_na.blocking_reasons)
+        self.assertEqual(
+            set(rep_all_na.scored_deterministic_metric_counts.values()),
+            {0},
+        )
+        self.assertEqual(
+            [d.path for d in rep_all_na.diagnostics if d.code == "missing_scored_deterministic_metric_coverage"],
+            [f"judge_outputs.deterministic_metrics[{m}]" for m in sorted(DETERMINISTIC_METRIC_SET)],
+        )
 
     def test_missing_pending_and_error_judge_outputs_are_preserved_as_ineligible(self):
         # 1. Missing judge output record
