@@ -642,6 +642,76 @@ class TestUnstructuredNegative(unittest.TestCase):
         self.assertEqual(batch.result.pages[0].status, "needs_review")
         self.assertIn("missing_or_invalid_geometry_or_asset_reference", batch.result.pages[0].diagnostics)
 
+    def test_invalid_metadata_types_and_quarantine_clears_child_artifacts(self):
+        """Invalid metadata field types quarantine and clear unpacked orig_elements artifacts."""
+        child_json = json.dumps([{"type": "Title", "text": "Child", "metadata": {"page_number": 1}}]).encode("utf-8")
+        encoded_orig = base64.b64encode(zlib.compress(child_json)).decode("ascii")
+        req = _make_request([0], "unstructured-oss-fast")
+        manifest = _make_unstructured_manifest([0], strategy="fast")
+        frames = _default_frames([0])
+
+        for bad_meta in (
+            {"page_number": 1, "text_as_html": 12345},
+            {"page_number": 1, "image_path": ["bad"]},
+            {"page_number": 1, "image_base64": 999},
+        ):
+            payload = [
+                {"type": "CompositeElement", "text": "Chunk", "metadata": {"orig_elements": encoded_orig}},
+                {"type": "Table", "text": "Bad table", "metadata": bad_meta},
+            ]
+            raw = json.dumps(payload).encode("utf-8")
+            batch = self.parser.normalize(
+                raw, req, manifest, UnstructuredProfile(strategy="fast"),
+                document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+                frames=frames, document_page_count=1,
+            )
+            self.assertEqual(batch.quarantine_reason, "invalid_unstructured_output")
+            self.assertEqual(len(batch.evidence), 0)
+            self.assertEqual(len(batch.observations), 0)
+            # Only raw artifact and manifest artifact remain; unpacked child artifact is cleared
+            self.assertEqual(len(batch.result.raw_result_refs), 1)
+            self.assertEqual(len(batch.artifacts), 2)
+
+        # Also reject non-string orig_elements (e.g., integer)
+        bad_chunk_raw = json.dumps([{"type": "CompositeElement", "text": "c", "metadata": {"orig_elements": 123}}]).encode("utf-8")
+        batch_chunk = self.parser.normalize(
+            bad_chunk_raw, req, manifest, UnstructuredProfile(strategy="fast"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames=frames, document_page_count=1,
+        )
+        self.assertEqual(batch_chunk.quarantine_reason, "invalid_unstructured_output")
+
+    def test_boolean_layout_dimensions_rejected_as_unattested(self):
+        """Boolean layout_width/layout_height are not coerced to 1.0 against DisplayFrame."""
+        payload = [
+            {
+                "type": "NarrativeText",
+                "text": "Boolean layout width test.",
+                "metadata": {
+                    "page_number": 1,
+                    "coordinates": {
+                        "system": "PixelSpace",
+                        "layout_width": True,
+                        "layout_height": True,
+                        "points": [[0.1, 0.1], [0.9, 0.9]],
+                    },
+                },
+            }
+        ]
+        raw = json.dumps(payload).encode("utf-8")
+        req = _make_request([0], "unstructured-oss-fast")
+        manifest = _make_unstructured_manifest([0], strategy="fast")
+        frames = {0: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=1.0, height=1.0, transform_ref="tr-0")}
+
+        batch = self.parser.normalize(
+            raw, req, manifest, UnstructuredProfile(strategy="fast"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames=frames, document_page_count=1,
+        )
+        self.assertIsNone(batch.quarantine_reason)
+        self.assertEqual(len(batch.evidence), 0)
+        self.assertIn("unattested_layout_geometry", batch.result.pages[0].diagnostics)
+
 
 class TestMinerUPositive(unittest.TestCase):
     """Positive contract tests for strict pinned MinerU 4.1.7 Middle JSON 2.0 adapter."""
@@ -774,6 +844,92 @@ class TestMinerUPositive(unittest.TestCase):
         self.assertIsNone(batch.quarantine_reason)
         self.assertEqual(batch.result.pages[0].status, "ok")
         self.assertEqual(len(batch.evidence), 0)
+
+    def test_equation_block_assets_and_nested_hyperlink_text(self):
+        """EquationBlock preserves top-level formula image assets and annotations preserve nested hyperlink text."""
+        payload = {
+            "schema": "docvortex.middle",
+            "schema_version": "2.0",
+            "metadata": {
+                "producer": {"name": "mineru", "version": "4.1.7"},
+                "file_suffix": "pdf",
+            },
+            "is_full_document": True,
+            "pages": [
+                {
+                    "page_idx": 0,
+                    "blocks": [
+                        {
+                            "type": "equation",
+                            "index": 0,
+                            "bbox": [0.1, 0.1, 0.9, 0.2],
+                            "content": "E = mc^2",
+                            "image_path": "/tmp/synthetic-eq.png",
+                            "image_base64": "aGVsbG8=",
+                        },
+                        {
+                            "type": "table",
+                            "index": 1,
+                            "bbox": [0.1, 0.3, 0.9, 0.6],
+                            "content": [
+                                {
+                                    "type": "table_caption",
+                                    "content": [
+                                        {"type": "text", "content": "Table 1 (see "},
+                                        {
+                                            "type": "hyperlink",
+                                            "url": "https://example.com/spec",
+                                            "content": [
+                                                {"type": "text", "content": "Appendix "},
+                                                {"type": "code_inline", "content": "A.1"},
+                                            ],
+                                        },
+                                        {"type": "text", "content": ")"},
+                                    ],
+                                },
+                                {
+                                    "type": "table_body",
+                                    "index": 1,
+                                    "bbox": [0.1, 0.3, 0.9, 0.6],
+                                    "content": "<table><tr><td>1</td></tr></table>",
+                                },
+                            ],
+                        },
+                    ],
+                }
+            ],
+            "extensions": {
+                "mineru": {"tier": "standard"},
+                "docvortex_layout": {
+                    "version": 1,
+                    "pages": [{"page_idx": 0, "width_pt": 612.0, "height_pt": 792.0}],
+                },
+            },
+        }
+        raw = json.dumps(payload).encode("utf-8")
+        raw_ref = "sha256:" + hashlib.sha256(raw).hexdigest()
+        req = _make_request([0], "mineru-standard")
+        manifest = _make_mineru_manifest([0], tier="standard")
+        frames = _default_frames([0])
+
+        # With only /tmp/synthetic-eq.png mapped, image_base64 triggers unresolved_image_asset diagnostic
+        batch_partial = self.parser.normalize(
+            raw, req, manifest, MinerUProfile(tier="standard"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames=frames, document_page_count=1,
+            asset_refs={"/tmp/synthetic-eq.png": "sha256:" + "e" * 64},
+        )
+        self.assertIsNone(batch_partial.quarantine_reason)
+        self.assertEqual(len(batch_partial.evidence), 2)
+        self.assertEqual(batch_partial.evidence[0].regions[0].kind.value, "formula")
+        self.assertEqual(batch_partial.evidence[0].asset_refs, ["sha256:" + "e" * 64])
+        self.assertEqual(
+            batch_partial.observations[0].upstream_image_refs,
+            ("/tmp/synthetic-eq.png", f"{raw_ref}#/pages/0/blocks/0/image_base64"),
+        )
+        self.assertIn("unresolved_image_asset", batch_partial.result.pages[0].diagnostics)
+        self.assertEqual(batch_partial.evidence[1].raw_content, "Table 1 (see Appendix A.1)")
+        self.assertEqual(batch_partial.observations[1].raw_content, "Table 1 (see Appendix A.1)")
 
 
 class TestMinerUNegative(unittest.TestCase):
@@ -1054,6 +1210,68 @@ class TestMinerUNegative(unittest.TestCase):
         self.assertIsNone(batch.observations[0].evidence_id)
         self.assertEqual(batch.result.pages[0].status, "needs_review")
         self.assertIn("missing_or_invalid_geometry_or_asset_reference", batch.result.pages[0].diagnostics)
+
+    def test_quarantine_malformed_extensions_and_non_pdf_suffix(self):
+        """Non-PDF file_suffix and malformed/boolean extensions fail closed with quarantine."""
+        req = _make_request([0], "mineru-standard")
+        manifest = _make_mineru_manifest([0], tier="standard")
+        frames = {0: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=1.0, height=1.0, transform_ref="tr-0")}
+
+        # Non-PDF file_suffix must quarantine
+        non_pdf = {
+            "schema": "docvortex.middle",
+            "schema_version": "2.0",
+            "metadata": {"producer": {"name": "mineru", "version": "4.1.7"}, "file_suffix": "docx"},
+            "is_full_document": True,
+            "pages": [{"page_idx": 0, "blocks": []}],
+            "extensions": {"mineru": {"tier": "standard"}},
+        }
+        batch_docx = self.parser.normalize(
+            json.dumps(non_pdf).encode("utf-8"), req, manifest, MinerUProfile(tier="standard"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames=frames, document_page_count=1,
+        )
+        self.assertEqual(batch_docx.quarantine_reason, "unsupported_mineru_file_suffix")
+
+        # Malformed extensions.mineru or extensions.docvortex_layout must quarantine without AttributeError
+        for bad_ext in (
+            {},
+            {"mineru": None},
+            {"mineru": []},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": None},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": []},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": True, "pages": []}},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": "not-a-list"}},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [None]}},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [{"page_idx": True, "width_pt": 1.0, "height_pt": 1.0}]}},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [{"page_idx": 0, "width_pt": True, "height_pt": 1.0}]}},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [{"page_idx": 0, "width_pt": -1.0, "height_pt": 1.0}]}},
+            {
+                "mineru": {"tier": "standard"},
+                "docvortex_layout": {
+                    "version": 1,
+                    "pages": [
+                        {"page_idx": 0, "width_pt": 612.0, "height_pt": 792.0},
+                        {"page_idx": 0, "width_pt": 612.0, "height_pt": 792.0},
+                    ],
+                },
+            },
+        ):
+            payload = {
+                "schema": "docvortex.middle",
+                "schema_version": "2.0",
+                "metadata": {"producer": {"name": "mineru", "version": "4.1.7"}, "file_suffix": "pdf"},
+                "is_full_document": True,
+                "pages": [{"page_idx": 0, "blocks": []}],
+                "extensions": bad_ext,
+            }
+            batch = self.parser.normalize(
+                json.dumps(payload).encode("utf-8"), req, manifest, MinerUProfile(tier="standard"),
+                document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+                frames=frames, document_page_count=1,
+            )
+            self.assertEqual(batch.quarantine_reason, "invalid_mineru_output", f"Failed for {bad_ext}")
+            self.assertEqual(batch.result.pages[0].status, "failed")
 
 
 class TestCommonConstraints(unittest.TestCase):

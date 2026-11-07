@@ -120,10 +120,26 @@ def _integer(value):
     return value
 
 
+def _finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _inline_text(items):
+    texts = []
+    for item in items:
+        if item.get("type") in {"text", "code_inline", "equation_inline"} and isinstance(item.get("content"), str):
+            texts.append(item["content"])
+        elif item.get("type") == "hyperlink" and isinstance(item.get("content"), list):
+            for sub in item["content"]:
+                if sub.get("type") in {"text", "code_inline", "equation_inline"} and isinstance(sub.get("content"), str):
+                    texts.append(sub["content"])
+    return "".join(texts)
+
+
 def _bbox(value):
     if not isinstance(value, (list, tuple)) or len(value) != 4:
         raise ValueError("missing_or_invalid_geometry")
-    if any(type(n) not in (int, float) or not math.isfinite(n) for n in value):
+    if any(not _finite_number(n) for n in value):
         raise ValueError("invalid_geometry_numbers")
     x0, y0, x1, y1 = map(float, value)
     if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
@@ -247,6 +263,7 @@ class _Builder:
 
     def quarantine(self, reason):
         self.reason = reason
+        self.artifacts = [self.raw]
         self.evidence.clear()
         self.observations.clear()
         self.warn(None, reason)
@@ -283,13 +300,22 @@ class UnstructuredParser:
                     meta, typ = item.get("metadata", {}), item["type"]
                     if not isinstance(meta, dict) or not isinstance(item.get("text", ""), str):
                         raise ValueError("invalid_element_metadata")
+                    html = meta.get("text_as_html")
+                    image_path = meta.get("image_path")
+                    image_base64 = meta.get("image_base64")
+                    if (html is not None and not isinstance(html, str)
+                            or image_path is not None and not isinstance(image_path, str)
+                            or image_base64 is not None and not isinstance(image_base64, str)):
+                        raise ValueError("invalid_element_metadata")
                     pointer = f"{prefix}/{i}"
                     if typ in {"CompositeElement", "TableChunk"}:
                         encoded = meta.get("orig_elements")
+                        if encoded is not None and not isinstance(encoded, str):
+                            raise ValueError("invalid_element_metadata")
                         if not isinstance(encoded, str):
                             b.warn(None, "chunk_missing_orig_elements")
                             b.observations.append(Observation(artifact.ref, pointer, None, typ,
-                                item.get("text", ""), meta.get("text_as_html"), (), None))
+                                item.get("text", ""), html, (), None))
                             continue
                         compressed = base64.b64decode(encoded, validate=True)
                         decoder = zlib.decompressobj()
@@ -303,7 +329,7 @@ class UnstructuredParser:
                         consume(_json(original), child, "", depth + 1)
                         # Derived chunk text never overwrites its original elements.
                         b.observations.append(Observation(artifact.ref, pointer, None, typ,
-                            item.get("text", ""), meta.get("text_as_html"), (), None))
+                            item.get("text", ""), html, (), None))
                         continue
                     parser_page = _integer(meta.get("page_number"))
                     if parser_page == 0:
@@ -313,10 +339,11 @@ class UnstructuredParser:
                     bbox = None
                     frame = frames.get(page)
                     if isinstance(coords, dict) and frame and coords.get("system") == "PixelSpace":
-                        if coords.get("layout_width") == frame.width and coords.get("layout_height") == frame.height:
+                        lw, lh = coords.get("layout_width"), coords.get("layout_height")
+                        if _finite_number(lw) and _finite_number(lh) and lw == frame.width and lh == frame.height:
                             points = coords.get("points")
                             if isinstance(points, list) and len(points) >= 2:
-                                if any(not isinstance(p, list) or len(p) != 2 or any(type(v) not in (int, float) or not math.isfinite(v) for v in p) for p in points):
+                                if any(not isinstance(p, list) or len(p) != 2 or any(not _finite_number(v) for v in p) for p in points):
                                     raise ValueError("invalid_coordinates")
                                 bbox = [min(p[0] for p in points)/frame.width,
                                         min(p[1] for p in points)/frame.height,
@@ -324,11 +351,11 @@ class UnstructuredParser:
                                         max(p[1] for p in points)/frame.height]
                         else:
                             b.warn(page, "unattested_layout_geometry")
-                    images = [meta[k] for k in ("image_path",) if isinstance(meta.get(k), str)]
-                    if meta.get("image_base64"):
+                    images = [image_path] if image_path else []
+                    if image_base64:
                         images.append(f"{artifact.ref}#{pointer}/metadata/image_base64")
                     b.add(artifact, pointer, page, typ, item.get("text", ""), bbox,
-                          meta.get("text_as_html"), images)
+                          html, images)
 
             consume(elements, b.raw, "")
         except (ValueError, TypeError, KeyError, RecursionError, zlib.error):
@@ -353,13 +380,36 @@ class MinerUParser:
                     or manifest.output_schema != "docvortex.middle-2.0"
                     or payload["metadata"].get("producer") != {"name": "mineru", "version": profile.version}):
                 return b.quarantine("unsupported_mineru_producer_version")
-            ext = payload.get("extensions", {}).get("mineru", {})
+            if payload["metadata"].get("file_suffix") != "pdf":
+                return b.quarantine("unsupported_mineru_file_suffix")
+            extensions = payload.get("extensions", {})
+            if not isinstance(extensions, dict):
+                return b.quarantine("invalid_mineru_output")
+            ext = extensions.get("mineru")
+            if not isinstance(ext, dict):
+                return b.quarantine("invalid_mineru_output")
             if ext.get("tier") != profile.tier or manifest.effective_profile != "mineru-" + profile.tier:
                 return b.quarantine("mineru_tier_mismatch")
             if manifest.postprocess_flags:
                 return b.quarantine("uncontrolled_mineru_postprocessing")
-            layout = payload.get("extensions", {}).get("docvortex_layout", {})
-            dimensions = {p["page_idx"]: p for p in layout.get("pages", [])} if layout.get("version") == 1 else {}
+            dimensions = {}
+            if "docvortex_layout" in extensions:
+                layout = extensions["docvortex_layout"]
+                if not isinstance(layout, dict):
+                    return b.quarantine("invalid_mineru_output")
+                ver = layout.get("version")
+                layout_pages = layout.get("pages", [])
+                if ver is not None and type(ver) is not int or not isinstance(layout_pages, list):
+                    return b.quarantine("invalid_mineru_output")
+                if ver == 1:
+                    for lp in layout_pages:
+                        if not isinstance(lp, dict):
+                            return b.quarantine("invalid_mineru_output")
+                        lp_idx = _integer(lp.get("page_idx"))
+                        w, h = lp.get("width_pt"), lp.get("height_pt")
+                        if not (_finite_number(w) and w > 0 and _finite_number(h) and h > 0) or lp_idx in dimensions:
+                            return b.quarantine("invalid_mineru_output")
+                        dimensions[lp_idx] = lp
             actual_pages = [p["page_idx"] for p in payload["pages"]]
             if len(actual_pages) != len(set(actual_pages)) or actual_pages != sorted(actual_pages):
                 return b.quarantine("invalid_mineru_page_order")
@@ -373,7 +423,8 @@ class MinerUParser:
                 index = page["page_idx"]
                 frame = frames.get(index)
                 dim = dimensions.get(index, {})
-                attested = frame and dim.get("width_pt") == frame.width and dim.get("height_pt") == frame.height
+                w, h = dim.get("width_pt"), dim.get("height_pt")
+                attested = bool(frame and _finite_number(w) and _finite_number(h) and w == frame.width and h == frame.height)
                 b.seen_pages.add(index)  # Explicit blank pages are still covered.
                 if not attested:
                     b.warn(index, "unattested_layout_geometry")
@@ -398,9 +449,7 @@ class MinerUParser:
                             if child.get("type") in {"text", "code_inline", "equation_inline", "code_body", "chart_body", "image_body"} and isinstance(child.get("content"), str):
                                 texts.append(child["content"])
                             elif child.get("type") in {"hyperlink", "algorithm_body", "table_caption", "table_footnote", "image_caption", "image_footnote", "chart_caption", "chart_footnote", "code_caption", "code_footnote"} and isinstance(child.get("content"), list):
-                                for sub in child["content"]:
-                                    if sub.get("type") in {"text", "code_inline", "equation_inline"} and isinstance(sub.get("content"), str):
-                                        texts.append(sub["content"])
+                                texts.append(_inline_text(child["content"]))
                             elif child.get("type") == "table_body":
                                 html = child.get("content")
                             for key in ("image_path", "image_url"):
@@ -411,6 +460,11 @@ class MinerUParser:
                         text = "".join(texts)
                     else:
                         text = content
+                        for key in ("image_path", "image_url"):
+                            if block.get(key):
+                                images.append(block[key])
+                        if block.get("image_base64"):
+                            images.append(f"{b.raw.ref}#/pages/{pi}/blocks/{bi}/image_base64")
                     b.add(b.raw, f"/pages/{pi}/blocks/{bi}", index, block["type"], text,
                           block.get("bbox") if attested else None, html, images)
         except (ValueError, TypeError, KeyError, RecursionError):
