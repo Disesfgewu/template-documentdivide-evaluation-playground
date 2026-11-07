@@ -183,6 +183,21 @@ class RealGateRestrictionTests(unittest.TestCase):
                 errors = cre._check_gate_mock_restrictions(item, _make_evidence(), "", item)
                 self.assertTrue(errors, item)
 
+    def test_release_requires_external_verifier(self):
+        errors, _ = cre.check_release_evidence(_make_minimal_doc(), require_release_pass=True)
+        self.assertIn("release mode requires external provenance verification", errors)
+
+    def test_summary_never_claims_pass_on_invalid_evidence(self):
+        doc = _make_minimal_doc()
+        for section in doc.values():
+            for item in section:
+                item.update(status="passed", note="evidence", evidence=[_make_evidence()])
+        errors, inventory = cre.check_release_evidence(doc)
+        self.assertTrue(errors)
+        self.assertEqual(inventory.verdict, "RELEASE_FAILED")
+        self.assertIn("Verdict: RELEASE_FAILED", inventory.summary)
+        self.assertNotIn("RELEASE_PASS", inventory.summary)
+
     def test_release_cannot_disable_gate_checks(self):
         errors, _ = cre.check_release_evidence(_make_minimal_doc(), strict_gates=False,
                                                 require_release_pass=True)

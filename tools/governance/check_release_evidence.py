@@ -504,6 +504,8 @@ def check_release_evidence(
             if isinstance(e, dict) and "id" in e:
                 all_entries[e["id"]] = e
 
+    if require_release_pass and verify is None:
+        errors.append("release mode requires external provenance verification")
     if require_release_pass and not strict_gates:
         errors.append("release mode cannot disable strict gates")
         strict_gates = True
@@ -609,6 +611,7 @@ def check_release_evidence(
     else:
         inventory.verdict = "RELEASE_PASS"
 
+    inventory.summary = re.sub(r"Verdict: \w+$", f"Verdict: {inventory.verdict}", inventory.summary)
     return errors, inventory
 
 
@@ -703,7 +706,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     spec_text = args.spec.read_text(encoding="utf-8") if args.spec.is_file() else None
 
-    verify = ct.github_verifier() if args.verify_provenance else None
+    verify = ct.github_verifier() if args.verify_provenance or args.release else None
     if args.release and args.no_strict_gates:
         print("check_release_evidence: --release cannot disable strict gates", file=sys.stderr)
         return 1
