@@ -4,5 +4,7 @@ pydantic-settings==2.16.2
 uvicorn==0.54.0
 pypdf==6.21.1
 pypdfium2==5.14.0
+# Pinned upstream-output schema validation
+jsonschema==4.26.0
 # test-only
 httpx==0.28.1
