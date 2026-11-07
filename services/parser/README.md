@@ -23,3 +23,68 @@ mkdir -p "$LAB_PARSER_ARTIFACT_ROOT"
 - `lab_parser.render`：用 PDFium 把整頁或某個 SourceRegion 渲染成 L0 PNG（自帶的確定性 RGB 編碼器，不依賴 Pillow），附 sha256 與可重現的轉換資訊（renderer 版本、dpi、裁切 pt）；dpi 限 72–300，單張不超過 16 MP、最長邊 4096 px（SPEC 19.3.8）。
 
 測試（`tests/parser/test_geometry.py`、`test_pages.py`、`test_render.py`）都在測試裡即時產生小型 PDF，不依賴 fixture registry。關鍵測試會在 0/90/180/270 度旋轉、有無 CropBox 偏移的頁面上畫黑框，確認 `to_region_space` 算出的區域經 PDFium 實際渲染後確實是黑的。F02/F05 的 fixture 驗收、匯入檢查與上傳流程等 #34 與 #5/#6 合併後再接。
+
+## Bounded L3 arithmetic derivations (#9 foundation)
+
+`lab_parser.derivations.evaluate_derivation(request)` evaluates an explicit JSON
+arithmetic tree over named, source-linked decimal values. It returns a detached
+L3 `derived_calculation` record with the formula, every operand and source-region
+snapshot, derivation/operation IDs, evaluator revision and a deterministic
+content SHA-256. The status is always `needs_review`: arithmetic does not verify
+that a value was read correctly or that an evidence reference exists.
+
+Run the hand-calculated example (0.3 ms minus 0.1 ms = 0.2 ms):
+
+```bash
+PYTHONPATH=services/parser python - <<'PY'
+import json
+from lab_parser.derivations import evaluate_derivation
+with open("services/parser/examples/derivation-request.json") as source:
+    result = evaluate_derivation(json.load(source))
+print(json.dumps(result, indent=2))
+PY
+```
+
+The internal envelope is versioned `lab-derivation-1`; its exact keys are shown
+in [the example](examples/derivation-request.json). Decimal values are ASCII
+strings, not JSON floats. Each operand has an `operand_id`, `value`, `unit`,
+`value_kind=observed_label`, an `evidence_ref` (ID/revision/SHA-256) and nonempty
+`source_regions` using the original PDF's coordinates. All operands must be used.
+Every region must identify the same PDF logical ID and bytes hash. Page existence,
+evidence hash authenticity and project authorization require repository integration;
+this library only checks the supplied structure and immutable identity snapshots.
+
+The AST follows the existing benchmark Calculation key conventions: leaves are
+`{"ref":"a"}`, and operators are `{"op":"sub","args":[left,right]}`.
+This is a deliberately smaller internal contract, **not** a drop-in implementation
+of the public float-valued Calculation schema: v1 supports binary `add`, `sub`,
+`mul`, `div` only. Constants, `neg`, `abs`, `min`, `max`, public float operands
+and automatic conversion from that contract are unsupported and rejected.
+
+Units are an explicit allowlist (`1`, `s`, `ms`, `m`, `cm`, `kg`, `g`, `count`,
+`%`, `percentage_point`). Add/subtract require identical units. Multiplication
+requires at least one dimensionless (`1`) operand. Division permits a dimensionless
+denominator or equal units (result unit `1`); inverse/compound dimensions are
+rejected. There are no implicit scale conversions; `ms+s` and
+`%+percentage_point` fail. Estimated values and interval propagation require a
+future revision and are rejected, preserving the distinction from exact labels.
+
+The evaluator never executes expression text or model-generated code. It limits
+ASTs to 127 nodes and depth 16, operands to 32, each operand to 16 regions,
+serialized input to 128 KiB, strings to 8192 characters, and total input nodes to
+8192. Cyclic or shared Python containers fail before serialization. Decimal
+arithmetic uses an isolated 80-digit context with explicit rounding/exponent/trap
+settings; inexact or rounded arithmetic (including 1/3), division by zero,
+nonfinite values and intermediate values outside the versioned numeric bounds
+fail with `DerivationError.code`. Inputs/results have at most 56 coefficient
+digits, fractional scale at most 24 and nonzero adjusted exponent in [-24,24].
+No input observations are modified. This callable API does not parse raw JSON;
+any future HTTP/CLI transport must separately reject duplicate JSON object keys.
+
+Actual deterministic coverage is in `tests/parser/test_derivations.py`. It covers
+restricted arithmetic, original/cross-page provenance, content identity, unit
+errors, malicious ASTs, decimal boundaries, cycles and resource limits. It is a
+partial foundation for R27/R29 and SPEC 19.5–19.6, not full T99/A44/A46 evidence.
+Parser/vision quality, artifact/FK checks, PostgreSQL persistence, workflow trace,
+gold publication, human review and end-to-end acceptance remain gated on their
+respective Issues and integrations. No provider or parser calls are made here.
