@@ -126,22 +126,15 @@ def _record_rejection(
     project_id: uuid.UUID,
     actor_id: uuid.UUID,
     reason: str | None,
-    operation_id: uuid.UUID | None = None,
 ) -> None:
     """Record a failed document.import operation and document.rejected audit event in one transaction."""
-    op_id = operation_id or uuid.uuid4()
+    op_id = uuid.uuid4()
     with conn.transaction():
-        if operation_id is not None:
-            conn.execute(
-                "UPDATE operations SET status = 'failed', finished_at = now() WHERE id = %s",
-                (op_id,),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
-                "VALUES (%s, %s, 'document.import', %s, 'failed', now())",
-                (op_id, project_id, actor_id),
-            )
+        conn.execute(
+            "INSERT INTO operations (id, project_id, kind, actor_id, status) "
+            "VALUES (%s, %s, 'document.import', %s, 'failed')",
+            (op_id, project_id, actor_id),
+        )
         conn.execute(
             "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, "
             "reason, outcome, operation_id) "
@@ -182,7 +175,6 @@ def ingest_document(
     data: bytes,
     inspection: Inspection,
     pages: list[PageGeometry],
-    operation_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Ingest an inspected PDF into artifact storage and PostgreSQL within a bounded transaction.
 
@@ -203,7 +195,6 @@ def ingest_document(
             project_id=project_id,
             actor_id=actor_id,
             reason=inspection.reason,
-            operation_id=operation_id,
         )
         raise IngestRejected(inspection.reason)
 
@@ -237,19 +228,12 @@ def ingest_document(
         conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                      (f"document_version:{project_id}:{logical_id}",))
         rev_row = conn.execute(
-            "SELECT id, revision "
+            "SELECT COALESCE(MAX(revision), 0) + 1 "
             "FROM resource_versions "
-            "WHERE project_id = %s AND resource_type = 'document_version' AND logical_id = %s "
-            "ORDER BY revision DESC LIMIT 1",
+            "WHERE project_id = %s AND resource_type = 'document_version' AND logical_id = %s",
             (project_id, logical_id),
         ).fetchone()
-        if rev_row is not None:
-            prev_id, max_rev = rev_row[0], int(rev_row[1])
-            next_revision = max_rev + 1
-            lineage_list = [(prev_id, "supersedes")]
-        else:
-            next_revision = 1
-            lineage_list = []
+        next_revision = int(rev_row[0]) if rev_row is not None else 1
 
         resource_id = record_change(
             conn,
@@ -264,10 +248,8 @@ def ingest_document(
                 c14n_version="raw-bytes",
                 audit_action="document.imported",
                 reason=audit_reason,
-                lineage=lineage_list,
                 outbox_topic="document.imported",
                 outbox_payload=outbox_payload,
-                operation_id=operation_id,
             ),
         )
 
