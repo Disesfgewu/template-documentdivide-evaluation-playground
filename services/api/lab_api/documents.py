@@ -202,7 +202,7 @@ router = APIRouter()
 
 
 async def extract_upload_data(request: Request, max_bytes: int) -> tuple[bytes, Optional[str]]:
-    """Extract PDF bytes and optional logical_id from multipart or raw PDF body."""
+    """Extract PDF bytes and optional logical_id from bounded streaming multipart or raw PDF body."""
     raw_ct = request.headers.get("Content-Type", "").strip()
     ct_lower = raw_ct.lower()
 
@@ -211,11 +211,28 @@ async def extract_upload_data(request: Request, max_bytes: int) -> tuple[bytes, 
         return data, None
 
     if ct_lower.startswith("multipart/form-data"):
-        raw_body = await request.body()
-        if len(raw_body) > max_bytes + 65536:
-            raise ApiError(413, "payload_too_large", "request body exceeds size limit")
+        max_multipart_bytes = max_bytes + 65536
+        cl_header = request.headers.get("Content-Length")
+        if cl_header:
+            try:
+                cl = int(cl_header.strip())
+                if cl > max_multipart_bytes:
+                    raise ApiError(413, "payload_too_large", "request body exceeds size limit")
+            except ValueError:
+                raise ApiError(400, "invalid_content_length", "invalid Content-Length header")
 
-        # Parse multipart message safely using standard library email parser
+        # Stream chunks with strict byte limit to prevent unbounded memory buffering
+        chunks = []
+        total_bytes = 0
+        async for chunk in request.stream():
+            if chunk:
+                total_bytes += len(chunk)
+                if total_bytes > max_multipart_bytes:
+                    raise ApiError(413, "payload_too_large", "request body exceeds size limit")
+                chunks.append(chunk)
+
+        raw_body = b"".join(chunks)
+
         header_bytes = f"Content-Type: {raw_ct}\r\n\r\n".encode("latin-1")
         try:
             msg = email.message_from_bytes(header_bytes + raw_body, policy=email.policy.default)
@@ -290,7 +307,9 @@ async def upload_document_handler(
         if not (1 <= len(idempotency_key) <= 256):
             raise ApiError(400, "bad_request", "invalid idempotency key format")
 
-        with conn.transaction():
+    with conn.transaction():
+        if idempotency_key:
+            # Transaction-scoped advisory lock on (project_id, idempotency_key) held until commit/abort
             conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (f"idempotency:{proj_id}:{idempotency_key}",),
@@ -343,6 +362,9 @@ async def upload_document_handler(
                 if op_status == "failed":
                     raise ApiError(409, "conflict", "idempotency key was used for a failed operation")
 
+                # If op_status is 'intent' (concurrent request still running), fail closed
+                raise ApiError(409, "conflict", "idempotency key operation currently in progress")
+
             op_intent_id = uuid.uuid4()
             conn.execute(
                 "INSERT INTO operations (id, project_id, kind, actor_id, status) VALUES (%s, %s, 'document.import', %s, 'intent')",
@@ -354,10 +376,9 @@ async def upload_document_handler(
                 (proj_id, idempotency_key, request_hash, op_intent_id),
             )
 
-    inspection = inspect_pdf(data, limits=Limits(max_bytes=max_bytes, max_pages=max_pages))
+        inspection = inspect_pdf(data, limits=Limits(max_bytes=max_bytes, max_pages=max_pages))
 
-    if inspection.outcome == "reject":
-        try:
+        if inspection.outcome == "reject":
             db_inspection = Inspection(
                 outcome="reject",
                 reason=inspection.reason,
@@ -366,45 +387,45 @@ async def upload_document_handler(
                 page_count=inspection.page_count,
                 warnings=inspection.warnings,
             )
-            ingest_document(
-                conn,
-                store,
-                project_id=proj_id,
-                actor_id=actor_id,
-                logical_id=logical_id,
-                data=data,
-                inspection=db_inspection,
-                pages=[],
-                operation_id=op_intent_id,
-            )
-        except IngestRejected:
-            pass
+            try:
+                ingest_document(
+                    conn,
+                    store,
+                    project_id=proj_id,
+                    actor_id=actor_id,
+                    logical_id=logical_id,
+                    data=data,
+                    inspection=db_inspection,
+                    pages=[],
+                    operation_id=op_intent_id,
+                )
+            except IngestRejected:
+                pass
 
-        code_map = {
-            "empty_file": ("empty_file", 422),
-            "not_a_pdf": ("invalid_pdf", 422),
-            "corrupt_pdf": ("corrupt_pdf", 422),
-            "encrypted_pdf": ("unsupported_encryption", 422),
-            "page_limit_exceeded": ("page_limit_exceeded", 422),
-            "file_too_large": ("payload_too_large", 413),
-        }
-        code, status_code = code_map.get(inspection.reason or "", ("invalid_pdf", 422))
-        raise ApiError(
-            status_code=status_code,
-            code=code,
-            message=f"document rejected: {inspection.reason}",
-            details={
-                "reason": inspection.reason,
-                "sha256": inspection.sha256,
-                "size_bytes": inspection.size_bytes,
-                "page_count": inspection.page_count,
-            },
-        )
+            code_map = {
+                "empty_file": ("empty_file", 422),
+                "not_a_pdf": ("invalid_pdf", 422),
+                "corrupt_pdf": ("corrupt_pdf", 422),
+                "encrypted_pdf": ("unsupported_encryption", 422),
+                "page_limit_exceeded": ("page_limit_exceeded", 422),
+                "file_too_large": ("payload_too_large", 413),
+            }
+            code, status_code = code_map.get(inspection.reason or "", ("invalid_pdf", 422))
+            return ApiError(
+                status_code=status_code,
+                code=code,
+                message=f"document rejected: {inspection.reason}",
+                details={
+                    "reason": inspection.reason,
+                    "sha256": inspection.sha256,
+                    "size_bytes": inspection.size_bytes,
+                    "page_count": inspection.page_count,
+                },
+            ).to_error_response(request.headers.get("X-Request-Id", "req-1"))
 
-    try:
-        page_infos = extract_pages(data)
-    except Exception as exc:
         try:
+            page_infos = extract_pages(data)
+        except Exception as exc:
             db_inspection = Inspection(
                 outcome="reject",
                 reason="invalid_page_geometry",
@@ -413,90 +434,91 @@ async def upload_document_handler(
                 page_count=inspection.page_count,
                 warnings=inspection.warnings,
             )
-            ingest_document(
-                conn,
-                store,
-                project_id=proj_id,
-                actor_id=actor_id,
-                logical_id=logical_id,
-                data=data,
-                inspection=db_inspection,
-                pages=[],
-                operation_id=op_intent_id,
+            try:
+                ingest_document(
+                    conn,
+                    store,
+                    project_id=proj_id,
+                    actor_id=actor_id,
+                    logical_id=logical_id,
+                    data=data,
+                    inspection=db_inspection,
+                    pages=[],
+                    operation_id=op_intent_id,
+                )
+            except IngestRejected:
+                pass
+
+            return ApiError(
+                status_code=422,
+                code="invalid_page_geometry",
+                message="failed to parse page geometry from PDF",
+                details={"error": type(exc).__name__},
+            ).to_error_response(request.headers.get("X-Request-Id", "req-1"))
+
+        pages = [
+            PageGeometry(
+                page_index=p.page_index,
+                page_label=p.page_label,
+                rotation=p.rotation,
+                display_width_pt=p.display_width_pt,
+                display_height_pt=p.display_height_pt,
             )
-        except IngestRejected:
-            pass
+            for p in page_infos
+        ]
 
-        raise ApiError(
-            status_code=422,
-            code="invalid_page_geometry",
-            message="failed to parse page geometry from PDF",
-            details={"error": type(exc).__name__},
+        db_inspection = Inspection(
+            outcome=inspection.outcome,
+            reason=inspection.reason,
+            sha256=inspection.sha256,
+            size_bytes=inspection.size_bytes,
+            page_count=inspection.page_count,
+            warnings=inspection.warnings,
         )
 
-    pages = [
-        PageGeometry(
-            page_index=p.page_index,
-            page_label=p.page_label,
-            rotation=p.rotation,
-            display_width_pt=p.display_width_pt,
-            display_height_pt=p.display_height_pt,
+        doc_version_id = ingest_document(
+            conn,
+            store,
+            project_id=proj_id,
+            actor_id=actor_id,
+            logical_id=logical_id,
+            data=data,
+            inspection=db_inspection,
+            pages=pages,
+            operation_id=op_intent_id,
         )
-        for p in page_infos
-    ]
 
-    db_inspection = Inspection(
-        outcome=inspection.outcome,
-        reason=inspection.reason,
-        sha256=inspection.sha256,
-        size_bytes=inspection.size_bytes,
-        page_count=inspection.page_count,
-        warnings=inspection.warnings,
-    )
+        row = conn.execute(
+            """
+            SELECT dv.resource_id, dv.artifact_id, rv.revision
+            FROM document_versions dv
+            JOIN resource_versions rv ON rv.id = dv.resource_id
+            WHERE dv.id = %s
+            """,
+            (doc_version_id,),
+        ).fetchone()
+        if row is None:
+            raise ApiError(500, "internal_error", "document version was not persisted")
 
-    doc_version_id = ingest_document(
-        conn,
-        store,
-        project_id=proj_id,
-        actor_id=actor_id,
-        logical_id=logical_id,
-        data=data,
-        inspection=db_inspection,
-        pages=pages,
-        operation_id=op_intent_id,
-    )
+        resource_id, artifact_id, revision = row
 
-    row = conn.execute(
-        """
-        SELECT dv.resource_id, dv.artifact_id, rv.revision
-        FROM document_versions dv
-        JOIN resource_versions rv ON rv.id = dv.resource_id
-        WHERE dv.id = %s
-        """,
-        (doc_version_id,),
-    ).fetchone()
-    if row is None:
-        raise ApiError(500, "internal_error", "document version was not persisted")
-
-    resource_id, artifact_id, revision = row
-
-    return JSONResponse(
-        status_code=201,
-        content={
-            "id": str(doc_version_id),
-            "document_version_id": str(doc_version_id),
-            "project_id": str(proj_id),
-            "resource_id": str(resource_id),
-            "artifact_id": str(artifact_id),
-            "logical_id": logical_id,
-            "revision": revision,
-            "sha256": inspection.sha256,
-            "size_bytes": inspection.size_bytes,
-            "page_count": inspection.page_count,
-            "flagged": inspection.outcome == "flag",
-            "warnings": list(inspection.warnings),
-        },
-    )
+        return JSONResponse(
+            status_code=201,
+            content={
+                "id": str(doc_version_id),
+                "document_version_id": str(doc_version_id),
+                "project_id": str(proj_id),
+                "resource_id": str(resource_id),
+                "artifact_id": str(artifact_id),
+                "logical_id": logical_id,
+                "revision": revision,
+                "sha256": inspection.sha256,
+                "size_bytes": inspection.size_bytes,
+                "page_count": inspection.page_count,
+                "flagged": inspection.outcome == "flag",
+                "warnings": list(inspection.warnings),
+            },
+        )
 
 
 async def download_document_handler(
