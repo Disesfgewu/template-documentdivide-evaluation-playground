@@ -498,8 +498,6 @@ def validate_endpoint_url(
         active_resolver = resolver or default_socket_resolver
         try:
             raw_candidates = active_resolver(host, port)
-        except EndpointPolicyError:
-            raise
         except Exception:
             raise EndpointPolicyError("dns_resolution_failed") from None
     else:
@@ -511,7 +509,17 @@ def validate_endpoint_url(
     validated_ips: list[str] = []
     seen_ips: set[str] = set()
     count = 0
-    for item in raw_candidates:
+    try:
+        candidates_iter = iter(raw_candidates)
+    except Exception:
+        raise EndpointPolicyError("dns_resolution_failed" if resolved_ips is None else "invalid_resolved_ip") from None
+    while True:
+        try:
+            item = next(candidates_iter)
+        except StopIteration:
+            break
+        except Exception:
+            raise EndpointPolicyError("dns_resolution_failed" if resolved_ips is None else "invalid_resolved_ip") from None
         count += 1
         if count > MAX_RESOLVED_ADDRESSES:
             raise EndpointPolicyError("too_many_resolved_ips")

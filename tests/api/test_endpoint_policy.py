@@ -372,6 +372,28 @@ class EndpointPolicyResolvedAddressNegativeTests(unittest.TestCase):
                     )
                 self.assertEqual(cm.exception.code, "invalid_resolved_ip")
 
+    def test_lazy_resolution_failures_are_sanitized_without_partial_results(self):
+        def broken_candidates():
+            yield "93.184.216.34"
+            raise RuntimeError("synthetic-secret-dns")
+
+        for kwargs, code in (
+            ({"resolver": lambda host, port: broken_candidates()}, "dns_resolution_failed"),
+            ({"resolved_ips": broken_candidates()}, "invalid_resolved_ip"),
+        ):
+            with self.subTest(code=code), self.assertRaises(EndpointPolicyError) as cm:
+                validate_endpoint_url("https://svc.example.com/v1/query", self.policy, **kwargs)
+            self.assertEqual(cm.exception.code, code)
+            self.assertNotIn("synthetic-secret-dns", str(cm.exception))
+            self.assertIsNone(cm.exception.__cause__)
+
+        def bad_resolver(host, port):
+            raise EndpointPolicyError("synthetic-secret-dns")
+
+        with self.assertRaises(EndpointPolicyError) as cm:
+            validate_endpoint_url("https://svc.example.com/v1/query", self.policy, resolver=bad_resolver)
+        self.assertEqual(str(cm.exception), "dns_resolution_failed")
+
     def test_resolver_failure_and_socket_resolver_integration(self):
         def failing_resolver(host: str, port: int):
             raise OSError("temporary failure in name resolution")
