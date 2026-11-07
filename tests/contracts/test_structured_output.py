@@ -40,6 +40,7 @@ class StructuredOutputTests(unittest.TestCase):
             return True
         result = execute_structured(request(), Answer, transport=transport,
                                     admit=kwargs.pop("admit", admit),
+                                    release_unsent=kwargs.pop("release_unsent", lambda _: None),
                                     cancelled=kwargs.pop("cancelled", lambda: False), deadline=10,
                                     clock=kwargs.pop("clock", lambda: 0), **kwargs)
         return result, calls, admissions
@@ -76,7 +77,7 @@ class StructuredOutputTests(unittest.TestCase):
     def test_repair_can_be_disabled(self):
         calls = []
         result = execute_structured(request(allow_repair=False), Answer,
-            transport=lambda inv: calls.append(inv) or b'bad', admit=lambda _: True, cancelled=lambda: False,
+            transport=lambda inv: calls.append(inv) or b'bad', admit=lambda _: True, release_unsent=lambda _: None, cancelled=lambda: False,
             deadline=10, clock=lambda: 0)
         self.assertEqual(result.status, "needs_review")
         self.assertEqual(len(calls), 1)
@@ -153,6 +154,65 @@ class StructuredOutputTests(unittest.TestCase):
                 self.assertEqual(result.status, "deadline_exceeded")
                 self.assertEqual(calls, [])
 
+    def test_post_admission_stop_releases_unsent_reservation(self):
+        for reason in ("cancelled", "deadline"):
+            with self.subTest(reason=reason):
+                held, sent, released = set(), [], []
+                state = {"cancelled": False, "time": 0}
+                def admit(inv):
+                    held.add(inv.attempt_number)
+                    if reason == "cancelled":
+                        state["cancelled"] = True
+                    else:
+                        state["time"] = 10
+                    return True
+                def release(inv):
+                    released.append(inv.attempt_number)
+                    held.discard(inv.attempt_number)
+                result = execute_structured(request(), Answer,
+                    transport=lambda inv: sent.append(inv) or GOOD, admit=admit,
+                    release_unsent=release, cancelled=lambda: state["cancelled"],
+                    deadline=10, clock=lambda: state["time"])
+                self.assertEqual(result.status, "cancelled" if reason == "cancelled" else "deadline_exceeded")
+                self.assertEqual((held, sent, released, result.attempts), (set(), [], [1], ()))
+
+    def test_cancelled_repair_releases_only_second_reservation(self):
+        held, released, sent = set(), [], []
+        state = {"cancelled": False}
+        def admit(inv):
+            held.add(inv.attempt_number)
+            if inv.attempt_number == 2:
+                state["cancelled"] = True
+            return True
+        def transport(inv):
+            sent.append(inv.attempt_number)
+            held.remove(inv.attempt_number)  # sent-call accounting path
+            return b"bad"
+        def release(inv):
+            released.append(inv.attempt_number)
+            held.discard(inv.attempt_number)
+        result = execute_structured(request(), Answer, transport=transport, admit=admit,
+            release_unsent=release, cancelled=lambda: state["cancelled"], deadline=10, clock=lambda: 0)
+        self.assertEqual(result.status, "cancelled")
+        self.assertEqual((held, sent, released), (set(), [1], [2]))
+        self.assertEqual(len(result.attempts), 1)
+
+    def test_release_failure_is_blocked_without_disclosing_exception(self):
+        def release(_):
+            raise RuntimeError("SECRET release")
+        flags = iter([False, True])
+        result, calls, _ = self.execute([GOOD], cancelled=lambda: next(flags), release_unsent=release)
+        self.assertEqual((result.status, result.code), ("blocked", "reservation_release_failed"))
+        self.assertEqual(calls, [])
+        self.assertNotIn("SECRET", repr(result))
+
+    def test_sent_call_does_not_use_unsent_release(self):
+        released = []
+        result, calls, _ = self.execute([RuntimeError("unknown")], release_unsent=released.append)
+        self.assertEqual(result.code, "transport_failed")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(released, [])
+
     def test_late_valid_output_is_audit_only(self):
         times = iter([0, 0, 10])
         result, calls, _ = self.execute([GOOD], clock=lambda: next(times))
@@ -193,7 +253,7 @@ class StructuredOutputTests(unittest.TestCase):
     def test_repair_input_has_its_own_combined_byte_limit(self):
         calls = []
         result = execute_structured(request(max_input_bytes=21), Answer,
-            transport=lambda inv: calls.append(inv) or b'bad', admit=lambda _: True, cancelled=lambda: False,
+            transport=lambda inv: calls.append(inv) or b'bad', admit=lambda _: True, release_unsent=lambda _: None, cancelled=lambda: False,
             deadline=10, clock=lambda: 0)
         self.assertEqual((result.status, result.code),
                          ("needs_review", "repair_input_too_large"))
@@ -216,7 +276,7 @@ class StructuredOutputTests(unittest.TestCase):
                 raise RuntimeError("SECRET custom validator error")
         calls = []
         result = execute_structured(request(), Broken,
-            transport=lambda inv: calls.append(inv) or GOOD, admit=lambda _: True, cancelled=lambda: False,
+            transport=lambda inv: calls.append(inv) or GOOD, admit=lambda _: True, release_unsent=lambda _: None, cancelled=lambda: False,
             deadline=10, clock=lambda: 0)
         self.assertEqual((result.status, result.code), ("needs_review", "validator_failed"))
         self.assertEqual(len(calls), 1)
@@ -254,7 +314,7 @@ class StructuredOutputTests(unittest.TestCase):
         from lab_contracts.benchmark import Question
         raw = Path("contracts/examples/valid/Question.cross_page.json").read_bytes()
         result = execute_structured(request(), Question,
-            transport=lambda _: raw, admit=lambda _: True, cancelled=lambda: False,
+            transport=lambda _: raw, admit=lambda _: True, release_unsent=lambda _: None, cancelled=lambda: False,
             deadline=10, clock=lambda: 0)
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.value, Question.model_validate_json(raw))
@@ -264,7 +324,7 @@ class StructuredOutputTests(unittest.TestCase):
         for deadline in [True, float("nan"), float("inf")]:
             with self.subTest(deadline=deadline), self.assertRaises(ValueError):
                 execute_structured(request(), Answer, transport=lambda _: self.fail(),
-                    admit=lambda _: self.fail(), cancelled=lambda: False, deadline=deadline)
+                    admit=lambda _: self.fail(), release_unsent=lambda _: None, cancelled=lambda: False, deadline=deadline)
         with self.assertRaises(ValueError):
             validate_output(GOOD, dict)
 

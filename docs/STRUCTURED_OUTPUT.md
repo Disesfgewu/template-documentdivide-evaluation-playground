@@ -27,8 +27,11 @@ that identity separately.
 Admission must atomically check cancellation and budget and reserve the next
 call's cost. Only exact `True` dispatches; denial or admission exceptions fail
 closed. Rechecking a monotonic deadline after admission prevents a slow admission
-from authorizing an already expired dispatch. The admission owner must release
-or reconcile a reservation if the deadline expires before dispatch. Transport
+from authorizing an already expired dispatch. The required `release_unsent(invocation)` callback idempotently releases a
+reservation when cancellation, deadline or a failed post-admission check stops
+dispatch. A release exception returns `blocked/reservation_release_failed`; the
+owner must reconcile it. Actual transport calls remain on the separate attempt
+accounting path, including transport exceptions with unknown outcome. Transport
 exceptions are not retried or sent for JSON repair. This executor owns the one
 schema-repair decision; transport retries must be disabled here, with any later
 retry managed explicitly by the durable operation owner.
@@ -76,7 +79,8 @@ request = StructuredRequest(
 )
 result = execute_structured(
     request, Question, transport=lambda invocation: sample,
-    admit=lambda invocation: True, cancelled=lambda: False,
+    admit=lambda invocation: True, release_unsent=lambda invocation: None,
+    cancelled=lambda: False,
     deadline=time.monotonic() + 5,
 )
 assert result.status == "succeeded"

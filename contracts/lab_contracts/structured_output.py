@@ -162,6 +162,7 @@ def execute_structured(
     *,
     transport: Callable[[Invocation], bytes],
     admit: Callable[[Invocation], bool],
+    release_unsent: Callable[[Invocation], None],
     cancelled: Callable[[], bool],
     deadline: float,
     clock: Callable[[], float] = time.monotonic,
@@ -170,6 +171,8 @@ def execute_structured(
 
     Admission must atomically check cancellation/deadline and reserve the full
     next call's cost. Only exact True permits dispatch; failures deny it. The
+    release_unsent must idempotently release an admitted but unsent call; a
+    release failure is reported as blocked and requires reconciliation. The
     transport must enforce its own network/CPU/response limits and account for
     each actual attempt; this synchronous boundary cannot interrupt it. Never
     configure transport retries underneath this executor. A returned result
@@ -178,6 +181,8 @@ def execute_structured(
     if not isinstance(request, StructuredRequest):
         raise ValueError("StructuredRequest required")
     _contract(model)
+    if not callable(release_unsent):
+        raise ValueError("release_unsent callback required")
     if type(deadline) not in (int, float) or not math.isfinite(deadline):
         raise ValueError("finite monotonic deadline required")
     attempts: list[Attempt] = []
@@ -214,12 +219,20 @@ def execute_structured(
             return result("blocked", "admission_failed")
         if allowed is not True:
             return result("blocked", "admission_denied")
-        # Admission may itself take time. Recheck before any external effect.
-        stopped = cancellation_result()
+        # A successful admission owns a reservation until transport is invoked.
+        # Release it on every pre-dispatch exit, including callback failure.
+        try:
+            stopped = cancellation_result()
+            if stopped is None and clock() >= deadline:
+                stopped = result("deadline_exceeded", "deadline_exceeded")
+        except Exception:
+            stopped = result("blocked", "clock_check_failed")
         if stopped is not None:
+            try:
+                release_unsent(invocation)
+            except Exception:
+                return result("blocked", "reservation_release_failed")
             return stopped
-        if clock() >= deadline:
-            return result("deadline_exceeded", "deadline_exceeded")
         try:
             raw = transport(invocation)
         except Exception:
