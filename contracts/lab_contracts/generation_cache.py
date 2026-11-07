@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import Enum
 import math
 from typing import Annotated, Any, Literal, Optional
 
@@ -386,6 +387,22 @@ class GenerationConfig(Contract):
     selection_rule_version: Optional[NonWhiteId] = None
     parameters: dict[str, Any] = Field(default_factory=dict)
 
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("mode") == "json":
+            raise TypeError(
+                "GenerationConfig.model_dump(mode='json') is disabled because Pydantic converts "
+                "exact Decimal parameter numbers to strings; use dump_generation_cache_input_json() "
+                "or model_dump(mode='python')"
+            )
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        """Serialize with lab-c14n-2 canonical_json so exact Decimal numbers in
+        ``parameters`` remain JSON numbers (never converted to JSON strings)."""
+        if args or kwargs:
+            raise TypeError("GenerationConfig.model_dump_json() takes no formatting arguments; use canonical JSON")
+        return canonical_json(_to_canonical_serializable(self.model_dump(mode="python", warnings=False))).decode("utf-8")
+
     @model_validator(mode="after")
     def _validate_config(self):
         for name in (
@@ -446,6 +463,22 @@ class GenerationCacheInput(Contract):
     visual_provenance: Annotated[list[VisualCropProvenance], Field(max_length=MAX_VISUAL_ARTIFACTS)] = Field(
         default_factory=list
     )
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("mode") == "json":
+            raise TypeError(
+                "GenerationCacheInput.model_dump(mode='json') is disabled because Pydantic converts "
+                "exact Decimal parameter numbers to strings; use dump_generation_cache_input_json() "
+                "or model_dump(mode='python')"
+            )
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        """Serialize with lab-c14n-2 canonical_json so exact Decimal numbers in
+        ``generation_config.parameters`` remain JSON numbers on round trip."""
+        if args or kwargs:
+            raise TypeError("GenerationCacheInput.model_dump_json() takes no formatting arguments; use canonical JSON")
+        return dump_generation_cache_input_json(self).decode("utf-8")
 
     @model_validator(mode="after")
     def _validate_binding(self):
@@ -874,6 +907,39 @@ def build_generation_cache_key(cache_input: GenerationCacheInput) -> GenerationC
         visual_provenance_sha256=visual_sha,
         canonical_payload=raw_bytes,
     )
+
+
+def _to_canonical_serializable(value: Any) -> Any:
+    """Convert validated Python contract structures into plain JSON-compatible
+    containers while preserving exact ``Decimal`` instances for ``canonical_json``."""
+    if value is None or isinstance(value, (bool, str, int, float, Decimal)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (list, tuple)):
+        return [_to_canonical_serializable(item) for item in value]
+    if isinstance(value, dict):
+        return {k: _to_canonical_serializable(v) for k, v in value.items()}
+    raise TypeError(f"unsupported value for canonical serialization: {type(value).__name__}")
+
+
+def dump_generation_cache_input_json(cache_input: GenerationCacheInput) -> bytes:
+    """Serialize ``GenerationCacheInput`` to canonical UTF-8 JSON bytes
+    (``lab-c14n-2``), preserving exact ``Decimal`` numeric tokens in
+    ``generation_config.parameters`` as JSON numbers so round-tripping through
+    ``parse_generation_cache_input`` yields an identical model and cache key."""
+    if not isinstance(cache_input, GenerationCacheInput):
+        raise TypeError("cache_input must be a GenerationCacheInput")
+    validated = GenerationCacheInput.model_validate(
+        cache_input.model_dump(mode="python", warnings=False)
+    )
+    serializable = _to_canonical_serializable(
+        validated.model_dump(mode="python", warnings=False)
+    )
+    raw = canonical_json(serializable)
+    if len(raw) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("generation cache input exceeds 16 MiB")
+    return raw
 
 
 def parse_generation_cache_input(raw: bytes | str) -> GenerationCacheInput:

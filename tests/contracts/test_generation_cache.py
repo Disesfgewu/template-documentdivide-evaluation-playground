@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 import random
@@ -25,6 +26,7 @@ from lab_contracts.generation_cache import (
     VisualCropProvenance,
     VisualRegionRef,
     build_generation_cache_key,
+    dump_generation_cache_input_json,
     parse_generation_cache_input,
 )
 from lab_contracts.method import CANONICAL_JSON_VERSION, StrictJSONError
@@ -447,6 +449,127 @@ class CanonicalizationTests(unittest.TestCase):
         self.assertNotEqual(desc_a.cache_key, desc_d.cache_key)
         self.assertEqual(desc_a.generation_config_sha256, desc_a_equiv.generation_config_sha256)
         self.assertEqual(desc_a.cache_key, desc_a_equiv.cache_key)
+
+    def test_decimal_parameters_round_trip_through_json_serialization_without_becoming_strings(self):
+        # Regression: standard Pydantic model_dump_json() / model_dump(mode="json")
+        # emits Decimal objects as JSON strings, so
+        # parse_generation_cache_input(model.model_dump_json()) would turn exact
+        # numeric parameters (e.g. 0.1234567890123456789) into strings and change
+        # the cache key. Verify both dump_generation_cache_input_json() and
+        # model_dump_json() preserve exact JSON numbers across round-trips,
+        # canonicalize equivalent numeric representations identically, resist
+        # collisions between distinct numbers, do not coerce numeric strings, and
+        # block accidental model_dump(mode="json").
+        base = _make_visual_input()
+        base["generation_config"]["parameters"] = {
+            "ratio": "__RATIO__",
+            "threshold": "__THRESH__",
+            "string_number": "0.1234567890123456789",
+            "nested": {
+                "weights": ["__W0__", {"deep_decimal": "__DEEP__", "deep_str": "9007199254740993.0"}],
+            },
+        }
+        template = json.dumps(base, ensure_ascii=False)
+
+        raw_1 = (
+            template.replace('"__RATIO__"', "0.1234567890123456789")
+            .replace('"__THRESH__"', "9007199254740992.0")
+            .replace('"__W0__"', "12345678901234567890.123456789")
+            .replace('"__DEEP__"', "0.10000000000000000001")
+        )
+        raw_1_equiv = (
+            template.replace('"__RATIO__"', "1.2345678901234567890e-1")
+            .replace('"__THRESH__"', "9007199254740992")
+            .replace('"__W0__"', "12345678901234567890.12345678900")
+            .replace('"__DEEP__"', "1.0000000000000000001e-1")
+        )
+        raw_2_distinct = (
+            template.replace('"__RATIO__"', "0.1234567890123456789")
+            .replace('"__THRESH__"', "9007199254740993.0")
+            .replace('"__W0__"', "12345678901234567890.123456789")
+            .replace('"__DEEP__"', "0.10000000000000000001")
+        )
+        raw_3_stringified_ratio = (
+            template.replace('"__RATIO__"', '"0.1234567890123456789"')
+            .replace('"__THRESH__"', "9007199254740992.0")
+            .replace('"__W0__"', "12345678901234567890.123456789")
+            .replace('"__DEEP__"', "0.10000000000000000001")
+        )
+
+        inp_1 = parse_generation_cache_input(raw_1)
+        inp_1_equiv = parse_generation_cache_input(raw_1_equiv)
+        inp_2 = parse_generation_cache_input(raw_2_distinct)
+        inp_3_str = parse_generation_cache_input(raw_3_stringified_ratio)
+
+        desc_1 = build_generation_cache_key(inp_1)
+        desc_1_equiv = build_generation_cache_key(inp_1_equiv)
+        desc_2 = build_generation_cache_key(inp_2)
+        desc_3_str = build_generation_cache_key(inp_3_str)
+
+        # Round-trip via explicit boundary dump_generation_cache_input_json()
+        dumped_bytes = dump_generation_cache_input_json(inp_1)
+        inp_rt_bytes = parse_generation_cache_input(dumped_bytes)
+        desc_rt_bytes = build_generation_cache_key(inp_rt_bytes)
+
+        # Round-trip via model_dump_json()
+        dumped_text = inp_1.model_dump_json()
+        self.assertEqual(dumped_text.encode("utf-8"), dumped_bytes)
+        inp_rt_text = parse_generation_cache_input(dumped_text)
+        desc_rt_text = build_generation_cache_key(inp_rt_text)
+
+        # GenerationConfig.model_dump_json() also emits exact JSON numbers, not strings
+        cfg_json = inp_1.generation_config.model_dump_json()
+        self.assertIn('"ratio":0.1234567890123456789', cfg_json)
+        self.assertNotIn('"ratio":"0.1234567890123456789"', cfg_json)
+        self.assertIn('"string_number":"0.1234567890123456789"', cfg_json)
+
+        # Exact Decimal / int numeric types and values survive round-trip (never turned into str)
+        params_rt = inp_rt_text.generation_config.parameters
+        self.assertIsInstance(params_rt["ratio"], Decimal)
+        self.assertEqual(params_rt["ratio"], Decimal("0.1234567890123456789"))
+        self.assertIsInstance(params_rt["threshold"], (int, Decimal))
+        self.assertNotIsInstance(params_rt["threshold"], (bool, str))
+        self.assertEqual(params_rt["threshold"], 9007199254740992)
+        self.assertIsInstance(params_rt["nested"]["weights"][0], Decimal)
+        self.assertEqual(params_rt["nested"]["weights"][0], Decimal("12345678901234567890.123456789"))
+        self.assertIsInstance(params_rt["nested"]["weights"][1]["deep_decimal"], Decimal)
+        self.assertEqual(params_rt["nested"]["weights"][1]["deep_decimal"], Decimal("0.10000000000000000001"))
+
+        # Numeric strings remain str and are never coerced to Decimal/numbers
+        self.assertIsInstance(params_rt["string_number"], str)
+        self.assertEqual(params_rt["string_number"], "0.1234567890123456789")
+        self.assertIsInstance(params_rt["nested"]["weights"][1]["deep_str"], str)
+        self.assertEqual(params_rt["nested"]["weights"][1]["deep_str"], "9007199254740993.0")
+
+        # Keys and component hashes are identical before and after round-trip
+        self.assertEqual(desc_rt_bytes, desc_1)
+        self.assertEqual(desc_rt_text, desc_1)
+
+        # Equivalent canonical numeric representations serialize to identical bytes and keys
+        self.assertEqual(dump_generation_cache_input_json(inp_1_equiv), dumped_bytes)
+        self.assertEqual(desc_1_equiv.cache_key, desc_1.cache_key)
+
+        # Distinct large/nested decimals and stringified numbers remain distinct after round-trip
+        inp_2_rt = parse_generation_cache_input(inp_2.model_dump_json())
+        inp_3_rt = parse_generation_cache_input(inp_3_str.model_dump_json())
+        self.assertEqual(build_generation_cache_key(inp_2_rt).cache_key, desc_2.cache_key)
+        self.assertEqual(build_generation_cache_key(inp_3_rt).cache_key, desc_3_str.cache_key)
+        self.assertNotEqual(desc_1.cache_key, desc_2.cache_key)
+        self.assertNotEqual(desc_1.cache_key, desc_3_str.cache_key)
+        self.assertIsInstance(inp_3_rt.generation_config.parameters["ratio"], str)
+
+        # Lossy Pydantic model_dump(mode="json") and non-canonical formatting args are blocked
+        with self.assertRaises(TypeError):
+            inp_1.model_dump(mode="json")
+        with self.assertRaises(TypeError):
+            inp_1.generation_config.model_dump(mode="json")
+        with self.assertRaises(TypeError):
+            inp_1.model_dump_json(indent=2)
+        with self.assertRaises(TypeError):
+            inp_1.generation_config.model_dump_json(indent=2)
+        with self.assertRaises(TypeError):
+            dump_generation_cache_input_json({"not": "a model"})  # type: ignore[arg-type]
+
 
         # Non-parameter float fields (e.g., temperature) reject lossy decimal tokens
         lossy_temp = json.dumps(_make_text_input()).replace(

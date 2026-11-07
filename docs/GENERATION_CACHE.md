@@ -74,8 +74,14 @@ A `GenerationCacheInput` requires and cross-validates five components:
   `generation_config.parameters` (top-level and nested) so high-precision JSON
   numbers such as `9007199254740992.0` vs `9007199254740993.0` never collide
   under binary64 rounding, and rejects lossy decimal tokens on fixed binary64
-  float fields. `build_generation_cache_key` re-validates Python inputs so
-  in-place mutations or `model_construct` callers cannot bypass checks.
+  float fields. `dump_generation_cache_input_json` (and
+  `GenerationCacheInput.model_dump_json()` / `GenerationConfig.model_dump_json()`)
+  serializes through `lab-c14n-2` `canonical_json` so exact `Decimal` values
+  remain JSON numbers across serialization round-trips without converting
+  numbers to strings or coercing numeric strings; `model_dump(mode="json")` is
+  explicitly rejected to prevent accidental lossy string conversion.
+  `build_generation_cache_key` re-validates Python inputs so in-place mutations
+  or `model_construct` callers cannot bypass checks.
 - Untrusted PDF text, quotes and parameter strings are serialized strictly as
   JSON string values and never interpreted as policy or instructions.
 
