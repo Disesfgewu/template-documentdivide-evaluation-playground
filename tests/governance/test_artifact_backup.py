@@ -65,6 +65,15 @@ class ArtifactBackupTests(unittest.TestCase):
         with self.assertRaises(BackupError): restore_bundle(json.dumps(doc).encode(), self.destination)
         self.assertFalse(self.destination.exists())
 
+    def test_oversized_json_integer_is_rejected_without_destination(self):
+        payload = b'{"format":' + b'9' * 5000 + b',"objects":[]}'
+        with self.assertRaisesRegex(BackupError, "invalid bundle JSON"):
+            restore_bundle(payload, self.destination)
+        self.assertFalse(self.destination.exists())
+        with self.assertRaisesRegex(BackupError, "duplicate JSON field"):
+            restore_bundle(b'{"format":1,"format":2}', self.destination)
+        self.assertFalse(self.destination.exists())
+
     def test_existing_destination_is_never_replaced(self):
         self.destination.mkdir()
         (self.destination / 'keep').write_text('keep')

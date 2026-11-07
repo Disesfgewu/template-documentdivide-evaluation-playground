@@ -104,7 +104,9 @@ def restore_bundle(bundle: bytes, destination: Path) -> int:
         raise BackupError("invalid bundle size")
     try:
         doc = json.loads(bundle, object_pairs_hook=_unique_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    except BackupError:
+        raise
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise BackupError("invalid bundle JSON") from exc
     if not isinstance(doc, dict) or set(doc) != {'format', 'objects'} or doc['format'] != 'lab-artifact-bundle-1':
         raise BackupError("unsupported bundle")
