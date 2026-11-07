@@ -275,6 +275,18 @@ class RestoredInventoryVerificationTests(unittest.TestCase):
             verify_restored_inventory(large_json, self.store_root, max_inventory_bytes=10)
         self.assertIn("exceeds limit 10", str(ctx.exception))
 
+    def test_oversized_inventory_does_not_open_root(self) -> None:
+        key, _, size = _make_object(b"x")
+        with mock.patch.object(ri, "_open_root_no_follow", wraps=ri._open_root_no_follow) as open_root:
+            for _ in range(100):
+                with self.assertRaises(InventoryVerificationError):
+                    verify_restored_inventory(
+                        [{"object_key": key, "size_bytes": size}],
+                        self.store_root,
+                        max_total_bytes=0,
+                    )
+            open_root.assert_not_called()
+
     def test_missing_artifact_fails_closed(self) -> None:
         key, _, size = _make_object(b"nonexistent artifact")
         # Ensure sha256 directory exists

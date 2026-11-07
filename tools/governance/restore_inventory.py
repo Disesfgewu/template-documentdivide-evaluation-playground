@@ -519,16 +519,16 @@ def verify_restored_inventory(
         allow_empty=allow_empty,
     )
 
-    root_path = Path(store_root)
-    root_fd, (orig_root_dev, orig_root_ino) = _open_root_no_follow(root_path)
-    orig_root_id = (orig_root_dev, orig_root_ino)
-
     # Check aggregate expected bytes bound before any reading
     total_expected = sum(item.size_bytes for item in items)
     if total_expected > max_total_bytes:
         raise InventoryVerificationError(
             f"aggregate inventory bytes {total_expected} exceeds limit {max_total_bytes}"
         )
+
+    root_path = Path(store_root)
+    root_fd, (orig_root_dev, orig_root_ino) = _open_root_no_follow(root_path)
+    orig_root_id = (orig_root_dev, orig_root_ino)
 
     total_bytes = 0
     verified_keys: list[str] = []
