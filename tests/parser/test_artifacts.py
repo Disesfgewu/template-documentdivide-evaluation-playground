@@ -452,6 +452,18 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         for stg in self._stage_files():
             stg.unlink()
 
+    def test_cleanup_failure_closes_open_file_descriptors(self) -> None:
+        self.source.write_bytes(b"not a pdf")
+        before = len(os.listdir("/proc/self/fd"))
+        with patch.object(artifacts.os, "unlink", side_effect=OSError(errno.EIO, "secret")):
+            for _ in range(5):
+                with self.assertRaises(PdfArtifactError) as ctx:
+                    ingest_pdf_artifact(self.source, self.artifact_root)
+                self.assertEqual(ctx.exception.code, "cleanup_failed")
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+        for stage in self._stage_files():
+            stage.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()

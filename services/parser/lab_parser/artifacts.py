@@ -616,19 +616,21 @@ def ingest_pdf_artifact(
             warnings=inspection.warnings,
         )
     finally:
-        if stage_path is not None:
-            try:
-                os.unlink(
-                    stage_path.name if root_fd >= 0 else stage_path,
-                    dir_fd=root_fd if root_fd >= 0 else None,
-                )
-            except FileNotFoundError:
-                pass
-            except OSError:
-                raise PdfArtifactError("cleanup_failed") from None
-        for fd in (prefix_dir_fd, sha_dir_fd, stage_fd, source_fd, root_fd):
-            if fd >= 0:
+        try:
+            if stage_path is not None:
                 try:
-                    os.close(fd)
-                except OSError:
+                    os.unlink(
+                        stage_path.name if root_fd >= 0 else stage_path,
+                        dir_fd=root_fd if root_fd >= 0 else None,
+                    )
+                except FileNotFoundError:
                     pass
+                except OSError:
+                    raise PdfArtifactError("cleanup_failed") from None
+        finally:
+            for fd in (prefix_dir_fd, sha_dir_fd, stage_fd, source_fd, root_fd):
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
