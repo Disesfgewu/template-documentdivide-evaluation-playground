@@ -132,6 +132,23 @@ class StrictTraceparentValidationTests(unittest.TestCase):
 
 
 class FastAPITraceContextTests(unittest.TestCase):
+    def test_trust_override_rejects_non_boolean_values(self):
+        settings = make_settings()
+        for invalid in ("false", "true", 0, 1, [], object()):
+            with self.subTest(invalid=repr(invalid)):
+                with self.assertRaises(TypeError):
+                    create_app(settings, checks={}, trust_remote_traceparent=invalid)
+                with self.assertRaises(TypeError):
+                    TraceContextMiddleware(None, trust_remote_traceparent=invalid)
+                with self.assertRaises(TypeError):
+                    resolve_request_trace_context([], trust_remote_traceparent=invalid)
+        # None is only a valid create_app override: it selects the validated setting.
+        create_app(settings, checks={}, trust_remote_traceparent=None)
+        with self.assertRaises(TypeError):
+            TraceContextMiddleware(None, trust_remote_traceparent=None)
+        with self.assertRaises(TypeError):
+            resolve_request_trace_context([], trust_remote_traceparent=None)
+
     def _build_observed_app(self, *, trust_remote: bool = False, setting_env: dict[str, str] | None = None):
         s = make_settings(**(setting_env or {}))
         app = create_app(

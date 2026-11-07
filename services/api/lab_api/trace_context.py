@@ -217,6 +217,8 @@ def resolve_request_trace_context(
       HTTP request and instead starts a fresh ``trace_id`` with ``ingress`` set
       to ``"absent"`` or ``"rejected"``.
     """
+    if type(trust_remote_traceparent) is not bool:
+        raise TypeError("trust_remote_traceparent must be a bool")
     request_id = new_request_id()
     span_id = new_span_id()
 
@@ -316,8 +318,10 @@ class TraceContextMiddleware:
         *,
         trust_remote_traceparent: bool = False,
     ) -> None:
+        if type(trust_remote_traceparent) is not bool:
+            raise TypeError("trust_remote_traceparent must be a bool")
         self.app = app
-        self.trust_remote_traceparent = bool(trust_remote_traceparent)
+        self.trust_remote_traceparent = trust_remote_traceparent
 
     async def __call__(
         self,

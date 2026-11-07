@@ -44,10 +44,12 @@ def create_app(
 ) -> FastAPI:
     settings = settings or load_settings()
     checks = checks if checks is not None else default_checks(settings)
+    if trust_remote_traceparent is not None and type(trust_remote_traceparent) is not bool:
+        raise TypeError("trust_remote_traceparent must be a bool or None")
     trust_traceparent = (
         settings.trust_remote_traceparent
         if trust_remote_traceparent is None
-        else bool(trust_remote_traceparent)
+        else trust_remote_traceparent
     )
 
     app = _TraceCorrelatedFastAPI(
