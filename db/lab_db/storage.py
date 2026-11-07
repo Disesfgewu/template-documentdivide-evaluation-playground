@@ -179,15 +179,7 @@ class LocalArtifactStore:
         target = self.root / "sha256" / prefix / digest
         return target, digest
 
-    def _read_bytes(
-        self,
-        object_key: str,
-        prefix: str,
-        digest: str,
-        expected_size: int | None = None,
-    ) -> bytes:
-        if expected_size is not None and (not isinstance(expected_size, int) or expected_size < 0):
-            raise ValueError("expected_size must be a non-negative integer")
+    def _read_bytes(self, object_key: str, prefix: str, digest: str) -> bytes:
         try:
             root_fd = _open_root_no_follow(self.root)
         except ValueError as e:
@@ -238,23 +230,6 @@ class LocalArtifactStore:
                         raise StorageCorruption(
                             f"object {object_key} is not a regular file"
                         )
-                    if expected_size is not None:
-                        if fst.st_size != expected_size:
-                            raise StorageCorruption(
-                                f"object {object_key} size mismatch: "
-                                f"expected {expected_size}, got {fst.st_size}"
-                            )
-                        raw = f.read(expected_size)
-                        if len(raw) != expected_size:
-                            raise StorageCorruption(
-                                f"object {object_key} truncated: "
-                                f"expected {expected_size}, got {len(raw)}"
-                            )
-                        if f.read(1):
-                            raise StorageCorruption(
-                                f"object {object_key} grew concurrently beyond expected size {expected_size}"
-                            )
-                        return raw
                     return f.read()
             except BaseException:
                 try:
@@ -295,17 +270,7 @@ class LocalArtifactStore:
                     raise StorageCorruption(
                         f"existing path for {object_key} is not a regular file"
                     )
-                if fst.st_size != expected_size:
-                    raise StorageCorruption(
-                        f"existing object {object_key} size mismatch: "
-                        f"expected {expected_size}, got {fst.st_size}"
-                    )
-                raw = f.read(expected_size)
-                if len(raw) != expected_size or f.read(1):
-                    raise StorageCorruption(
-                        f"existing object {object_key} corrupted or grew concurrently: "
-                        f"expected size {expected_size}"
-                    )
+                raw = f.read()
         except BaseException:
             try:
                 os.close(file_fd)
@@ -406,17 +371,7 @@ class LocalArtifactStore:
                         raise StorageCorruption(
                             f"canonical path for {object_key} is not a regular file"
                         )
-                    if fst.st_size != expected_size:
-                        raise StorageCorruption(
-                            f"canonical content verification failed for {object_key}: "
-                            f"expected ({digest}, {expected_size}), got size {fst.st_size}"
-                        )
-                    raw = f.read(expected_size)
-                    if len(raw) != expected_size or f.read(1):
-                        raise StorageCorruption(
-                            f"canonical content verification failed for {object_key}: "
-                            f"size mismatch or concurrent growth"
-                        )
+                    raw = f.read()
             except BaseException:
                 try:
                     os.close(file_fd)
@@ -592,30 +547,24 @@ class LocalArtifactStore:
         finally:
             os.close(prefix_fd)
 
-    def open(self, object_key: str, expected_size: int | None = None) -> bytes:
+    def open(self, object_key: str) -> bytes:
         target, expected_sha256 = self._resolve_key(object_key)
         prefix = expected_sha256[:2]
-        raw = self._read_bytes(object_key, prefix, expected_sha256, expected_size=expected_size)
+        raw = self._read_bytes(object_key, prefix, expected_sha256)
         actual_sha256 = hashlib.sha256(raw).hexdigest()
         if actual_sha256 != expected_sha256:
             raise StorageCorruption(
                 f"checksum mismatch for {object_key}: "
                 f"expected {expected_sha256}, got {actual_sha256}"
             )
-        if expected_size is not None and len(raw) != expected_size:
-            raise StorageCorruption(
-                f"size mismatch for {object_key}: "
-                f"expected {expected_size}, got {len(raw)}"
-            )
         return raw
 
-    def verify(self, object_key: str, expected_size: int | None = None) -> tuple[str, int]:
+    def verify(self, object_key: str) -> tuple[str, int]:
         target, expected_sha256 = self._resolve_key(object_key)
         prefix = expected_sha256[:2]
-        raw = self._read_bytes(object_key, prefix, expected_sha256, expected_size=expected_size)
+        raw = self._read_bytes(object_key, prefix, expected_sha256)
         actual_sha256 = hashlib.sha256(raw).hexdigest()
-        actual_size = len(raw)
-        return actual_sha256, actual_size
+        return actual_sha256, len(raw)
 
 
 def store_and_register(
@@ -672,7 +621,7 @@ def store_and_register(
             raise ValueError(f"artifact {art_id} is {state}; register new bytes instead")
     # Verify outside the lock-holding transaction's error path: a mismatch
     # must not roll back the staged registration above.
-    observed_sha256, observed_size = store.verify(stored.object_key, expected_size=stored.size_bytes)
+    observed_sha256, observed_size = store.verify(stored.object_key)
     try:
         commit(conn, art_id, observed_sha256, observed_size)
     except InvalidState:

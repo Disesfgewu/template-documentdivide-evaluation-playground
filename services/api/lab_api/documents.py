@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import email
 import email.policy
-from email.parser import BytesFeedParser
 import hashlib
 import sys
 import uuid
@@ -19,9 +18,9 @@ import psycopg
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
-from lab_db.ingest import IngestRejected, Inspection, PageGeometry, _record_rejection, ingest_document
+from lab_db.ingest import IngestRejected, Inspection, PageGeometry, ingest_document
 from lab_db.repo import NotFound, PermissionDenied, authorize
-from lab_db.storage import LocalArtifactStore, StorageCorruption
+from lab_db.storage import LocalArtifactStore
 from lab_parser.importer import Limits, inspect_pdf
 from lab_parser.pages import extract_pages
 
@@ -224,25 +223,25 @@ async def extract_upload_data(request: Request, max_bytes: int) -> tuple[bytes, 
             if cl > max_multipart_bytes:
                 raise ApiError(413, "payload_too_large", "request body exceeds size limit")
 
-        try:
-            header_bytes = f"Content-Type: {raw_ct}\r\n\r\n".encode("latin-1")
-        except UnicodeEncodeError:
-            raise ApiError(400, "invalid_request", "invalid characters in Content-Type header")
-
-        parser = BytesFeedParser(policy=email.policy.default)
-        parser.feed(header_bytes)
-
-        # Stream chunks directly into feed parser with strict byte limit to prevent unbounded memory buffering
+        # Stream chunks with strict byte limit to prevent unbounded memory buffering
+        chunks = []
         total_bytes = 0
         async for chunk in request.stream():
             if chunk:
                 total_bytes += len(chunk)
                 if total_bytes > max_multipart_bytes:
                     raise ApiError(413, "payload_too_large", "request body exceeds size limit")
-                parser.feed(chunk)
+                chunks.append(chunk)
+
+        raw_body = b"".join(chunks)
 
         try:
-            msg = parser.close()
+            header_bytes = f"Content-Type: {raw_ct}\r\n\r\n".encode("latin-1")
+        except UnicodeEncodeError:
+            raise ApiError(400, "invalid_request", "invalid characters in Content-Type header")
+
+        try:
+            msg = email.message_from_bytes(header_bytes + raw_body, policy=email.policy.default)
         except Exception as exc:
             raise ApiError(400, "invalid_request", f"malformed multipart body ({type(exc).__name__})")
 
@@ -387,72 +386,7 @@ async def upload_document_handler(
                     raise ApiError(500, "internal_error", "replayed document version not found")
 
                 if op_status == "failed":
-                    outbox_row = conn.execute(
-                        """
-                        SELECT payload FROM outbox_events
-                        WHERE project_id = %s AND operation_id = %s AND topic = 'document.rejected'
-                        ORDER BY id DESC LIMIT 1
-                        """,
-                        (proj_id, existing_op),
-                    ).fetchone()
-                    if outbox_row is not None:
-                        payload = outbox_row[0]
-                        if isinstance(payload, str):
-                            import json
-                            payload = json.loads(payload)
-                        status_code = payload.get("status_code", 422)
-                        code = payload.get("code", "invalid_pdf")
-                        message = payload.get("message", "document rejected")
-                        details = dict(payload.get("details") or {})
-                        details["replayed"] = True
-                        req_id = request.headers.get("X-Request-Id", "req-1")
-                        return JSONResponse(
-                            status_code=status_code,
-                            content={
-                                "error": {
-                                    "code": code,
-                                    "message": message,
-                                    "retryable": payload.get("retryable", False),
-                                    "request_id": req_id,
-                                    "details": details,
-                                    "retry_after": None,
-                                }
-                            },
-                        )
-
-                    audit_row = conn.execute(
-                        """
-                        SELECT reason FROM audit_events
-                        WHERE project_id = %s AND operation_id = %s AND action = 'document.rejected'
-                        ORDER BY id DESC LIMIT 1
-                        """,
-                        (proj_id, existing_op),
-                    ).fetchone()
-                    reason = audit_row[0] if audit_row else "rejected"
-                    code_map = {
-                        "empty_file": ("empty_file", 422),
-                        "not_a_pdf": ("invalid_pdf", 422),
-                        "corrupt_pdf": ("corrupt_pdf", 422),
-                        "encrypted_pdf": ("unsupported_encryption", 422),
-                        "page_limit_exceeded": ("page_limit_exceeded", 422),
-                        "file_too_large": ("payload_too_large", 413),
-                        "invalid_page_geometry": ("invalid_page_geometry", 422),
-                    }
-                    code, status_code = code_map.get(reason or "", ("invalid_pdf", 422))
-                    req_id = request.headers.get("X-Request-Id", "req-1")
-                    return JSONResponse(
-                        status_code=status_code,
-                        content={
-                            "error": {
-                                "code": code,
-                                "message": f"document rejected: {reason}",
-                                "retryable": False,
-                                "request_id": req_id,
-                                "details": {"reason": reason, "replayed": True},
-                                "retry_after": None,
-                            }
-                        },
-                    )
+                    raise ApiError(409, "conflict", "idempotency key was used for a failed operation")
 
                 # If op_status is 'intent' (concurrent request still running), fail closed
                 raise ApiError(409, "conflict", "idempotency key operation currently in progress")
@@ -471,27 +405,6 @@ async def upload_document_handler(
         inspection = inspect_pdf(data, limits=Limits(max_bytes=max_bytes, max_pages=max_pages))
 
         if inspection.outcome == "reject":
-            code_map = {
-                "empty_file": ("empty_file", 422),
-                "not_a_pdf": ("invalid_pdf", 422),
-                "corrupt_pdf": ("corrupt_pdf", 422),
-                "encrypted_pdf": ("unsupported_encryption", 422),
-                "page_limit_exceeded": ("page_limit_exceeded", 422),
-                "file_too_large": ("payload_too_large", 413),
-            }
-            code, status_code = code_map.get(inspection.reason or "", ("invalid_pdf", 422))
-            error_payload = {
-                "status_code": status_code,
-                "code": code,
-                "message": f"document rejected: {inspection.reason}",
-                "details": {
-                    "reason": inspection.reason,
-                    "sha256": inspection.sha256,
-                    "size_bytes": inspection.size_bytes,
-                    "page_count": inspection.page_count,
-                },
-                "retryable": False,
-            }
             db_inspection = Inspection(
                 outcome="reject",
                 reason=inspection.reason,
@@ -511,11 +424,19 @@ async def upload_document_handler(
                     inspection=db_inspection,
                     pages=[],
                     operation_id=op_intent_id,
-                    error_payload=error_payload,
                 )
             except IngestRejected:
                 pass
 
+            code_map = {
+                "empty_file": ("empty_file", 422),
+                "not_a_pdf": ("invalid_pdf", 422),
+                "corrupt_pdf": ("corrupt_pdf", 422),
+                "encrypted_pdf": ("unsupported_encryption", 422),
+                "page_limit_exceeded": ("page_limit_exceeded", 422),
+                "file_too_large": ("payload_too_large", 413),
+            }
+            code, status_code = code_map.get(inspection.reason or "", ("invalid_pdf", 422))
             return ApiError(
                 status_code=status_code,
                 code=code,
@@ -539,19 +460,6 @@ async def upload_document_handler(
                 page_count=inspection.page_count,
                 warnings=inspection.warnings,
             )
-            error_payload = {
-                "status_code": 422,
-                "code": "invalid_page_geometry",
-                "message": "failed to parse page geometry from PDF",
-                "details": {
-                    "reason": "invalid_page_geometry",
-                    "error": type(exc).__name__,
-                    "sha256": inspection.sha256,
-                    "size_bytes": inspection.size_bytes,
-                    "page_count": inspection.page_count,
-                },
-                "retryable": False,
-            }
             try:
                 ingest_document(
                     conn,
@@ -563,7 +471,6 @@ async def upload_document_handler(
                     inspection=db_inspection,
                     pages=[],
                     operation_id=op_intent_id,
-                    error_payload=error_payload,
                 )
             except IngestRejected:
                 pass
@@ -595,41 +502,17 @@ async def upload_document_handler(
             warnings=inspection.warnings,
         )
 
-        try:
-            doc_version_id = ingest_document(
-                conn,
-                store,
-                project_id=proj_id,
-                actor_id=actor_id,
-                logical_id=logical_id,
-                data=data,
-                inspection=db_inspection,
-                pages=pages,
-                operation_id=op_intent_id,
-            )
-        except IngestRejected:
-            raise
-        except Exception as exc:
-            if op_intent_id is not None:
-                try:
-                    error_payload = {
-                        "status_code": 500,
-                        "code": "internal_error",
-                        "message": "failed to ingest document",
-                        "details": {"error": type(exc).__name__},
-                        "retryable": False,
-                    }
-                    _record_rejection(
-                        conn,
-                        project_id=proj_id,
-                        actor_id=actor_id,
-                        reason=f"error_{type(exc).__name__}",
-                        operation_id=op_intent_id,
-                        error_payload=error_payload,
-                    )
-                except Exception:
-                    pass
-            raise
+        doc_version_id = ingest_document(
+            conn,
+            store,
+            project_id=proj_id,
+            actor_id=actor_id,
+            logical_id=logical_id,
+            data=data,
+            inspection=db_inspection,
+            pages=pages,
+            operation_id=op_intent_id,
+        )
 
         row = conn.execute(
             """
@@ -674,7 +557,7 @@ async def download_document_handler(
     """Authorized project-scoped original PDF download endpoint."""
     row = conn.execute(
         """
-        SELECT dv.project_id, dv.sha256, a.sha256 AS artifact_sha256, a.object_key, a.size_bytes, a.state::text
+        SELECT dv.project_id, dv.sha256, a.object_key, a.size_bytes, a.state::text
         FROM document_versions dv
         JOIN artifacts a ON a.id = dv.artifact_id
         WHERE dv.id = %s
@@ -685,16 +568,10 @@ async def download_document_handler(
     if row is None:
         raise ApiError(404, "not_found", "document not found")
 
-    project_id, doc_sha, art_sha, object_key, size_bytes, artifact_state = row
+    project_id, sha256, object_key, size_bytes, artifact_state = row
 
     if artifact_state != "committed":
         raise ApiError(404, "not_found", "document artifact not committed")
-
-    if art_sha != doc_sha:
-        raise ApiError(500, "storage_corruption", "document and artifact checksum mismatch")
-
-    if not isinstance(size_bytes, int) or size_bytes < 0:
-        raise ApiError(500, "storage_corruption", "invalid artifact size in database")
 
     try:
         decision = authorize(
@@ -708,16 +585,15 @@ async def download_document_handler(
         raise ApiError(403, "permission_denied", str(exc))
 
     try:
-        pdf_bytes = store.open(object_key, expected_size=size_bytes)
-    except StorageCorruption as exc:
-        raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
+        pdf_bytes = store.open(object_key)
     except Exception as exc:
         raise ApiError(
             500, "storage_error", f"failed to open artifact ({type(exc).__name__})"
         )
 
-    if len(pdf_bytes) != size_bytes or hashlib.sha256(pdf_bytes).hexdigest() != doc_sha:
-        raise ApiError(500, "storage_corruption", "artifact checksum or size mismatch")
+    actual_sha = hashlib.sha256(pdf_bytes).hexdigest()
+    if actual_sha != sha256:
+        raise ApiError(500, "storage_corruption", "artifact checksum mismatch")
 
     return Response(
         content=pdf_bytes,
@@ -740,7 +616,7 @@ async def get_document_handler(
     row = conn.execute(
         """
         SELECT dv.id, dv.project_id, dv.resource_id, dv.artifact_id, dv.sha256, dv.page_count,
-               rv.logical_id, rv.revision, a.sha256 AS artifact_sha256, a.size_bytes, a.object_key, a.state::text
+               rv.logical_id, rv.revision, a.size_bytes, a.object_key, a.state::text
         FROM document_versions dv
         JOIN resource_versions rv ON rv.id = dv.resource_id
         JOIN artifacts a ON a.id = dv.artifact_id
@@ -757,11 +633,10 @@ async def get_document_handler(
         project_id,
         res_id,
         art_id,
-        doc_sha,
+        sha,
         page_cnt,
         logical_id,
         rev,
-        art_sha,
         size_bytes,
         obj_key,
         art_state,
@@ -769,12 +644,6 @@ async def get_document_handler(
 
     if art_state != "committed":
         raise ApiError(404, "not_found", "document artifact not committed")
-
-    if art_sha != doc_sha:
-        raise ApiError(500, "storage_corruption", "document and artifact checksum mismatch")
-
-    if not isinstance(size_bytes, int) or size_bytes < 0:
-        raise ApiError(500, "storage_corruption", "invalid artifact size in database")
 
     try:
         decision = authorize(
@@ -790,17 +659,11 @@ async def get_document_handler(
     accept = request.headers.get("Accept", "")
     if "application/pdf" in accept:
         try:
-            pdf_bytes = store.open(obj_key, expected_size=size_bytes)
-        except StorageCorruption as exc:
-            raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
+            pdf_bytes = store.open(obj_key)
         except Exception as exc:
             raise ApiError(
                 500, "storage_error", f"failed to open artifact ({type(exc).__name__})"
             )
-
-        if len(pdf_bytes) != size_bytes or hashlib.sha256(pdf_bytes).hexdigest() != doc_sha:
-            raise ApiError(500, "storage_corruption", "artifact checksum or size mismatch")
-
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",

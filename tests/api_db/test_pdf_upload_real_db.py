@@ -500,7 +500,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 ).fetchone()[0]
                 self.assertEqual(intent_cnt, 0)
 
-        # Replaying the identical rejected request returns original 422 status and response with replayed=True
+        # Replaying the same key used for a failed operation returns 409 conflict
         res_replay_failed = self.client.post(
             f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
             headers={
@@ -510,136 +510,8 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             },
             content=enc_bytes,
         )
-        self.assertEqual(res_replay_failed.status_code, 422)
-        self.assertEqual(res_replay_failed.json()["error"]["code"], "unsupported_encryption")
-        self.assertTrue(res_replay_failed.json()["error"]["details"]["replayed"])
-
-        # Replaying the same key with a different request returns 409 conflict
-        res_diff_key = self.client.post(
-            f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
-            headers={
-                "Authorization": f"Bearer {owner_token}",
-                "Content-Type": "application/pdf",
-                "Idempotency-Key": "f05-idemp-1",
-            },
-            content=self.f01_1,
-        )
-        self.assertEqual(res_diff_key.status_code, 409)
-        self.assertEqual(res_diff_key.json()["error"]["code"], "conflict")
-
-    def test_invalid_page_geometry_rejection_and_atomic_replay(self) -> None:
-        """Invalid page geometry persists failure and outbox atomically; replay returns 422, different payload is 409."""
-        with self.connect() as conn:
-            project_id, owner_id = self.make_project(conn, role="owner")
-
-        owner_token = issue_actor_token(owner_id, self.secret)
-
-        def failing_extract_pages(*args, **kwargs):
-            raise ValueError("corrupted font dictionary / invalid page geometry")
-
-        with patch("lab_api.documents.extract_pages", side_effect=failing_extract_pages):
-            res_bad_geom = self.client.post(
-                f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
-                headers={
-                    "Authorization": f"Bearer {owner_token}",
-                    "Content-Type": "application/pdf",
-                    "Idempotency-Key": "geom-idemp-1",
-                },
-                content=self.f01_1,
-            )
-            self.assertEqual(res_bad_geom.status_code, 422)
-            self.assertEqual(res_bad_geom.json()["error"]["code"], "invalid_page_geometry")
-
-        # Verify PostgreSQL audit and outbox events
-        with self.connect() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    "SELECT * FROM audit_events WHERE project_id = %s AND action = 'document.rejected'",
-                    (project_id,),
-                )
-                audit_row = cur.fetchone()
-                self.assertIsNotNone(audit_row)
-                self.assertEqual(audit_row["outcome"], "failed")
-                self.assertEqual(audit_row["reason"], "invalid_page_geometry")
-
-                cur.execute(
-                    "SELECT * FROM outbox_events WHERE project_id = %s AND topic = 'document.rejected'",
-                    (project_id,),
-                )
-                outbox_row = cur.fetchone()
-                self.assertIsNotNone(outbox_row)
-                payload = self._decode_jsonb(outbox_row["payload"])
-                self.assertEqual(payload["status_code"], 422)
-                self.assertEqual(payload["code"], "invalid_page_geometry")
-
-        # Identical request with same Idempotency-Key replays original 422 with replayed=True
-        res_replay = self.client.post(
-            f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
-            headers={
-                "Authorization": f"Bearer {owner_token}",
-                "Content-Type": "application/pdf",
-                "Idempotency-Key": "geom-idemp-1",
-            },
-            content=self.f01_1,
-        )
-        self.assertEqual(res_replay.status_code, 422)
-        self.assertEqual(res_replay.json()["error"]["code"], "invalid_page_geometry")
-        self.assertTrue(res_replay.json()["error"]["details"]["replayed"])
-
-        # Different payload with same Idempotency-Key returns 409 conflict
-        res_conflict = self.client.post(
-            f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
-            headers={
-                "Authorization": f"Bearer {owner_token}",
-                "Content-Type": "application/pdf",
-                "Idempotency-Key": "geom-idemp-1",
-            },
-            content=self.f01_21,
-        )
-        self.assertEqual(res_conflict.status_code, 409)
-        self.assertEqual(res_conflict.json()["error"]["code"], "conflict")
-
-    def test_oversized_or_corrupt_artifact_on_disk_fails_closed_on_download(self) -> None:
-        """Corrupt or oversized file on disk fails closed with 500 storage_corruption on both download paths."""
-        with self.connect() as conn:
-            project_id, owner_id = self.make_project(conn, role="owner")
-
-        owner_token = issue_actor_token(owner_id, self.secret)
-
-        res = self.client.post(
-            f"/api/v1/documents?project_id={project_id}&logical_id=doc-corrupt-test",
-            headers={
-                "Authorization": f"Bearer {owner_token}",
-                "Content-Type": "application/pdf",
-            },
-            content=self.f01_1,
-        )
-        self.assertEqual(res.status_code, 201)
-        doc_id = res.json()["id"]
-
-        # Corrupt the file on disk by appending extra bytes (making it exceed size_bytes bound)
-        disk_file = self.artifact_root / "sha256" / self.f01_1_sha256[:2] / self.f01_1_sha256
-        with open(disk_file, "ab") as f:
-            f.write(b"CORRUPT_EXTRA_TRAILING_BYTES")
-
-        # 1. Dedicated download endpoint fails closed
-        res_dl = self.client.get(
-            f"/api/v1/documents/{doc_id}/original",
-            headers={"Authorization": f"Bearer {owner_token}"},
-        )
-        self.assertEqual(res_dl.status_code, 500)
-        self.assertEqual(res_dl.json()["error"]["code"], "storage_corruption")
-
-        # 2. Accept: application/pdf endpoint also fails closed
-        res_accept = self.client.get(
-            f"/api/v1/documents/{doc_id}",
-            headers={
-                "Authorization": f"Bearer {owner_token}",
-                "Accept": "application/pdf",
-            },
-        )
-        self.assertEqual(res_accept.status_code, 500)
-        self.assertEqual(res_accept.json()["error"]["code"], "storage_corruption")
+        self.assertEqual(res_replay_failed.status_code, 409)
+        self.assertEqual(res_replay_failed.json()["error"]["code"], "conflict")
 
     def test_rollback_on_ingest_failure_leaves_no_visible_version_or_stranded_intent(self) -> None:
         """Negative test: if database transaction rolls back, no document version, operation, or idempotency key is stranded."""

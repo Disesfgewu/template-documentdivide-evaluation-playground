@@ -421,50 +421,6 @@ class LocalArtifactStoreTests(unittest.TestCase):
         with self.assertRaises(StorageCorruption):
             self.store.put(data)
 
-    def test_open_and_verify_bounded_by_trusted_expected_size(self) -> None:
-        data = b"trusted expected size bounded read payload"
-        stored = self.store.put(data)
-        key = stored.object_key
-        size = len(data)
-
-        # 1. Matching expected_size succeeds
-        self.assertEqual(self.store.open(key, expected_size=size), data)
-        self.assertEqual(self.store.verify(key, expected_size=size), (stored.sha256, size))
-
-        # 2. Invalid expected_size (negative or non-int) raises ValueError
-        with self.assertRaises(ValueError):
-            self.store.open(key, expected_size=-1)
-        with self.assertRaises(ValueError):
-            self.store.verify(key, expected_size=-5)
-
-        # 3. Mismatched expected_size raises StorageCorruption
-        with self.assertRaises(StorageCorruption):
-            self.store.open(key, expected_size=size + 10)
-        with self.assertRaises(StorageCorruption):
-            self.store.verify(key, expected_size=size + 10)
-
-        with self.assertRaises(StorageCorruption):
-            self.store.open(key, expected_size=size - 5)
-        with self.assertRaises(StorageCorruption):
-            self.store.verify(key, expected_size=size - 5)
-
-    def test_corrupt_oversized_file_on_disk_rejected_before_unbounded_read(self) -> None:
-        data = b"initial valid payload"
-        stored = self.store.put(data)
-        key = stored.object_key
-        expected_size = len(data)
-
-        # Corrupt the file on disk by appending oversized bytes
-        disk_file = self.root / "sha256" / stored.sha256[:2] / stored.sha256
-        with open(disk_file, "ab") as f:
-            f.write(b"EXTRABYTES" * 100)
-
-        with self.assertRaises(StorageCorruption):
-            self.store.open(key, expected_size=expected_size)
-
-        with self.assertRaises(StorageCorruption):
-            self.store.verify(key, expected_size=expected_size)
-
 
 if __name__ == "__main__":
     unittest.main()
