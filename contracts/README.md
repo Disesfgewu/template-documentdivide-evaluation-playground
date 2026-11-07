@@ -158,3 +158,11 @@ scripts/check.sh --scope contracts
   - 刪除欄位。
 - 在同一版本內，只允許新增選填欄位，或不改變既有合法輸入的修正。
 - 擴充的值放在 `attributes`，不能用來覆寫核心語意。
+
+## Private benchmark transfer
+
+The callable codec and CLI `python -m lab_contracts.transfer` preserve the four
+parts plus evidence/validation snapshots with versioned hashes and bounded
+strict import. Its separate participant projection has an explicit three-field
+allowlist. See [benchmark transfer](../docs/BENCHMARK_TRANSFER.md) for format,
+commands, limits and the remaining authorization/freeze/API gates.
