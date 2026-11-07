@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
 import re
+import socket
+import subprocess
+import sys
+import time
 import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -56,10 +64,12 @@ from lab_api.request_logging import (
     SCHEMA_VERSION,
     SERVICE_NAME,
     TELEMETRY_ORIGIN,
+    UVICORN_SAFE_CLI_ARGS,
     RequestLogEvent,
     RequestLoggingMiddleware,
     classify_exception,
     classify_route,
+    configure_request_logger,
     sanitize_http_method,
     sanitize_http_status,
 )
@@ -231,21 +241,235 @@ class RequestLoggingIntegrationTests(unittest.TestCase):
         self.assertEqual(ev_405.http_status, 405)
 
     def test_default_log_sink_writes_json_to_named_logger(self):
+        buf = io.StringIO()
+        configure_request_logger(buf)
         app = create_app(
             make_settings(),
             checks={"db": lambda: CheckResult(True, "ok")},
         )
         client = TestClient(app)
-        with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
-            resp = client.get("/healthz")
+        resp = client.get("/healthz")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(cm.records), 1)
-        record = cm.records[0]
-        self.assertEqual(record.levelno, logging.INFO)
-        data = json.loads(record.getMessage())
+        stream_lines = [line for line in buf.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(stream_lines), 1)
+        data = json.loads(stream_lines[0])
         self.assertEqual(tuple(sorted(data.keys())), tuple(sorted(REQUEST_LOG_FIELDS)))
         self.assertEqual(data["route"], ROUTE_HEALTHZ)
         self.assertEqual(data["http_status"], 200)
+
+        with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+            resp2 = client.get("/healthz")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(len(cm.records), 1)
+        record = cm.records[0]
+        self.assertEqual(record.levelno, logging.INFO)
+        self.assertEqual(json.loads(record.getMessage())["route"], ROUTE_HEALTHZ)
+
+    def test_configure_request_logger_enables_info_sink_without_touching_root_or_uvicorn_loggers(self):
+        root_logger = logging.getLogger()
+        uvicorn_err = logging.getLogger("uvicorn.error")
+        uvicorn_acc = logging.getLogger("uvicorn.access")
+        root_before = (root_logger.level, list(root_logger.handlers), root_logger.disabled)
+        err_before = (uvicorn_err.level, list(uvicorn_err.handlers), uvicorn_err.propagate, uvicorn_err.disabled)
+        acc_before = (uvicorn_acc.level, list(uvicorn_acc.handlers), uvicorn_acc.propagate, uvicorn_acc.disabled)
+
+        req_logger = logging.getLogger(LOGGER_NAME)
+        saved_level = req_logger.level
+        saved_handlers = list(req_logger.handlers)
+        saved_propagate = req_logger.propagate
+        try:
+            req_logger.handlers.clear()
+            req_logger.setLevel(logging.NOTSET)
+            req_logger.addHandler(logging.NullHandler())
+
+            buf = io.StringIO()
+            configured = configure_request_logger(buf)
+            self.assertIs(configured, req_logger)
+            self.assertEqual(configured.getEffectiveLevel(), logging.INFO)
+            self.assertTrue(configured.propagate)
+
+            app = create_app(
+                make_settings(),
+                checks={"db": lambda: CheckResult(True, "ok")},
+            )
+            r = TestClient(app).get("/healthz?token=stream-canary-123")
+            self.assertEqual(r.status_code, 200)
+            lines = [line for line in buf.getvalue().splitlines() if line.strip()]
+            self.assertEqual(len(lines), 1)
+            payload = json.loads(lines[0])
+            self.assertEqual(payload["level"], LEVEL_INFO)
+            self.assertEqual(payload["route"], ROUTE_HEALTHZ)
+            self.assertEqual(payload["http_status"], 200)
+            self.assertNotIn("stream-canary-123", lines[0])
+
+            self.assertEqual(
+                (root_logger.level, list(root_logger.handlers), root_logger.disabled),
+                root_before,
+            )
+            self.assertEqual(
+                (uvicorn_err.level, list(uvicorn_err.handlers), uvicorn_err.propagate, uvicorn_err.disabled),
+                err_before,
+            )
+            self.assertEqual(
+                (uvicorn_acc.level, list(uvicorn_acc.handlers), uvicorn_acc.propagate, uvicorn_acc.disabled),
+                acc_before,
+            )
+        finally:
+            req_logger.handlers.clear()
+            for h in saved_handlers:
+                req_logger.addHandler(h)
+            req_logger.setLevel(saved_level)
+            req_logger.propagate = saved_propagate
+
+
+class UvicornSubprocessIntegrationTests(unittest.TestCase):
+    def test_real_uvicorn_subprocess_safe_startup_emits_200_404_503_json_logs_without_canary_leaks(self):
+        api_dir = Path(__file__).resolve().parents[2] / "services" / "api"
+        readme_text = (api_dir / "README.md").read_text(encoding="utf-8")
+        expected_cli = "uvicorn " + " ".join(UVICORN_SAFE_CLI_ARGS)
+        self.assertIn(expected_cli, readme_text)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        sub_env = os.environ.copy()
+        sub_env.update(
+            {
+                "LAB_ENV": "dev",
+                "LAB_PROVIDER_MODE": "mock",
+                # Loopback port 1 fails fast on /readyz so 503 is exercised in the real server.
+                "LAB_DATABASE_URL": f"postgresql://lab:{DB_SECRET}@127.0.0.1:1/lab",
+                "LAB_ARTIFACT_ROOT": "/nonexistent-lab-artifacts-canary",
+                "LAB_DB_CONNECT_TIMEOUT_S": "1",
+                "PYTHONUNBUFFERED": "1",
+            }
+        )
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            *UVICORN_SAFE_CLI_ARGS,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(api_dir),
+            env=sub_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            base_url = f"http://127.0.0.1:{port}"
+            headers = {
+                "Authorization": "Bearer subproc-bearer-secret-canary",
+                "Cookie": "session=subproc-cookie-secret-canary",
+                "X-API-Key": "sk-subproc-api-key-canary",
+            }
+
+            # Poll until uvicorn accepts connections on /healthz with a synthetic query canary.
+            health_body = None
+            health_status = None
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    break
+                req = urllib.request.Request(
+                    f"{base_url}/healthz?access_token=subproc-query-canary-200",
+                    headers=headers,
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=1.0) as resp:
+                        health_status = resp.status
+                        health_body = json.loads(resp.read().decode("utf-8"))
+                        break
+                except urllib.error.URLError:
+                    time.sleep(0.05)
+
+            self.assertEqual(health_status, 200, "uvicorn subprocess did not respond 200 on /healthz")
+            self.assertEqual(health_body, {"status": "ok"})
+
+            # Issue an unmatched 404 request with synthetic path, query, and body canaries.
+            req_404 = urllib.request.Request(
+                f"{base_url}/v1/secret-path-canary-404?key=subproc-query-canary-404",
+                data=b'{"secret":"subproc-body-canary-404"}',
+                headers={**headers, "Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx_404:
+                urllib.request.urlopen(req_404, timeout=2.0)
+            self.assertEqual(ctx_404.exception.code, 404)
+            ctx_404.exception.close()
+
+            # Issue a /readyz 503 request with a synthetic query canary.
+            req_503 = urllib.request.Request(
+                f"{base_url}/readyz?db_pw=subproc-query-canary-503",
+                headers=headers,
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx_503:
+                urllib.request.urlopen(req_503, timeout=3.0)
+            self.assertEqual(ctx_503.exception.code, 503)
+            ctx_503.exception.close()
+        finally:
+            proc.terminate()
+            try:
+                stdout_text, stderr_text = proc.communicate(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout_text, stderr_text = proc.communicate(timeout=5.0)
+
+        combined_output = (stdout_text or "") + "\n" + (stderr_text or "")
+        for canary in (
+            DB_SECRET,
+            "nonexistent-lab-artifacts-canary",
+            "subproc-bearer-secret-canary",
+            "subproc-cookie-secret-canary",
+            "subproc-api-key-canary",
+            "subproc-query-canary-200",
+            "secret-path-canary-404",
+            "subproc-query-canary-404",
+            "subproc-body-canary-404",
+            "subproc-query-canary-503",
+        ):
+            self.assertNotIn(canary, combined_output)
+
+        json_events = []
+        for line in combined_output.splitlines():
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                parsed = json.loads(line)
+                if parsed.get("schema_version") == SCHEMA_VERSION:
+                    json_events.append(parsed)
+
+        self.assertGreaterEqual(len(json_events), 3, combined_output)
+        by_route_status = {(ev["route"], ev["http_status"]): ev for ev in json_events}
+        self.assertIn((ROUTE_HEALTHZ, 200), by_route_status)
+        self.assertIn((ROUTE_UNMATCHED, 404), by_route_status)
+        self.assertIn((ROUTE_READYZ, 503), by_route_status)
+
+        ev_200 = by_route_status[(ROUTE_HEALTHZ, 200)]
+        self.assertEqual(tuple(sorted(ev_200.keys())), tuple(sorted(REQUEST_LOG_FIELDS)))
+        self.assertEqual(ev_200["level"], LEVEL_INFO)
+        self.assertEqual(ev_200["event_name"], EVENT_COMPLETED)
+        self.assertEqual(ev_200["status"], OUTCOME_OK)
+        self.assertEqual(ev_200["env"], "dev")
+        self.assertEqual(ev_200["provider_mode"], "mock")
+
+        ev_404 = by_route_status[(ROUTE_UNMATCHED, 404)]
+        self.assertEqual(ev_404["level"], LEVEL_WARN)
+        self.assertEqual(ev_404["status"], OUTCOME_CLIENT_ERROR)
+        self.assertEqual(ev_404["http_method"], "POST")
+
+        ev_503 = by_route_status[(ROUTE_READYZ, 503)]
+        self.assertEqual(ev_503["level"], LEVEL_ERROR)
+        self.assertEqual(ev_503["event_name"], EVENT_FAILED)
+        self.assertEqual(ev_503["status"], OUTCOME_SERVER_ERROR)
+        self.assertEqual(ev_503["error_code"], ERROR_CODE_HTTP_5XX)
 
 
 class AdversarialLeakageAndBoundaryTests(unittest.TestCase):

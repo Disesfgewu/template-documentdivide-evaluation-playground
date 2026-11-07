@@ -1,3 +1,4 @@
+import io
 import os
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from lab_api import __main__ as cli
 from lab_api.config import load_settings
 from lab_api.main import create_app
 from lab_api.readiness import CheckResult, artifact_storage_check, database_check
+from lab_api.request_logging import configure_request_logger
 
 ENV = {
     "LAB_ENV": "test",
@@ -27,6 +29,9 @@ def settings(**env):
 
 
 class EndpointTests(unittest.TestCase):
+    def setUp(self):
+        configure_request_logger(io.StringIO())
+
     def client(self, checks):
         return TestClient(create_app(settings(), checks=checks))
 

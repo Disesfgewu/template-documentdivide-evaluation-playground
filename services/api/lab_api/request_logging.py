@@ -6,9 +6,12 @@ boundary (SPEC §10.3, R18, R19, T69) for the existing LAB API routes.
 Scope and guarantees:
 - Emits one bounded, allowlisted ``RequestLogEvent`` per HTTP ASGI request after
   the downstream ASGI callable returns or raises.
+- Ensures ``lab_api.request_log`` has an active ``INFO`` handler via
+  ``configure_request_logger()`` when the default sink is used, without mutating
+  or suppressing the root logger or external server loggers.
 - Route identities are allowlisted fixed templates (``/healthz``, ``/readyz``,
   or ``unmatched``); raw request paths, path parameters, raw_path bytes, and
-  query strings are never recorded.
+  query strings are never recorded in ``RequestLogEvent``.
 - HTTP methods are restricted to a fixed standard allowlist; non-standard or
   malformed method strings are normalized to ``INVALID_METHOD``.
 - HTTP status codes are validated as exact ``int`` values (excluding ``bool``)
@@ -17,19 +20,36 @@ Scope and guarantees:
   network addresses, settings/DB URLs, and raw exception messages or tracebacks
   are never inspected for logging or included in ``RequestLogEvent``.
 - Unhandled exceptions and ``BaseException`` subclasses (such as
-  `` asyncio.CancelledError``) are classified using a closed allowlist of fixed
+  ``asyncio.CancelledError``) are classified using a closed allowlist of fixed
   error codes/types and re-raised unchanged so ASGI server and FastAPI error
   semantics are preserved.
 - Synchronous observer callbacks are isolated: if an observer raises, the
   failure is counted on ``RequestLoggingMiddleware.dropped_count`` and never
   alters HTTP response behavior or masks application exceptions.
 
-Explicit non-claims (remaining for #5, #6, #13, #14, and #15):
+Explicit non-claims and upstream server logging limits:
+- This primitive governs only ``RequestLogEvent`` records emitted by
+  ``RequestLoggingMiddleware`` (and ``lab_api.request_log``). It does NOT
+  control or silence external ASGI server loggers (such as ``uvicorn.access``
+  or ``uvicorn.error``) or process-level crash dumps.
+- Uvicorn's default access logger logs raw request targets and query strings.
+  Recommended dev/prod startup therefore passes ``--no-access-log`` (see
+  ``UVICORN_SAFE_CLI_ARGS`` and ``services/api/README.md``):
+  ``uvicorn --factory lab_api.main:create_app --no-access-log --port 8000``.
+- Because unhandled exceptions are re-raised to preserve standard ASGI/FastAPI
+  error handling, upstream server error loggers (e.g. ``uvicorn.error``) may
+  still format tracebacks and exception messages when an endpoint raises an
+  unhandled exception. Existing LAB API endpoints (``/healthz`` and ``/readyz``
+  via ``run_checks``) catch dependency errors internally and return bounded
+  status payloads; future business endpoints and global exception handlers
+  (tracked in #4, #5, #14) must similarly convert domain failures into bounded
+  ``ErrorResponse`` payloads before they escape to the ASGI server, or pair the
+  server with a sanitizing log formatter.
 - This primitive is in-process diagnostic observation only. It is NOT durable
   PostgreSQL ``log_events`` or ``audit_events`` storage, collector buffering,
-  gap detection, deduplication, or log export/filtering (T68).
-- It does NOT implement distributed trace propagation, authentication, role/ACL
-  enforcement (T70), or full security/operational acceptance for Issue #14.
+  gap detection, deduplication, or log export/filtering (T68), nor does it
+  implement distributed trace propagation, authentication, role/ACL enforcement
+  (T70), or full security/operational acceptance for Issue #14.
 """
 from __future__ import annotations
 
@@ -37,21 +57,26 @@ import asyncio
 import json
 import logging
 import re
+import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, TextIO
 
 from .config import Environment, ProviderMode
 
 LOGGER_NAME = "lab_api.request_log"
-logging.getLogger(LOGGER_NAME).addHandler(logging.NullHandler())
 SCHEMA_VERSION = "lab.api.request_log.v1"
 SERVICE_NAME = "lab-api"
 COMPONENT_NAME = "asgi.http"
 TELEMETRY_ORIGIN = "lab_observed"
+UVICORN_SAFE_CLI_ARGS: tuple[str, ...] = (
+    "--factory",
+    "lab_api.main:create_app",
+    "--no-access-log",
+)
 
 # Closed allowlist of standard HTTP methods. Any other value from the ASGI
 # scope is replaced with INVALID_METHOD so untrusted method tokens cannot
@@ -297,9 +322,46 @@ class RequestLogEvent:
 RequestLogSink = Callable[[RequestLogEvent], None]
 
 
+class _RequestLogStreamHandler(logging.StreamHandler):
+    """Dedicated stream handler initialized for ``lab_api.request_log``."""
+
+
+def configure_request_logger(stream: TextIO | None = None) -> logging.Logger:
+    """Ensure ``lab_api.request_log`` has an active ``INFO`` handler.
+
+    Configures only the dedicated ``lab_api.request_log`` logger so that
+    ``INFO``/``WARN``/``ERROR`` JSON request events are emitted to a concrete
+    stream sink under default Python and ``uvicorn`` startup (where the root
+    logger defaults to ``WARNING`` and has no JSON handler). Never mutates or
+    suppresses root or third-party/server loggers (such as ``uvicorn.error`` or
+    ``uvicorn.access``). If the caller already attached a non-``NullHandler``
+    handler or set a more verbose level on ``lab_api.request_log``, those are
+    preserved; propagation remains enabled so ``unittest.TestCase.assertLogs``
+    and external root aggregators continue to observe records.
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+    if logger.level == logging.NOTSET or logger.level > logging.INFO:
+        logger.setLevel(logging.INFO)
+
+    target_stream = stream if stream is not None else sys.stderr
+    existing_concrete = [
+        h for h in logger.handlers if not isinstance(h, logging.NullHandler)
+    ]
+    if not existing_concrete:
+        handler = _RequestLogStreamHandler(target_stream)
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+    elif stream is not None:
+        for h in existing_concrete:
+            if isinstance(h, _RequestLogStreamHandler):
+                h.setStream(target_stream)
+    return logger
+
+
 def default_log_sink(event: RequestLogEvent) -> None:
     """Emit the serialized JSON event to the ``lab_api.request_log`` logger."""
-    logger = logging.getLogger(LOGGER_NAME)
+    logger = configure_request_logger()
     if event.level == LEVEL_ERROR:
         log_level = logging.ERROR
     elif event.level == LEVEL_WARN:
@@ -327,7 +389,11 @@ class RequestLoggingMiddleware:
         self.app = app
         self._env = env.value
         self._provider_mode = provider_mode.value
-        self._sink: RequestLogSink = sink if sink is not None else default_log_sink
+        if sink is None:
+            configure_request_logger()
+            self._sink: RequestLogSink = default_log_sink
+        else:
+            self._sink = sink
         self._dropped_count = 0
         self._lock = threading.Lock()
 
