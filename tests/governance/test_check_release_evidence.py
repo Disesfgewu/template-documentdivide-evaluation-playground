@@ -475,6 +475,13 @@ class AdversarialBypassTests(unittest.TestCase):
         self.assertTrue(any("corrupted artifact hash" in e for e in err_f))
         self.assertTrue(any("corrupted artifact hash" in gv for gv in inv_f.gate_violations))
 
+    def test_inventory_declarations_alone_cannot_claim_release_pass(self):
+        doc = _make_fully_passed_doc(lambda item_id: [])
+        _, inventory = cre.build_inventory(doc)
+        self.assertEqual(inventory.verdict, "RELEASE_NOT_READY")
+        self.assertTrue(all(not gate["independent_verification_established"]
+                            for gate in inventory.gate_counts.values()))
+
     def test_gate_callbacks_alone_cannot_claim_release_pass(self):
         doc = _make_fully_passed_doc(lambda item_id: [_make_evidence(
             parser_mode="real", parser_version="1.0", parser_evidence="artifact:parser/out.json",

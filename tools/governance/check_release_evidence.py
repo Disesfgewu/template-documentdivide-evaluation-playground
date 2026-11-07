@@ -546,7 +546,9 @@ def build_inventory(doc: Dict[str, Any], spec_text: Optional[str] = None) -> Tup
     elif unpassed:
         verdict = "RELEASE_NOT_READY"
     else:
-        verdict = "RELEASE_PASS"
+        # Inventory construction only counts declarations; it has not verified
+        # provenance or real-service gates. Only the full checker can pass.
+        verdict = "RELEASE_NOT_READY"
 
     summary_parts = [
         f"{status_counts.get('passed', 0)} passed",
