@@ -639,10 +639,10 @@ class ErrorRedactionAndContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed["error"]["request_id"], "req-123")
 
 
-class NoPretendUploadEndpointTest(unittest.TestCase):
-    """Ensure the existing FastAPI app does not expose a pretend upload endpoint."""
+class DocumentRoutesRegistrationTest(unittest.TestCase):
+    """Ensure the FastAPI app exposes the real document routes."""
 
-    def test_create_app_has_no_upload_route(self):
+    def test_create_app_has_document_routes(self):
         from unittest import mock
         from lab_api.config import load_settings
 
@@ -657,7 +657,17 @@ class NoPretendUploadEndpointTest(unittest.TestCase):
             settings = load_settings()
             app = create_app(settings=settings, checks={})
 
-        route_paths = [getattr(route, "path", None) for route in app.routes]
-        self.assertNotIn("/upload", route_paths)
-        self.assertNotIn("/api/v1/documents", route_paths)
-        self.assertNotIn("/documents", route_paths)
+        route_paths = []
+        for route in app.routes:
+            p = getattr(route, "path", None)
+            if p:
+                route_paths.append(p)
+            elif hasattr(route, "original_router"):
+                route_paths.extend([sub.path for sub in route.original_router.routes])
+        self.assertIn("/api/v1/documents", route_paths)
+        self.assertIn("/documents", route_paths)
+        self.assertIn("/api/v1/documents/{document_id}/original", route_paths)
+        self.assertIn("/documents/{document_id}/original", route_paths)
+        self.assertIn("/api/v1/documents/{document_id}", route_paths)
+        self.assertIn("/documents/{document_id}", route_paths)
+        self.assertIn("/api/v1/documents/{document_id}/pages/{page_index}", route_paths)
