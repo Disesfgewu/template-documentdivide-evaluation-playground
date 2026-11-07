@@ -1,0 +1,11 @@
+{
+  "_source": "SPEC v0.1 T14 table (hand-copied, not computed by the code under test)",
+  "items": {
+    "F01.pages_1":   {"page_count": 1,   "n_target": 20,  "q_min": 2},
+    "F01.pages_19":  {"page_count": 19,  "n_target": 20,  "q_min": 2},
+    "F01.pages_20":  {"page_count": 20,  "n_target": 20,  "q_min": 2},
+    "F01.pages_21":  {"page_count": 21,  "n_target": 21,  "q_min": 3},
+    "F01.pages_500": {"page_count": 500, "n_target": 500, "q_min": 50},
+    "F01.pages_600": {"page_count": 600, "n_target": 600, "q_min": 60}
+  }
+}

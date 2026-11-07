@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts db db-unit)
+SUITES=(governance api api-db worker parser web contracts fixtures db db-unit)
 scope=auto
 base=origin/main
 selected=()
@@ -28,12 +28,14 @@ suite_for_base() {
   case "$1" in
     # Shared test/CI infrastructure affects every suite.
     .github/*|scripts/*|tools/governance/run_tests.py) echo "${SUITES[*]}";;
+    tools/governance/go_test_report.py) echo "governance worker";;
     services/api/*|tests/api/*) echo "api api-db";;
     tests/api_db/*|deploy/*) echo api-db;;
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
-    contracts/*|tests/contracts/*) echo contracts;;
     web/*) echo web;;
+    contracts/*|tests/contracts/*) echo "contracts fixtures";;
+    fixtures/*|tests/fixtures/*) echo "fixtures parser";;
     db/*) echo "db db-unit";;
     tests/db/*) echo db;;
     tests/dbunit/*) echo db-unit;;
@@ -53,6 +55,8 @@ run_suite() {
   case "$1" in
     governance)
       python3 -m tools.governance.check_repo
+      # Provenance is checked against GitHub for passed entries only (needs GH_TOKEN then).
+      python3 -m tools.governance.check_traceability --verify-provenance
       python3 -m tools.governance.run_tests tests/governance
       ;;
     api)
@@ -90,6 +94,13 @@ run_suite() {
       # Versioned data contracts: examples, negative cases, schema drift.
       PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/contracts
       ;;
+    fixtures)
+      # Fixture registry: rebuild every registered item and compare sha256.
+      PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/fixtures
+      # Human signoffs are resolved on GitHub; with none recorded no network
+      # is used, and an unreachable GitHub fails a human review (never passes).
+      PYTHONPATH=contracts python3 -m fixtures.registry_check --verify-signoff
+      ;;
     parser)
       PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
       ;;
@@ -107,8 +118,16 @@ run_suite() {
         (cd services/worker && gofmt -d .) >&2
         return 1
       fi
-      (cd services/worker && export GOTOOLCHAIN=local && go version && go vet ./... \
-        && go test -count=1 -v ./... && go build -o /dev/null ./cmd/lab-worker)
+      # go test -json is converted to the shared per-test report (printed
+      # like -v; written to LAB_TEST_REPORT_DIR for traceability evidence).
+      local gojson rc=0
+      gojson="$(mktemp)"
+      (cd services/worker && export GOTOOLCHAIN=local && go version && go vet ./...) || { rm -f "$gojson"; return 1; }
+      (cd services/worker && GOTOOLCHAIN=local go test -count=1 -json ./... > "$gojson") || rc=$?
+      python3 -m tools.governance.go_test_report --module services/worker --input "$gojson" || rc=1
+      rm -f "$gojson"
+      (( rc == 0 )) || return 1
+      (cd services/worker && GOTOOLCHAIN=local go build -o /dev/null ./cmd/lab-worker)
       ;;
     *) echo "unknown suite: $1" >&2; return 2;;
   esac

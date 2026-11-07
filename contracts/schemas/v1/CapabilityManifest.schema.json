@@ -1,0 +1,99 @@
+{
+  "$defs": {
+    "Capability": {
+      "additionalProperties": false,
+      "properties": {
+        "fixture_evidence": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Fixture Evidence",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "state": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "unknown"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "limitations",
+        "fixture_evidence"
+      ],
+      "title": "Capability",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/CapabilityManifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Each capability is declared on its own: OCR support says nothing about\nchart reading.",
+  "properties": {
+    "adapter_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Adapter Revision",
+      "type": "string"
+    },
+    "cell_geometry": {
+      "$ref": "#/$defs/Capability"
+    },
+    "chart_reading": {
+      "$ref": "#/$defs/Capability"
+    },
+    "cross_page_table": {
+      "$ref": "#/$defs/Capability"
+    },
+    "full_document_postprocess": {
+      "$ref": "#/$defs/Capability"
+    },
+    "image_crops": {
+      "$ref": "#/$defs/Capability"
+    },
+    "layout": {
+      "$ref": "#/$defs/Capability"
+    },
+    "ocr": {
+      "$ref": "#/$defs/Capability"
+    },
+    "parser_name": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Parser Name",
+      "type": "string"
+    },
+    "table_structure": {
+      "$ref": "#/$defs/Capability"
+    }
+  },
+  "required": [
+    "parser_name",
+    "adapter_revision",
+    "layout",
+    "ocr",
+    "table_structure",
+    "cell_geometry",
+    "image_crops",
+    "chart_reading",
+    "cross_page_table",
+    "full_document_postprocess"
+  ],
+  "title": "CapabilityManifest",
+  "type": "object"
+}

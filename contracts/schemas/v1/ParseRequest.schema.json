@@ -1,0 +1,49 @@
+{
+  "$id": "lab-contracts/v1/ParseRequest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "budget_ref": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Budget Ref",
+      "type": "string"
+    },
+    "document_artifact_ref": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Document Artifact Ref",
+      "type": "string"
+    },
+    "operation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "page_indices": {
+      "items": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "minItems": 1,
+      "title": "Page Indices",
+      "type": "array"
+    },
+    "profile_revision": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Profile Revision",
+      "type": "string"
+    }
+  },
+  "required": [
+    "document_artifact_ref",
+    "page_indices",
+    "profile_revision",
+    "budget_ref",
+    "operation_id"
+  ],
+  "title": "ParseRequest",
+  "type": "object"
+}

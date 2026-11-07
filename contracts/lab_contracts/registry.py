@@ -4,6 +4,8 @@ from .benchmark import (BenchmarkManifest, EvidenceUnit, Question, SemanticAnswe
                         TextualAnswer, ValidationRecord)
 from .method import (AsyncAccepted, Capabilities, JobStatus, PrepareRequest, PrepareResult,
                      QueryRequest, QueryResponse, SubmissionLine)
+from .parse import CapabilityManifest, ParseManifest, ParseRequest, ParseResult
+from .score import MetricResult
 from .source import SourceRegion
 
 MODELS = {
@@ -26,4 +28,9 @@ MODELS = {
     "EvidenceUnit": EvidenceUnit,
     "ValidationRecord": ValidationRecord,
     "BenchmarkManifest": BenchmarkManifest,
+    "CapabilityManifest": CapabilityManifest,
+    "ParseManifest": ParseManifest,
+    "ParseRequest": ParseRequest,
+    "ParseResult": ParseResult,
+    "MetricResult": MetricResult,
 }

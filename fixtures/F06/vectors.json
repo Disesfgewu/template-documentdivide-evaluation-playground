@@ -1,0 +1,35 @@
+{
+  "_source": "SPEC v0.1 T37, T38, T39, T42 rows and the 16.5 formulas. Only numbers stated in the SPEC are used; no model produced these values.",
+  "_scope": "Test vectors for the #12 scorer. Inputs are already-resolved evidence IDs and fact scores; mapping hits/regions to evidence IDs is #12's job.",
+  "evidence_vectors": [
+    {"id": "T37.hit_a", "gold_sets": [["a", "b"], ["c"]], "matched": ["a"],
+     "expected": {"recall_at_k": {"numerator": 1, "denominator": 2, "raw": 50.0},
+                  "complete_at_k": {"numerator": 0, "denominator": 1, "raw": 0.0}}},
+    {"id": "T37.hit_a_b", "gold_sets": [["a", "b"], ["c"]], "matched": ["a", "b"],
+     "expected": {"recall_at_k": {"numerator": 2, "denominator": 2, "raw": 100.0},
+                  "complete_at_k": {"numerator": 1, "denominator": 1, "raw": 100.0}}},
+    {"id": "T37.hit_c", "gold_sets": [["a", "b"], ["c"]], "matched": ["c"],
+     "expected": {"recall_at_k": {"numerator": 1, "denominator": 1, "raw": 100.0},
+                  "complete_at_k": {"numerator": 1, "denominator": 1, "raw": 100.0}}},
+    {"id": "T37.duplicate_hit_counts_once", "gold_sets": [["a", "b"], ["c"]], "matched": ["a", "a"],
+     "expected": {"recall_at_k": {"numerator": 1, "denominator": 2, "raw": 50.0},
+                  "complete_at_k": {"numerator": 0, "denominator": 1, "raw": 0.0}}}
+  ],
+  "correctness_vectors": [
+    {"id": "T38.weighted_half", "facts": [{"weight": 1, "score": 1}, {"weight": 1, "score": 0.5}],
+     "partial_rubric_defined": true,
+     "expected": {"correctness": {"numerator": 1.5, "denominator": 2, "raw": 75.0}}},
+    {"id": "T38.no_partial_rubric", "facts": [{"weight": 1, "score": 1}, {"weight": 1, "score": 0.5}],
+     "partial_rubric_defined": false,
+     "expected": {"error": "partial_score_without_rubric"}},
+    {"id": "T42.abstain_answer_zero", "facts": [{"weight": 1, "score": 0}, {"weight": 1, "score": 0}],
+     "partial_rubric_defined": false, "abstained": true,
+     "expected": {"correctness": {"numerator": 0, "denominator": 2, "raw": 0.0}}}
+  ],
+  "textual_vectors": [
+    {"id": "T39.no_checks", "applicable_checks": 0, "passed_checks": 0,
+     "expected": {"textual_consistency": {"status": "not_applicable"}}},
+    {"id": "T39.ratio", "applicable_checks": 4, "passed_checks": 3,
+     "expected": {"textual_consistency": {"numerator": 3, "denominator": 4, "raw": 75.0}}}
+  ]
+}
