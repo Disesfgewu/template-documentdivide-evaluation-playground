@@ -452,9 +452,11 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         """F05 failures leave 0 visible document versions, record failed operation, and replay original rejection without outbox."""
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
+            reviewer_id = self.add_member(conn, project_id, role="reviewer")
             _, other_owner_id = self.make_project(conn, role="owner")
 
         owner_token = issue_actor_token(owner_id, self.secret)
+        rev_token = issue_actor_token(reviewer_id, self.secret)
         other_token = issue_actor_token(other_owner_id, self.secret)
 
         # Encrypted PDF with Idempotency-Key
@@ -534,8 +536,21 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(res_conflict_body.status_code, 409)
         self.assertEqual(res_conflict_body.json()["error"]["code"], "conflict")
 
-        # 3. Authorization must precede disclosure: unauthorized caller gets 403
-        res_unauth = self.client.post(
+        # 3. Authorization must precede disclosure:
+        # A reviewer without import permissions gets 403; an actor outside the project gets 404
+        res_rev = self.client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
+            headers={
+                "Authorization": f"Bearer {rev_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "f05-idemp-1",
+            },
+            content=enc_bytes,
+        )
+        self.assertEqual(res_rev.status_code, 403)
+        self.assertEqual(res_rev.json()["error"]["code"], "permission_denied")
+
+        res_other = self.client.post(
             f"/api/v1/documents?project_id={project_id}&logical_id=doc-enc",
             headers={
                 "Authorization": f"Bearer {other_token}",
@@ -544,8 +559,8 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             },
             content=enc_bytes,
         )
-        self.assertEqual(res_unauth.status_code, 403)
-        self.assertEqual(res_unauth.json()["error"]["code"], "permission_denied")
+        self.assertEqual(res_other.status_code, 404)
+        self.assertEqual(res_other.json()["error"]["code"], "not_found")
 
         # 4. Final verification: rejection and replays did not create outbox records or extra operations
         with self.connect() as conn:
@@ -561,10 +576,12 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         """Invalid page geometry persists failure without outbox; replay returns original 422, changed body is 409."""
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
-            _, unauth_id = self.make_project(conn, role="owner")
+            reviewer_id = self.add_member(conn, project_id, role="reviewer")
+            _, other_id = self.make_project(conn, role="owner")
 
         owner_token = issue_actor_token(owner_id, self.secret)
-        unauth_token = issue_actor_token(unauth_id, self.secret)
+        rev_token = issue_actor_token(reviewer_id, self.secret)
+        other_token = issue_actor_token(other_id, self.secret)
 
         def failing_extract_pages(*args, **kwargs):
             raise ValueError("corrupted font dictionary / invalid page geometry")
@@ -643,11 +660,11 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(res_conflict.status_code, 409)
         self.assertEqual(res_conflict.json()["error"]["code"], "conflict")
 
-        # 3. Authorization must precede disclosure: unauthorized caller gets 403
+        # 3. Authorization must precede disclosure: reviewer gets 403, non-member gets 404
         res_unauth = self.client.post(
             f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
             headers={
-                "Authorization": f"Bearer {unauth_token}",
+                "Authorization": f"Bearer {rev_token}",
                 "Content-Type": "application/pdf",
                 "Idempotency-Key": "geom-idemp-1",
             },
@@ -655,6 +672,18 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         )
         self.assertEqual(res_unauth.status_code, 403)
         self.assertEqual(res_unauth.json()["error"]["code"], "permission_denied")
+
+        res_non_member = self.client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
+            headers={
+                "Authorization": f"Bearer {other_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "geom-idemp-1",
+            },
+            content=self.f01_1,
+        )
+        self.assertEqual(res_non_member.status_code, 404)
+        self.assertEqual(res_non_member.json()["error"]["code"], "not_found")
 
         # 4. Final verification: rejection and replays did not create outbox records or extra operations
         with self.connect() as conn:
