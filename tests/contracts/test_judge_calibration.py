@@ -478,6 +478,67 @@ class CalibrationContradictionAndGoldenRulesTests(unittest.TestCase):
         self.assertEqual(report.status, "ineligible")
         self.assertIn("deterministic_metric_mismatch", report.blocking_reasons)
 
+        # Judge correctness_result with scaled numerator/denominator (2/2 vs weighted fact 1/1) also blocks
+        bundle_corr = build_valid_40_case_bundle()
+        out0 = bundle_corr.judge_outputs[0]
+        bundle_corr.judge_outputs[0] = out0.model_copy(
+            update={
+                "correctness_result": _make_metric(
+                    out0.question_id, "correctness", numerator=2.0, denominator=2.0
+                )
+            }
+        )
+        rep_corr = evaluate_judge_calibration(bundle_corr)
+        self.assertEqual(rep_corr.status, "ineligible")
+        self.assertIn("judge_correctness_inconsistent_with_facts", rep_corr.blocking_reasons)
+
+        # Multi-fact floating-point weights (0.1 + 0.2 + 0.7) computed via standard float arithmetic remain eligible
+        bundle_float = build_valid_40_case_bundle()
+        raw_float = json.loads(bundle_float.model_dump_json())
+        c0 = raw_float["cases"][0]
+        o0 = raw_float["judge_outputs"][0]
+        weights = (0.1, 0.2, 0.7)
+        scores = (1.0, 1.0, 1.0)
+        c0["facts"] = [
+            {
+                "fact_id": f"f{idx}",
+                "weight": w,
+                "partial_rubric_defined": True,
+                "has_major_contradiction": False,
+            }
+            for idx, w in enumerate(weights, start=1)
+        ]
+        for ann_key in ("annotator_a", "annotator_b"):
+            c0[ann_key]["fact_labels"] = [
+                {"fact_id": f"f{idx}", "score": s, "reason": "human label"}
+                for idx, s in enumerate(scores, start=1)
+            ]
+        if c0["adjudication"] is not None:
+            c0["adjudication"]["adjudicated_fact_labels"] = [
+                {"fact_id": f"f{idx}", "score": s, "reason": "adjudicated label"}
+                for idx, s in enumerate(scores, start=1)
+            ]
+        o0["fact_outputs"] = [
+            {
+                "fact_id": f"f{idx}",
+                "status": "scored",
+                "score": s,
+                "reason_codes": ["matched_fact"],
+                "rationale": "Judge evaluated fact",
+            }
+            for idx, s in enumerate(scores, start=1)
+        ]
+        num_float = sum(w * s for w, s in zip(weights, scores))
+        den_float = sum(weights)
+        o0["correctness_result"] = json.loads(
+            _make_metric(o0["question_id"], "correctness", numerator=num_float, denominator=den_float).model_dump_json()
+        )
+        for rr in o0["repeat_runs"]:
+            rr["correctness_score"] = 100.0 * num_float / den_float
+            rr["fact_scores"] = {f"f{idx}": s for idx, s in enumerate(scores, start=1)}
+        rep_float = evaluate_judge_calibration(CalibrationEvaluationInput.model_validate_json(json.dumps(raw_float)))
+        self.assertEqual(rep_float.status, "eligible")
+
     def test_deterministic_metrics_all_na_or_single_metric_all_na_blocks_while_mixed_na_passes(self):
         # 1. Mixed valid N/A (odd cases have textual_consistency N/A, even cases scored) is eligible
         bundle = build_valid_40_case_bundle()

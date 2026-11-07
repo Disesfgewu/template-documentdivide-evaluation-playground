@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from enum import Enum
 from fractions import Fraction
+import math
 from typing import Annotated, Any, Callable, Literal, Optional
 
 from pydantic import AwareDatetime, Field, StringConstraints, ValidationError, model_validator
@@ -364,11 +365,18 @@ def _metric_matches_golden(golden: MetricResult, actual: MetricResult) -> list[s
     # Counts are evidence too: equal ratios can hide incorrect denominators.
     assert golden.numerator is not None and golden.denominator is not None
     assert actual.numerator is not None and actual.denominator is not None
-    g_ratio = Fraction(Decimal(repr(golden.numerator))) / Fraction(Decimal(repr(golden.denominator)))
-    a_ratio = Fraction(Decimal(repr(actual.numerator))) / Fraction(Decimal(repr(actual.denominator)))
-    if (actual.numerator, actual.denominator) != (golden.numerator, golden.denominator):
+    g_num = Fraction(Decimal(repr(golden.numerator)))
+    g_den = Fraction(Decimal(repr(golden.denominator)))
+    a_num = Fraction(Decimal(repr(actual.numerator)))
+    a_den = Fraction(Decimal(repr(actual.denominator)))
+    g_ratio = g_num / g_den
+    a_ratio = a_num / a_den
+    if not (
+        math.isclose(actual.numerator, golden.numerator, rel_tol=1e-9, abs_tol=1e-9)
+        and math.isclose(actual.denominator, golden.denominator, rel_tol=1e-9, abs_tol=1e-9)
+    ):
         reasons.append("numerator or denominator differs from golden")
-    if g_ratio != a_ratio:
+    if not math.isclose(float(a_ratio), float(g_ratio), rel_tol=1e-9, abs_tol=1e-9):
         reasons.append(
             f"ratio {actual.numerator}/{actual.denominator} != golden {golden.numerator}/{golden.denominator}"
         )
@@ -786,15 +794,22 @@ def evaluate_judge_calibration(
             num_frac += w_frac * s_frac
             den_frac += w_frac
 
-        # Verify correctness_result matches the judge's own fact scores
+        # Verify correctness_result matches the judge's own fact scores (including numerator and denominator)
         assert jout.correctness_result.numerator is not None and jout.correctness_result.denominator is not None
         actual_num = Fraction(Decimal(repr(jout.correctness_result.numerator)))
         actual_den = Fraction(Decimal(repr(jout.correctness_result.denominator)))
-        if actual_den == 0 or (actual_num / actual_den) != (num_frac / den_frac):
+        expected_num_float = float(Decimal(num_frac.numerator) / Decimal(num_frac.denominator))
+        expected_den_float = float(Decimal(den_frac.numerator) / Decimal(den_frac.denominator))
+        if (
+            actual_den == 0
+            or not math.isclose(jout.correctness_result.numerator, expected_num_float, rel_tol=1e-9, abs_tol=1e-9)
+            or not math.isclose(jout.correctness_result.denominator, expected_den_float, rel_tol=1e-9, abs_tol=1e-9)
+            or not math.isclose(float(actual_num / actual_den), float(num_frac / den_frac), rel_tol=1e-9, abs_tol=1e-9)
+        ):
             add_diag(
                 f"{opath}.correctness_result",
                 "judge_correctness_inconsistent_with_facts",
-                "correctness_result ratio does not match weighted sum of judge fact_outputs",
+                "correctness_result numerator, denominator, or ratio does not match weighted sum of judge fact_outputs",
             )
 
         # Fact label agreement calculation
