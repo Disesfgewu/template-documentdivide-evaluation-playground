@@ -121,7 +121,12 @@ def _integer(value):
 
 
 def _finite_number(value):
-    return type(value) in (int, float) and math.isfinite(value)
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _inline_text(items):

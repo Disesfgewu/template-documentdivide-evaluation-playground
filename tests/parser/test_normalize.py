@@ -712,6 +712,21 @@ class TestUnstructuredNegative(unittest.TestCase):
         self.assertEqual(len(batch.evidence), 0)
         self.assertIn("unattested_layout_geometry", batch.result.pages[0].diagnostics)
 
+    def test_oversized_layout_integer_is_unattested(self):
+        payload = [{"type": "NarrativeText", "text": "x", "metadata": {
+            "page_number": 1, "coordinates": {"system": "PixelSpace",
+            "layout_width": 10**400, "layout_height": 792,
+            "points": [[0, 0], [1, 1]]}}}]
+        batch = self.parser.normalize(
+            json.dumps(payload).encode(), _make_request([0], "unstructured-oss-fast"),
+            _make_unstructured_manifest([0], strategy="fast"), UnstructuredProfile(strategy="fast"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames={0: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=612, height=792, transform_ref="tr-0")},
+            document_page_count=1,
+        )
+        self.assertFalse(batch.evidence)
+        self.assertIn("unattested_layout_geometry", batch.result.pages[0].diagnostics)
+
 
 class TestMinerUPositive(unittest.TestCase):
     """Positive contract tests for strict pinned MinerU 4.1.7 Middle JSON 2.0 adapter."""
@@ -1245,6 +1260,7 @@ class TestMinerUNegative(unittest.TestCase):
             {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [None]}},
             {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [{"page_idx": True, "width_pt": 1.0, "height_pt": 1.0}]}},
             {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [{"page_idx": 0, "width_pt": True, "height_pt": 1.0}]}},
+            {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [{"page_idx": 0, "width_pt": 10**400, "height_pt": 1.0}]}},
             {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [{"page_idx": 0, "width_pt": -1.0, "height_pt": 1.0}]}},
             {
                 "mineru": {"tier": "standard"},
