@@ -478,6 +478,15 @@ class CalibrationContradictionAndGoldenRulesTests(unittest.TestCase):
         self.assertEqual(report.status, "ineligible")
         self.assertIn("deterministic_metric_mismatch", report.blocking_reasons)
 
+        # Even near-equal deterministic golden counts must match exactly.
+        near = build_valid_40_case_bundle()
+        near_output = near.judge_outputs[0]
+        near_metric = near_output.deterministic_metrics[0]
+        near_output.deterministic_metrics[0] = _make_metric(
+            near_output.question_id, near_metric.metric, numerator=1.0000000001, denominator=1.0000000001
+        )
+        self.assertIn("deterministic_metric_mismatch", evaluate_judge_calibration(near).blocking_reasons)
+
         # Judge correctness_result with scaled numerator/denominator (2/2 vs weighted fact 1/1) also blocks
         bundle_corr = build_valid_40_case_bundle()
         out0 = bundle_corr.judge_outputs[0]
