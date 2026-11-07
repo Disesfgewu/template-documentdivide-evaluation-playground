@@ -324,6 +324,50 @@ class TestUnstructuredPositive(unittest.TestCase):
         self.assertEqual(len(chunk_obs), 1)
         self.assertIsNone(chunk_obs[0].evidence_id)
 
+    def test_evidence_identity_includes_source_document_and_transform_lineage(self):
+        """Identical raw output from different documents or transforms produces distinct evidence IDs."""
+        payload = [
+            {
+                "type": "NarrativeText",
+                "text": "Synthetic identical text.",
+                "metadata": {
+                    "page_number": 1,
+                    "coordinates": {
+                        "system": "PixelSpace",
+                        "layout_width": 612.0,
+                        "layout_height": 792.0,
+                        "points": [[50.0, 50.0], [200.0, 100.0]],
+                    },
+                },
+            }
+        ]
+        raw = json.dumps(payload).encode("utf-8")
+        req = _make_request([0], "unstructured-oss-fast")
+        manifest = _make_unstructured_manifest([0], strategy="fast")
+        frames_a = {0: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=612.0, height=792.0, transform_ref="tr-a")}
+        frames_b = {0: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=612.0, height=792.0, transform_ref="tr-b")}
+
+        batch_a = self.parser.normalize(
+            raw, req, manifest, UnstructuredProfile(strategy="fast"),
+            document_id="doc-a", document_sha256="a" * 64,
+            frames=frames_a, document_page_count=1,
+        )
+        batch_b = self.parser.normalize(
+            raw, req, manifest, UnstructuredProfile(strategy="fast"),
+            document_id="doc-b", document_sha256="b" * 64,
+            frames=frames_b, document_page_count=1,
+        )
+        batch_a_again = self.parser.normalize(
+            raw, req, manifest, UnstructuredProfile(strategy="fast"),
+            document_id="doc-a", document_sha256="a" * 64,
+            frames=frames_a, document_page_count=1,
+        )
+
+        self.assertNotEqual(batch_a.evidence[0].evidence_id, batch_b.evidence[0].evidence_id)
+        self.assertEqual(batch_a.evidence[0].evidence_id, batch_a_again.evidence[0].evidence_id)
+        self.assertEqual(batch_a.evidence[0].regions[0].document_id, "doc-a")
+        self.assertEqual(batch_b.evidence[0].regions[0].document_id, "doc-b")
+
 
 class TestUnstructuredNegative(unittest.TestCase):
     """Negative and quarantine contract tests for Unstructured adapter."""
@@ -502,6 +546,41 @@ class TestUnstructuredNegative(unittest.TestCase):
             frames=frames, document_page_count=1,
         )
         self.assertEqual(batch.quarantine_reason, "invalid_unstructured_output")
+
+    def test_invalid_asset_ref_clears_observation_link_and_marks_needs_review(self):
+        """Invalid caller asset_ref (e.g. empty string) produces zero evidence and no dangling observation link."""
+        payload = [
+            {
+                "type": "Image",
+                "text": "",
+                "metadata": {
+                    "page_number": 1,
+                    "image_path": "synthetic-image.png",
+                    "coordinates": {
+                        "system": "PixelSpace",
+                        "layout_width": 612.0,
+                        "layout_height": 792.0,
+                        "points": [[100.0, 100.0], [200.0, 200.0]],
+                    },
+                },
+            }
+        ]
+        raw = json.dumps(payload).encode("utf-8")
+        req = _make_request([0], "unstructured-oss-fast")
+        manifest = _make_unstructured_manifest([0], strategy="fast")
+        frames = _default_frames([0])
+
+        batch = self.parser.normalize(
+            raw, req, manifest, UnstructuredProfile(strategy="fast"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames=frames, document_page_count=1,
+            asset_refs={"synthetic-image.png": ""},  # invalid empty asset ref
+        )
+        self.assertEqual(len(batch.evidence), 0)
+        self.assertEqual(len(batch.observations), 1)
+        self.assertIsNone(batch.observations[0].evidence_id)
+        self.assertEqual(batch.result.pages[0].status, "needs_review")
+        self.assertIn("missing_or_invalid_geometry_or_asset_reference", batch.result.pages[0].diagnostics)
 
 
 class TestMinerUPositive(unittest.TestCase):
@@ -860,6 +939,62 @@ class TestMinerUNegative(unittest.TestCase):
         self.assertEqual(len(batch.observations), 1)
         self.assertIsNone(batch.observations[0].evidence_id)
 
+    def test_invalid_asset_ref_clears_observation_link_and_marks_needs_review(self):
+        """Invalid caller asset_ref on visual body produces zero evidence and no dangling observation link."""
+        payload = {
+            "schema": "docvortex.middle",
+            "schema_version": "2.0",
+            "metadata": {
+                "producer": {"name": "mineru", "version": "4.1.7"},
+                "file_suffix": "pdf",
+            },
+            "is_full_document": True,
+            "pages": [
+                {
+                    "page_idx": 0,
+                    "blocks": [
+                        {
+                            "type": "chart",
+                            "index": 0,
+                            "bbox": [0.1, 0.1, 0.9, 0.9],
+                            "content": [
+                                {
+                                    "type": "chart_body",
+                                    "index": 0,
+                                    "bbox": [0.1, 0.1, 0.9, 0.9],
+                                    "content": "Alt text",
+                                    "image_path": "/tmp/synthetic-chart.png",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "extensions": {
+                "mineru": {"tier": "standard"},
+                "docvortex_layout": {
+                    "version": 1,
+                    "pages": [{"page_idx": 0, "width_pt": 612.0, "height_pt": 792.0}],
+                },
+            },
+        }
+        raw = json.dumps(payload).encode("utf-8")
+        req = _make_request([0], "mineru-standard")
+        manifest = _make_mineru_manifest([0], tier="standard")
+        frames = _default_frames([0])
+
+        batch = self.parser.normalize(
+            raw, req, manifest, MinerUProfile(tier="standard"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames=frames, document_page_count=1,
+            asset_refs={"/tmp/synthetic-chart.png": ""},  # invalid empty string
+        )
+        self.assertEqual(len(batch.evidence), 0)
+        self.assertEqual(len(batch.observations), 1)
+        self.assertIsNone(batch.observations[0].evidence_id)
+        self.assertEqual(batch.result.pages[0].status, "needs_review")
+        self.assertIn("missing_or_invalid_geometry_or_asset_reference", batch.result.pages[0].diagnostics)
+
 
 class TestCommonConstraints(unittest.TestCase):
     """Common strict constraints: JSON size limits, duplicate keys, non-finite values."""
@@ -902,6 +1037,22 @@ class TestCommonConstraints(unittest.TestCase):
             frames=frames, document_page_count=1,
         )
         self.assertEqual(batch.quarantine_reason, "invalid_unstructured_output")
+
+    def test_vendored_schemas_and_licenses_match_verified_hashes(self):
+        """Vendored upstream schema and license files match exact verified byte counts and SHA256 hashes."""
+        from pathlib import Path
+        schema_path = Path("services/parser/lab_parser/upstream_schemas/docvortex-middle-2.0.json")
+        license_path = Path("services/parser/lab_parser/upstream_schemas/DOCVORTEX-LICENSE.md")
+
+        schema_bytes = schema_path.read_bytes()
+        license_bytes = license_path.read_bytes()
+
+        self.assertEqual(len(schema_bytes), 61255)
+        self.assertEqual(hashlib.sha256(schema_bytes).hexdigest(),
+                         "c13491ba1363943b239bd7bbf41fbce0e2d4b7e03d1e71d3741b0328a7b1b38b")
+        self.assertEqual(len(license_bytes), 1079)
+        self.assertEqual(hashlib.sha256(license_bytes).hexdigest(),
+                         "ff54576f0fa4b4a677eaf63497a546d78502398d6c9dddb0984cfa02e5294d3b")
 
 
 if __name__ == "__main__":

@@ -46,3 +46,15 @@ mkdir -p "$LAB_PARSER_ARTIFACT_ROOT"
   - 幾何缺失、策略降級（`fallback_reason` 存在）、未解析資產引用等標記頁面 `needs_review`，不造假幾何或憑空產生 evidence。
   - 測試使用合成上游結構 fixtures（`tests/parser/test_normalize.py`），明確標註為 synthetic，不宣稱真實模型推論。
   - 真實 20 頁多模態 golden 標註、#5/#6/#7 服務與資料庫持久化整合保持 gated 狀態。
+
+### 來源、鎖版與 Vendored 檔案查核（Auditability）
+
+為確保上游 schema 與授權條款具備精確可審核性，本專案將鎖版規範與本機 vendored 檔案的來源、版本標籤及經 `sha256sum` 與位元組計數驗證之雜湊記錄如下：
+
+| 元件／檔案 | 官方來源 URL | 鎖版 Commit / Tag | Vendored 檔案路徑 | SHA256 雜湊 (Verified) | 大小 (bytes) | 授權條款 |
+| --- | --- | --- | --- | --- | --- | --- |
+| MinerU Middle JSON 2.0 Schema | `https://github.com/opendatalab/MinerU` | tag `v4.1.7` / DocVortex `0.6.13` | `services/parser/lab_parser/upstream_schemas/docvortex-middle-2.0.json` | `c13491ba1363943b239bd7bbf41fbce0e2d4b7e03d1e71d3741b0328a7b1b38b` | 61,255 | MIT |
+| DocVortex License | `https://github.com/opendatalab/MinerU` | tag `v4.1.7` / DocVortex `0.6.13` | `services/parser/lab_parser/upstream_schemas/DOCVORTEX-LICENSE.md` | `ff54576f0fa4b4a677eaf63497a546d78502398d6c9dddb0984cfa02e5294d3b` | 1,079 | MIT |
+| Unstructured OSS 0.27.36 | `https://github.com/Unstructured-IO/unstructured` | tag `0.27.36` (release `v0.27.36`) | `unstructured.elements-0.27.36` (Python element dict schema) | N/A（上游套件元件規格） | N/A | Apache-2.0 |
+
+此雜湊已於 `tests/parser/test_normalize.py` 中納入自動化迴歸驗證（`test_vendored_schemas_and_licenses_match_verified_hashes`），任何未經審查之檔案漂移皆會直接阻擋測試通過。

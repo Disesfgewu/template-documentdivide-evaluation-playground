@@ -15,7 +15,7 @@ from typing import Literal
 import zlib
 
 from jsonschema import Draft202012Validator
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from lab_contracts.base import Contract
 from lab_contracts.benchmark import EvidenceUnit
@@ -197,19 +197,25 @@ class _Builder:
                     if image not in self.asset_refs:
                         self.warn(page, "unresolved_image_asset")
                     else:
-                        assets.append(self.asset_refs[image])
-                identity = f"{artifact.ref}#{pointer}"
-                eid = "e-" + hashlib.sha256(identity.encode()).hexdigest()
+                        ref = self.asset_refs[image]
+                        if not isinstance(ref, str) or not ref.strip():
+                            raise ValueError("invalid_asset_reference")
+                        assets.append(ref)
+                frame = self.frames[page]
+                identity = f"{self.document_sha256}:{self.document_id}:{page}:{frame.transform_ref}:{ADAPTER_REVISION}:{artifact.ref}#{pointer}"
+                computed_eid = "e-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
                 evidence = EvidenceUnit.model_validate_json(json.dumps(dict(
-                    evidence_id=eid, regions=[dict(document_id=self.document_id,
+                    evidence_id=computed_eid, regions=[dict(document_id=self.document_id,
                     document_sha256=self.document_sha256, page_index=page,
                     bbox=region, kind=_kind(typ), quote=text if text else None)],
                     raw_content=text, normalized_content=text,
                     extractor_revision=ADAPTER_REVISION, ocr_confidence=None,
                     asset_refs=list(dict.fromkeys(assets)))))
-                if not any(e.evidence_id == eid for e in self.evidence):
+                if not any(e.evidence_id == computed_eid for e in self.evidence):
                     self.evidence.append(evidence)
-            except (ValueError, TypeError):
+                eid = computed_eid
+            except (ValueError, TypeError, ValidationError):
+                eid = None
                 self.warn(page, "missing_or_invalid_geometry_or_asset_reference")
         self.observations.append(Observation(artifact.ref, pointer, page, typ, text, html, tuple(images), eid))
 
