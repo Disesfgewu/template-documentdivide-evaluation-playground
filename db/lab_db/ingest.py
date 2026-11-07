@@ -8,6 +8,7 @@ from typing import Literal
 import uuid
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from .repo import Change, record_change
 from .storage import LocalArtifactStore, store_and_register
@@ -127,9 +128,29 @@ def _record_rejection(
     actor_id: uuid.UUID,
     reason: str | None,
     operation_id: uuid.UUID | None = None,
+    error_payload: dict | None = None,
 ) -> None:
-    """Record a failed document.import operation and document.rejected audit event in one transaction."""
+    """Record a failed document.import operation, audit event, and outbox event in one transaction."""
     op_id = operation_id or uuid.uuid4()
+    if error_payload is None:
+        code_map = {
+            "empty_file": ("empty_file", 422),
+            "not_a_pdf": ("invalid_pdf", 422),
+            "corrupt_pdf": ("corrupt_pdf", 422),
+            "encrypted_pdf": ("unsupported_encryption", 422),
+            "page_limit_exceeded": ("page_limit_exceeded", 422),
+            "file_too_large": ("payload_too_large", 413),
+            "invalid_page_geometry": ("invalid_page_geometry", 422),
+        }
+        code, status_code = code_map.get(reason or "", ("invalid_pdf", 422))
+        error_payload = {
+            "status_code": status_code,
+            "code": code,
+            "message": f"document rejected: {reason}",
+            "details": {"reason": reason},
+            "retryable": False,
+        }
+
     with conn.transaction():
         if operation_id is not None:
             conn.execute(
@@ -147,6 +168,11 @@ def _record_rejection(
             "reason, outcome, operation_id) "
             "VALUES (%s, %s, %s, 'document.rejected', 'document_version', NULL, %s, 'failed', %s)",
             (uuid.uuid4(), project_id, actor_id, reason, op_id),
+        )
+        conn.execute(
+            "INSERT INTO outbox_events (event_id, project_id, topic, payload, operation_id) "
+            "VALUES (%s, %s, 'document.rejected', %s, %s)",
+            (uuid.uuid4(), project_id, Jsonb(error_payload), op_id),
         )
 
 
@@ -183,6 +209,7 @@ def ingest_document(
     inspection: Inspection,
     pages: list[PageGeometry],
     operation_id: uuid.UUID | None = None,
+    error_payload: dict | None = None,
 ) -> uuid.UUID:
     """Ingest an inspected PDF into artifact storage and PostgreSQL within a bounded transaction.
 
@@ -204,6 +231,7 @@ def ingest_document(
             actor_id=actor_id,
             reason=inspection.reason,
             operation_id=operation_id,
+            error_payload=error_payload,
         )
         raise IngestRejected(inspection.reason)
 

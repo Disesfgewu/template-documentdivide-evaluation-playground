@@ -206,6 +206,40 @@ class MultipartIntakeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.status_code, 400)
             self.assertEqual(res.json()["error"]["code"], "invalid_content_length")
 
+    async def test_chunked_multipart_intake_success_via_feed_parser(self) -> None:
+        """Chunked multipart intake streams through BytesFeedParser without full copy buffering."""
+        app = FastAPI()
+
+        @app.post("/test-upload")
+        async def upload_route(req: Request):
+            try:
+                data, log_id = await extract_upload_data(req, max_bytes=100000)
+                return JSONResponse({"len": len(data), "logical_id": log_id})
+            except ApiError as exc:
+                return exc.to_error_response("req-1")
+
+        client = TestClient(app)
+
+        def chunks():
+            yield b"--BOUNDARY\r\n"
+            yield b'Content-Disposition: form-data; name="logical_id"\r\n\r\n'
+            yield b"chunked-doc\r\n"
+            yield b"--BOUNDARY\r\n"
+            yield b'Content-Disposition: form-data; name="file"; filename="upload.pdf"\r\n'
+            yield b"Content-Type: application/pdf\r\n\r\n"
+            yield self.f01_1[:100]
+            yield self.f01_1[100:]
+            yield b"\r\n--BOUNDARY--\r\n"
+
+        res = client.post(
+            "/test-upload",
+            headers={"Content-Type": "multipart/form-data; boundary=BOUNDARY"},
+            content=chunks(),
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.json()["len"], len(self.f01_1))
+        self.assertEqual(res.json()["logical_id"], "chunked-doc")
+
 
 if __name__ == "__main__":
     unittest.main()
