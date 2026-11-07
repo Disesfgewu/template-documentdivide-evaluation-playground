@@ -89,7 +89,15 @@ def _require_pinned(value: str, field_name: str) -> str:
 def _check_json_value(value: Any, *, depth: int = 0) -> Any:
     if depth > MAX_PARAMETER_DEPTH:
         raise ValueError(f"generation parameters exceed max depth {MAX_PARAMETER_DEPTH}")
-    if value is None or isinstance(value, (bool, str, int)):
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        try:
+            f = float(value)
+        except OverflowError:
+            raise ValueError("generation parameter number out of range") from None
+        if not math.isfinite(f):
+            raise ValueError("generation parameter number out of range")
         return value
     if isinstance(value, Decimal):
         if not value.is_finite():

@@ -979,6 +979,23 @@ class ValidationAndRejectionTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             build_generation_cache_key(inp3)
 
+        # Canonical serialization uses exponent notation for large integers;
+        # reject values strict_loads could not read back before hashing or dump.
+        for value in (10**309, -(10**309)):
+            inp = parse_generation_cache_input(json.dumps(_make_text_input()))
+            inp.generation_config.parameters["nested"] = [value]
+            with self.subTest(value_sign=value > 0):
+                with self.assertRaises(ValidationError):
+                    build_generation_cache_key(inp)
+                with self.assertRaises(ValidationError):
+                    dump_generation_cache_input_json(inp)
+
+        inp = parse_generation_cache_input(json.dumps(_make_text_input()))
+        inp.generation_config.parameters["nested"] = [10**307]
+        dumped = dump_generation_cache_input_json(inp)
+        self.assertEqual(build_generation_cache_key(inp),
+                         build_generation_cache_key(parse_generation_cache_input(dumped)))
+
         # Fallback reason required iff effective_profile != requested_profile
         m_fb = _make_text_input()
         m_fb["parse_provenance"][0]["effective_profile"] = "advanced"
