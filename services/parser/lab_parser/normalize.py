@@ -202,8 +202,18 @@ class _Builder:
                             raise ValueError("invalid_asset_reference")
                         assets.append(ref)
                 frame = self.frames[page]
-                identity = f"{self.document_sha256}:{self.document_id}:{page}:{frame.transform_ref}:{ADAPTER_REVISION}:{artifact.ref}#{pointer}"
-                computed_eid = "e-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                # Canonical structured preimage encoding avoids delimiter collision when identifiers contain colons
+                identity_payload = [
+                    self.document_sha256,
+                    self.document_id,
+                    page,
+                    frame.transform_ref,
+                    ADAPTER_REVISION,
+                    artifact.ref,
+                    pointer,
+                ]
+                identity_bytes = json.dumps(identity_payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+                computed_eid = "e-" + hashlib.sha256(identity_bytes).hexdigest()
                 evidence = EvidenceUnit.model_validate_json(json.dumps(dict(
                     evidence_id=computed_eid, regions=[dict(document_id=self.document_id,
                     document_sha256=self.document_sha256, page_index=page,

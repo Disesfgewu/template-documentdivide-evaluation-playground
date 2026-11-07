@@ -368,6 +368,66 @@ class TestUnstructuredPositive(unittest.TestCase):
         self.assertEqual(batch_a.evidence[0].regions[0].document_id, "doc-a")
         self.assertEqual(batch_b.evidence[0].regions[0].document_id, "doc-b")
 
+    def test_colon_delimited_identifier_canonical_encoding_no_collision(self):
+        """Preimage structured encoding prevents delimiter collision when identifiers contain colons."""
+        payload = [
+            {
+                "type": "NarrativeText",
+                "text": "Synthetic collision test text.",
+                "metadata": {
+                    "page_number": 1,
+                    "coordinates": {
+                        "system": "PixelSpace",
+                        "layout_width": 612.0,
+                        "layout_height": 792.0,
+                        "points": [[50.0, 50.0], [200.0, 100.0]],
+                    },
+                },
+            }
+        ]
+        raw = json.dumps(payload).encode("utf-8")
+
+        # Case A: document_id='doc:0', manifest parser_page 1 -> canonical page_index 1, transform_ref='tx'
+        manifest_a = _make_unstructured_manifest([1]).model_copy(
+            update={"page_index_map": [PageMapEntry(parser_page=1, page_index=1)]}
+        )
+        frames_a = {1: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=612.0, height=792.0, transform_ref="tx")}
+        req_a = _make_request([1])
+
+        # Case B: document_id='doc', manifest parser_page 1 -> canonical page_index 0, transform_ref='1:tx'
+        manifest_b = _make_unstructured_manifest([0]).model_copy(
+            update={"page_index_map": [PageMapEntry(parser_page=1, page_index=0)]}
+        )
+        frames_b = {0: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=612.0, height=792.0, transform_ref="1:tx")}
+        req_b = _make_request([0])
+
+        batch_a = self.parser.normalize(
+            raw, req_a, manifest_a, UnstructuredProfile(strategy="fast"),
+            document_id="doc:0", document_sha256="a" * 64,
+            frames=frames_a, document_page_count=2,
+        )
+        batch_b = self.parser.normalize(
+            raw, req_b, manifest_b, UnstructuredProfile(strategy="fast"),
+            document_id="doc", document_sha256="a" * 64,
+            frames=frames_b, document_page_count=2,
+        )
+        batch_a_rerun = self.parser.normalize(
+            raw, req_a, manifest_a, UnstructuredProfile(strategy="fast"),
+            document_id="doc:0", document_sha256="a" * 64,
+            frames=frames_a, document_page_count=2,
+        )
+
+        self.assertEqual(len(batch_a.evidence), 1)
+        self.assertEqual(len(batch_b.evidence), 1)
+        # Differing SourceRegions must not collide in evidence identity
+        self.assertNotEqual(batch_a.evidence[0].evidence_id, batch_b.evidence[0].evidence_id)
+        # Same source normalization remains strictly deterministic
+        self.assertEqual(batch_a.evidence[0].evidence_id, batch_a_rerun.evidence[0].evidence_id)
+        self.assertEqual(batch_a.evidence[0].regions[0].document_id, "doc:0")
+        self.assertEqual(batch_b.evidence[0].regions[0].document_id, "doc")
+        self.assertEqual(batch_a.evidence[0].regions[0].page_index, 1)
+        self.assertEqual(batch_b.evidence[0].regions[0].page_index, 0)
+
 
 class TestUnstructuredNegative(unittest.TestCase):
     """Negative and quarantine contract tests for Unstructured adapter."""

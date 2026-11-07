@@ -49,12 +49,18 @@ mkdir -p "$LAB_PARSER_ARTIFACT_ROOT"
 
 ### 來源、鎖版與 Vendored 檔案查核（Auditability）
 
-為確保上游 schema 與授權條款具備精確可審核性，本專案將鎖版規範與本機 vendored 檔案的來源、版本標籤及經 `sha256sum` 與位元組計數驗證之雜湊記錄如下：
+為確保上游 schema、套件散布與授權條款具備精確可審核性，DocVortex（MinerU Middle JSON 格式提供者）之專案儲存庫與 PyPI release 發布資訊、本機 vendored 檔案與經 `sha256sum` 與位元組計數驗證之雜湊記錄如下：
+
+- **DocVortex 專案儲存庫**：`https://github.com/myhloli/DocVortex`（非 MinerU 儲存庫；鎖版 tag `v0.6.13`，commit `6b3c6641b89d3c2389bb35a5b362f79f21a1c261`）
+- **PyPI Release 詮釋資料**：`https://pypi.org/pypi/docvortex/0.6.13/json`
+- **PyPI 官方發行檔（Linux x86_64 wheel）**：
+  - 檔名：`docvortex-0.6.13-cp311-abi3-manylinux_2_28_x86_64.whl`
+  - 官方 SHA256 摘要：`bc366ece6b0bbee8c6ee63366ba7c0779be5195395749c79a6af69f936ba95ad`
 
 | 元件／檔案 | 官方來源 URL | 鎖版 Commit / Tag | Vendored 檔案路徑 | SHA256 雜湊 (Verified) | 大小 (bytes) | 授權條款 |
 | --- | --- | --- | --- | --- | --- | --- |
-| MinerU Middle JSON 2.0 Schema | `https://github.com/opendatalab/MinerU` | tag `v4.1.7` / DocVortex `0.6.13` | `services/parser/lab_parser/upstream_schemas/docvortex-middle-2.0.json` | `c13491ba1363943b239bd7bbf41fbce0e2d4b7e03d1e71d3741b0328a7b1b38b` | 61,255 | MIT |
-| DocVortex License | `https://github.com/opendatalab/MinerU` | tag `v4.1.7` / DocVortex `0.6.13` | `services/parser/lab_parser/upstream_schemas/DOCVORTEX-LICENSE.md` | `ff54576f0fa4b4a677eaf63497a546d78502398d6c9dddb0984cfa02e5294d3b` | 1,079 | MIT |
+| DocVortex Middle JSON 2.0 Schema | `https://raw.githubusercontent.com/myhloli/DocVortex/6b3c6641b89d3c2389bb35a5b362f79f21a1c261/schemas/middle-2.0.json` | tag `v0.6.13` (`6b3c6641b89d3c2389bb35a5b362f79f21a1c261`) | `services/parser/lab_parser/upstream_schemas/docvortex-middle-2.0.json` | `c13491ba1363943b239bd7bbf41fbce0e2d4b7e03d1e71d3741b0328a7b1b38b` | 61,255 | MIT |
+| DocVortex License | `https://raw.githubusercontent.com/myhloli/DocVortex/6b3c6641b89d3c2389bb35a5b362f79f21a1c261/LICENSE.md` | tag `v0.6.13` (`6b3c6641b89d3c2389bb35a5b362f79f21a1c261`) | `services/parser/lab_parser/upstream_schemas/DOCVORTEX-LICENSE.md` | `ff54576f0fa4b4a677eaf63497a546d78502398d6c9dddb0984cfa02e5294d3b` | 1,079 | MIT |
 | Unstructured OSS 0.27.36 | `https://github.com/Unstructured-IO/unstructured` | tag `0.27.36` (release `v0.27.36`) | `unstructured.elements-0.27.36` (Python element dict schema) | N/A（上游套件元件規格） | N/A | Apache-2.0 |
 
 此雜湊已於 `tests/parser/test_normalize.py` 中納入自動化迴歸驗證（`test_vendored_schemas_and_licenses_match_verified_hashes`），任何未經審查之檔案漂移皆會直接阻擋測試通過。
