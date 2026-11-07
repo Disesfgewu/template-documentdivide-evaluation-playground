@@ -781,7 +781,7 @@ def check_release_evidence(
         inventory.verdict = "RELEASE_BLOCKED" if inventory.blocked_items else "RELEASE_FAILED"
     elif inventory.blocked_items or has_unverified_claims:
         inventory.verdict = "RELEASE_BLOCKED"
-    elif inventory.unpassed_mandatory or not all_gates_verified:
+    elif inventory.unpassed_mandatory or not all_gates_verified or verify is None or not strict_gates:
         inventory.verdict = "RELEASE_NOT_READY"
     else:
         inventory.verdict = "RELEASE_PASS"

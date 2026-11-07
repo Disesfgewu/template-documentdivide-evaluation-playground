@@ -475,6 +475,24 @@ class AdversarialBypassTests(unittest.TestCase):
         self.assertTrue(any("corrupted artifact hash" in e for e in err_f))
         self.assertTrue(any("corrupted artifact hash" in gv for gv in inv_f.gate_violations))
 
+    def test_gate_callbacks_alone_cannot_claim_release_pass(self):
+        doc = _make_fully_passed_doc(lambda item_id: [_make_evidence(
+            parser_mode="real", parser_version="1.0", parser_evidence="artifact:parser/out.json",
+            provider_mode="real", provider_version="1.0", usage_evidence="artifact:provider/usage.json",
+            database="postgresql", pgvector_version="0.8.6", database_evidence="artifact:db/mig.json",
+            human_verified=True, human_review_evidence="https://example.org/review",
+            performance_evidence="artifact:perf/run.json", pages=500,
+            restore_verified=True, restore_evidence="artifact:restore/drill.json",
+        )])
+        gate_verifiers = {gate: lambda item_id, evidence: [] for gate in cre.REAL_GATES}
+        errors, inv = cre.check_release_evidence(doc, gate_verifiers=gate_verifiers)
+        self.assertEqual(errors, [])
+        self.assertNotEqual(inv.verdict, "RELEASE_PASS")
+        _, unchecked = cre.check_release_evidence(
+            doc, verify=lambda evidence: [], gate_verifiers=gate_verifiers, strict_gates=False,
+        )
+        self.assertNotEqual(unchecked.verdict, "RELEASE_PASS")
+
 
 class DependencyTests(unittest.TestCase):
     def test_acceptance_passed_fails_if_mapped_tests_unpassed(self):
