@@ -361,11 +361,13 @@ def _metric_matches_golden(golden: MetricResult, actual: MetricResult) -> list[s
         return reasons
     if golden.status == "not_applicable":
         return reasons
-    # Both are scored: compare exact rational ratio and display value (SPEC 16.5, 17.6).
+    # Counts are evidence too: equal ratios can hide incorrect denominators.
     assert golden.numerator is not None and golden.denominator is not None
     assert actual.numerator is not None and actual.denominator is not None
     g_ratio = Fraction(Decimal(repr(golden.numerator))) / Fraction(Decimal(repr(golden.denominator)))
     a_ratio = Fraction(Decimal(repr(actual.numerator))) / Fraction(Decimal(repr(actual.denominator)))
+    if (actual.numerator, actual.denominator) != (golden.numerator, golden.denominator):
+        reasons.append("numerator or denominator differs from golden")
     if g_ratio != a_ratio:
         reasons.append(
             f"ratio {actual.numerator}/{actual.denominator} != golden {golden.numerator}/{golden.denominator}"

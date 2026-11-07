@@ -467,6 +467,17 @@ class CalibrationContradictionAndGoldenRulesTests(unittest.TestCase):
         self.assertEqual(rep.deterministic_metric_mismatches, 1)
         self.assertIn("deterministic_metric_mismatch", rep.blocking_reasons)
 
+    def test_equal_ratio_with_different_counts_blocks(self):
+        bundle = build_valid_40_case_bundle()
+        output = bundle.judge_outputs[0]
+        metric = output.deterministic_metrics[0]
+        output.deterministic_metrics[0] = _make_metric(
+            output.question_id, metric.metric, numerator=2.0, denominator=2.0
+        )
+        report = evaluate_judge_calibration(bundle)
+        self.assertEqual(report.status, "ineligible")
+        self.assertIn("deterministic_metric_mismatch", report.blocking_reasons)
+
     def test_deterministic_metrics_all_na_or_single_metric_all_na_blocks_while_mixed_na_passes(self):
         # 1. Mixed valid N/A (odd cases have textual_consistency N/A, even cases scored) is eligible
         bundle = build_valid_40_case_bundle()
