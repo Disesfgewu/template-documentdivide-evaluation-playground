@@ -26,6 +26,8 @@
 4. **驗收項依賴約束（Acceptance Dependencies）**：
    - 依 SPEC 18.2 與 19.7 對照表，驗收項目（A01–A48）標示 `passed` 時，其所依賴之全部底層測試（T）必須均為 `passed`。
 
+各真實閘門的 passed 證據須提供明確宣告和可供人工核對的參照：parser 使用 `parser_mode: real`、`parser_version`、`parser_evidence`；provider 使用 `provider_mode: real`、`provider_version`、`usage_evidence`；資料庫使用 `database: postgresql`、`pgvector_version`、`database_evidence`；人工覆核使用 `human_verified: true`、`human_review_evidence`；效能使用 `performance_evidence`，T81/T104 另須整數 `pages >= 500`；還原使用 `restore_verified: true`、`restore_evidence`。同一項目若屬多個閘門須同時提供相應欄位。這些欄位僅檢查宣告與參照存在，不能自行證明服務或人工操作真實發生；發布仍須獨立核對原始證據。release 模式不得停用嚴格閘門。
+
 ## 2. 查核工具使用指令
 
 工具位於 `tools/governance/check_release_evidence.py`。

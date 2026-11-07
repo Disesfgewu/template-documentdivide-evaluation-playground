@@ -162,6 +162,11 @@ class ProvenanceValidationTests(unittest.TestCase):
             self.assertTrue(any(f"missing provenance '{field_name}'" in e for e in errors),
                             f"Expected error for missing {field_name}, got: {errors}")
 
+    def test_non_string_actual_rejected(self):
+        for value in (True, 123, {"status": True}):
+            with self.subTest(value=value):
+                self.assertTrue(cre._validate_provenance_fields(_make_evidence(actual=value), "test"))
+
     def test_actual_not_passed_rejected(self):
         doc = _make_minimal_doc()
         doc["tests"][0]["status"] = "passed"
@@ -172,6 +177,24 @@ class ProvenanceValidationTests(unittest.TestCase):
 
 
 class RealGateRestrictionTests(unittest.TestCase):
+    def test_missing_positive_real_gate_evidence_rejected(self):
+        for item in ("T85", "T84", "T47", "T21", "T81", "T79"):
+            with self.subTest(item=item):
+                errors = cre._check_gate_mock_restrictions(item, _make_evidence(), "", item)
+                self.assertTrue(errors, item)
+
+    def test_release_cannot_disable_gate_checks(self):
+        errors, _ = cre.check_release_evidence(_make_minimal_doc(), strict_gates=False,
+                                                require_release_pass=True)
+        self.assertIn("release mode cannot disable strict gates", errors)
+        self.assertEqual(cre.main(["--release", "--no-strict-gates"]), 1)
+
+    def test_positive_gate_declarations(self):
+        evidence = _make_evidence(parser_mode="real", parser_version="pinned-v1",
+                                  parser_evidence="artifact:parser")
+        self.assertEqual(cre._check_gate_mock_restrictions("T85", evidence, "", "T85"), [])
+
+
     def test_real_parser_gate_rejects_mock(self):
         for pid in ["T85", "T88", "T104"]:
             doc = _make_minimal_doc()

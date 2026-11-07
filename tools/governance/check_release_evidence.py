@@ -232,8 +232,12 @@ def _validate_provenance_fields(ev: Dict[str, Any], where: str) -> List[str]:
         problems.append(f"{where}: missing provenance 'actual' (test execution outcome)")
     elif isinstance(actual, str) and actual.strip().lower() != "passed":
         problems.append(f"{where}: provenance 'actual' must be passed, got {actual!r}")
-    elif isinstance(actual, dict) and actual.get("status", "").strip().lower() != "passed":
-        problems.append(f"{where}: provenance 'actual' status must be passed, got {actual.get('status')!r}")
+    elif isinstance(actual, dict):
+        status = actual.get("status")
+        if not isinstance(status, str) or status.strip().lower() != "passed":
+            problems.append(f"{where}: provenance 'actual' status must be passed, got {status!r}")
+    elif not isinstance(actual, str):
+        problems.append(f"{where}: provenance 'actual' must be a passed string or status mapping")
 
     # 6. Trace
     trace = ev.get("trace") or ev.get("run") or ev.get("trace_id") or ev.get("artifact_ref")
@@ -270,6 +274,30 @@ def _check_gate_mock_restrictions(item_id: str, ev: Dict[str, Any], note: str, w
     """Reject mock/stub evidence for any designated real gate."""
     violations = []
     note_lower = (note or "").lower()
+
+    # Positive declarations and a traceable evidence reference are required; absence
+    # of a mock flag is not proof that the corresponding real gate was exercised.
+    requirements = {
+        "real_parser": (("parser_mode", "real"), ("parser_version", None), ("parser_evidence", None)),
+        "real_provider": (("provider_mode", "real"), ("provider_version", None), ("usage_evidence", None)),
+        "real_db": (("database", "postgresql"), ("pgvector_version", None), ("database_evidence", None)),
+        "human_review": (("human_verified", True), ("human_review_evidence", None)),
+        "performance": (("performance_evidence", None),),
+        "restore": (("restore_verified", True), ("restore_evidence", None)),
+    }
+    for gate, fields in requirements.items():
+        if item_id not in REAL_GATES[gate]["ids"]:
+            continue
+        for name, expected in fields:
+            value = ev.get(name)
+            valid = (isinstance(value, str) and bool(value.strip()) if expected is None
+                     else type(value) is type(expected) and value == expected)
+            if not valid:
+                violations.append(f"{where}: [{REAL_GATES[gate]['name']}] missing or invalid {name} for {item_id}")
+    if item_id in {"T81", "T104"}:
+        pages = ev.get("pages")
+        if type(pages) is not int or pages < 500:
+            violations.append(f"{where}: [Performance Gate] {item_id} requires >= 500 pages")
 
     # Real Parser Gate
     if item_id in REAL_GATES["real_parser"]["ids"]:
@@ -476,6 +504,10 @@ def check_release_evidence(
             if isinstance(e, dict) and "id" in e:
                 all_entries[e["id"]] = e
 
+    if require_release_pass and not strict_gates:
+        errors.append("release mode cannot disable strict gates")
+        strict_gates = True
+
     # 1. Dependency checks: Acceptance items require their mapped tests to pass
     for a_id, mapped_tests in ACCEPTANCE_TEST_MAP.items():
         a_entry = all_entries.get(a_id)
@@ -672,6 +704,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     spec_text = args.spec.read_text(encoding="utf-8") if args.spec.is_file() else None
 
     verify = ct.github_verifier() if args.verify_provenance else None
+    if args.release and args.no_strict_gates:
+        print("check_release_evidence: --release cannot disable strict gates", file=sys.stderr)
+        return 1
     strict_gates = not args.no_strict_gates
 
     errors, inventory = check_release_evidence(
