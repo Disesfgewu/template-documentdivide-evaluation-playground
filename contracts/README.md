@@ -214,3 +214,8 @@ acceptance remains open. Durable per-line PostgreSQL transactions, cross-batch
 idempotency, run/finalize locks, first-terminal selection, authorization,
 audit/outbox, late/cancel handling and HTTP/grader equivalence remain #5/#6/#11/#12
 integration gates. This preflight is not a submission endpoint or a completed run.
+
+
+## Generation control
+
+The deterministic accept / regenerate / needs_review routing with attempt and cost caps, and the quota-deficit scheduling decision, are in `lab_contracts/generation_control.py`. See [generation control](../docs/GENERATION_CONTROL.md) for the rules and their limits.
