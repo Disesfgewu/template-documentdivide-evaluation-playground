@@ -30,7 +30,7 @@ DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 BENCHMARK_RESOURCE_TYPE = "benchmark_revision"
 # The only payload keys copied out (the public part of the Question contract).
-PUBLIC_PAYLOAD_KEYS = ("language", "tags", "modality_requirements", "reasoning_type")
+PUBLIC_PAYLOAD_KEYS = ("language",)
 PUBLIC_FIELD_ADAPTERS = {name: TypeAdapter(Question.model_fields[name].rebuild_annotation())
                          for name in PUBLIC_PAYLOAD_KEYS}
 MAX_ORDINAL = 2**31 - 1  # questions.ordinal is a PostgreSQL integer
@@ -70,8 +70,7 @@ def parse_limit(raw: Optional[str]) -> int:
 
 def public_question(row: tuple) -> dict:
     qid, key, ordinal, text, qhash, bucket, payload = row
-    item = {"id": str(qid), "question_key": key, "ordinal": ordinal, "question_text": text,
-            "question_hash": qhash, "quota_bucket": bucket}
+    item = {"id": str(qid), "question_text": text}
     if isinstance(payload, dict):
         for name in PUBLIC_PAYLOAD_KEYS:
             if name in payload:
