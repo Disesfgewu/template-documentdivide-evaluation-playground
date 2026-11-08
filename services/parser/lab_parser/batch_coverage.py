@@ -33,19 +33,11 @@ __all__ = [
     "BatchSpec",
     "CoverageReport",
     "CoverageStatus",
-    "MergedRetryResult",
-    "OperationAttemptRecord",
     "PageCoverageItem",
     "PageRole",
     "PageStatusCode",
     "ReportedPageStatusCode",
-    "RetryPlan",
-    "RetryTargetPage",
-    "derive_retry_plan",
     "evaluate_coverage",
-    "execute_and_merge_retry",
-    "execute_retry",
-    "merge_retry_results",
     "plan_batches",
     "select_retry_batches",
 ]
@@ -1062,16 +1054,3 @@ def select_retry_batches(
 
     retry_set = set(report.retry_batch_ids)
     return tuple(b for b in plan.batches if b.batch_id in retry_set)
-
-
-# Re-export retry API for convenience
-from lab_parser.batch_retry import (  # noqa: E402
-    MergedRetryResult,
-    OperationAttemptRecord,
-    RetryPlan,
-    RetryTargetPage,
-    derive_retry_plan,
-    execute_and_merge_retry,
-    execute_retry,
-    merge_retry_results,
-)

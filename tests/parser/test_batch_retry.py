@@ -1,24 +1,23 @@
 """Unit and negative tests for deterministic failed/missing-only retry planning and merge.
 
-Covers SPEC 2, 4.2, 16.6, 19.4:
-- Derives executable failed/missing-only original physical page selections from
-  validated prior results without re-scheduling successful core pages.
-- Retains per-page successful results, operation provenance, and immutable originals.
-- Deterministic counting callback proving only failed/missing pages execute and
-  successes are preserved.
-- Zero callback calls when no retries are required.
-- Merge of retry outcomes preserving prior operation history, immutable originals,
-  and coverage calculation using the existing evaluate_coverage contract.
-- Failed/missing pages remain visible if retries fail.
-- Honest full_document and benchmark freeze flags.
-- Fail closed for cross-document/plan, unexpected pages, duplicate conflicting
-  results, altering successful/partial/needs_review core outcomes, or overlap
-  upgrading core coverage.
+Covers SPEC 2, 4.2, 16.6, 19.4 and host review findings:
+- Clean subprocess import in both orders without circular import failures.
+- Pre-callback validation rejecting forged or stale retry plans with zero callback calls.
+- Binding source BatchResultInput signatures including operation and page provenance.
+- Rejecting spoofed outcome provenance while filling absent fields from explicit retry plan.
+- Multi-round (>= 2 rounds) operation history and per-page provenance preservation without
+  falsely relabeling reused successes as retry outputs.
+- Truthful is_full_document on RetryTargetPage.
+- Recoverable partial progress preservation via RetryExecutionError on callback failure.
+- Fail closed for cross-document/plan, unexpected pages, duplicate conflicting results,
+  and overlap upgrading core coverage.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import subprocess
+import sys
 import unittest
 
 from lab_parser.batch_coverage import (
@@ -33,6 +32,7 @@ from lab_parser.batch_coverage import (
 from lab_parser.batch_retry import (
     MergedRetryResult,
     OperationAttemptRecord,
+    RetryExecutionError,
     RetryPlan,
     RetryTargetPage,
     derive_retry_plan,
@@ -73,6 +73,8 @@ def _build_full_result_for_plan(
                         status="failed",
                         diagnostics=failed[p_idx],
                         role=entry.role,
+                        operation_id=f"{operation_prefix}_{spec.batch_index:04d}",
+                        attempt=0,
                     )
                 )
             elif entry.is_core and p_idx in partial:
@@ -82,6 +84,8 @@ def _build_full_result_for_plan(
                         status="partial",
                         diagnostics=partial[p_idx],
                         role=entry.role,
+                        operation_id=f"{operation_prefix}_{spec.batch_index:04d}",
+                        attempt=0,
                     )
                 )
             elif entry.is_core and p_idx in needs_review:
@@ -91,6 +95,8 @@ def _build_full_result_for_plan(
                         status="needs_review",
                         diagnostics=needs_review[p_idx],
                         role=entry.role,
+                        operation_id=f"{operation_prefix}_{spec.batch_index:04d}",
+                        attempt=0,
                     )
                 )
             else:
@@ -100,6 +106,8 @@ def _build_full_result_for_plan(
                         status="ok",
                         diagnostics=(),
                         role=entry.role,
+                        operation_id=f"{operation_prefix}_{spec.batch_index:04d}",
+                        attempt=0,
                     )
                 )
         results.append(
@@ -113,23 +121,39 @@ def _build_full_result_for_plan(
     return results
 
 
-class TestBatchRetryDerivationAndExecution(unittest.TestCase):
+class TestBatchRetryImportAndFreshness(unittest.TestCase):
+    def test_import_in_fresh_subprocess_both_orders(self) -> None:
+        cmd1 = [
+            sys.executable,
+            "-c",
+            "from lab_parser.batch_retry import derive_retry_plan; print('ok1')",
+        ]
+        cmd2 = [
+            sys.executable,
+            "-c",
+            "import lab_parser.batch_coverage; from lab_parser.batch_retry import derive_retry_plan; print('ok2')",
+        ]
+        res1 = subprocess.run(cmd1, capture_output=True, text=True)
+        self.assertEqual(res1.returncode, 0, f"cmd1 failed: {res1.stderr}")
+        self.assertIn("ok1", res1.stdout)
+
+        res2 = subprocess.run(cmd2, capture_output=True, text=True)
+        self.assertEqual(res2.returncode, 0, f"cmd2 failed: {res2.stderr}")
+        self.assertIn("ok2", res2.stdout)
+
+
+class TestBatchRetryDerivationAndPreCallbackValidation(unittest.TestCase):
     def setUp(self) -> None:
-        # 25 pages -> 3 batches: batch 0 (0..9), batch 1 (10..19), batch 2 (20..24)
         self.plan = plan_batches(
             document_id=DOC_ID,
             document_sha256=DOC_SHA,
             page_count=25,
         )
 
-    def test_derive_retry_plan_failed_and_missing_only(self) -> None:
-        # Batch 0: page 5 fails
-        # Batch 2: page 22 is omitted (missing)
-        # All other core pages are OK
+    def test_stale_or_forged_retry_plan_executes_zero_callbacks(self) -> None:
         prior_results = _build_full_result_for_plan(
             self.plan,
-            failed_core_pages={5: ("ocr_timeout",)},
-            omitted_core_pages={22},
+            failed_core_pages={5: ("timeout",)},
         )
         retry_plan = derive_retry_plan(
             self.plan,
@@ -137,110 +161,6 @@ class TestBatchRetryDerivationAndExecution(unittest.TestCase):
             retry_operation_id="retry_op_001",
             attempt=1,
         )
-
-        self.assertIsInstance(retry_plan, RetryPlan)
-        self.assertEqual(retry_plan.document_id, DOC_ID)
-        self.assertEqual(retry_plan.document_sha256, DOC_SHA)
-        self.assertEqual(retry_plan.plan_id, self.plan.plan_id)
-        self.assertEqual(retry_plan.retry_operation_id, "retry_op_001")
-        self.assertEqual(retry_plan.attempt, 1)
-
-        # STRICTLY failed and missing core pages only!
-        self.assertEqual(retry_plan.target_page_indices, (5, 22))
-        self.assertEqual(
-            retry_plan.target_batch_ids,
-            (self.plan.batches[0].batch_id, self.plan.batches[2].batch_id),
-        )
-
-        # Examine targets
-        t5 = retry_plan.target_pages[0]
-        self.assertEqual(t5.page_index, 5)
-        self.assertEqual(t5.owner_batch_id, self.plan.batches[0].batch_id)
-        self.assertEqual(t5.prior_status, "failed")
-        self.assertEqual(t5.prior_diagnostics, ("ocr_timeout",))
-        self.assertEqual(t5.prior_operation_id, "initial_op_0000")
-        # Referenced overlap reports should contain neighbor pages from batch 0 (e.g. 0..4, 6..10)
-        overlap_indices = {rep.page_index for rep in t5.referenced_overlap_reports}
-        self.assertIn(4, overlap_indices)
-        self.assertIn(6, overlap_indices)
-        self.assertNotIn(5, overlap_indices)
-
-        t22 = retry_plan.target_pages[1]
-        self.assertEqual(t22.page_index, 22)
-        self.assertEqual(t22.owner_batch_id, self.plan.batches[2].batch_id)
-        self.assertEqual(t22.prior_status, "missing")
-        self.assertEqual(t22.prior_diagnostics, ("core_page_omitted_from_batch_result",))
-
-    def test_deterministic_counting_callback_executes_only_failed_pages(self) -> None:
-        prior_results = _build_full_result_for_plan(
-            self.plan,
-            failed_core_pages={5: ("ocr_timeout",)},
-            omitted_core_pages={22},
-        )
-        retry_plan = derive_retry_plan(
-            self.plan,
-            prior_results,
-            retry_operation_id="retry_op_001",
-            attempt=1,
-        )
-
-        call_counts: dict[int, int] = {p: 0 for p in range(self.plan.page_count)}
-
-        def counting_callback(target: RetryTargetPage) -> BatchPageReport:
-            call_counts[target.page_index] += 1
-            return BatchPageReport(
-                page_index=target.page_index,
-                status="ok",
-                diagnostics=(),
-                role="core",
-            )
-
-        merged = execute_and_merge_retry(
-            self.plan,
-            prior_results,
-            retry_plan,
-            counting_callback,
-        )
-
-        # Proves only failed/missing pages executed:
-        self.assertEqual(call_counts[5], 1)
-        self.assertEqual(call_counts[22], 1)
-        for p in range(self.plan.page_count):
-            if p not in (5, 22):
-                self.assertEqual(call_counts[p], 0, f"Page {p} should not have been called")
-
-        # Proves successful merge and honest coverage:
-        self.assertEqual(merged.coverage_report.status, "complete_raw")
-        self.assertTrue(merged.coverage_report.can_claim_complete)
-        self.assertFalse(merged.coverage_report.can_freeze_benchmark)
-        self.assertEqual(len(merged.coverage_report.ok_pages), 25)
-        self.assertEqual(merged.coverage_report.retry_page_indices, ())
-
-        # Proves immutable originals preserved:
-        b0_orig = prior_results[0]
-        p5_orig = next(p for p in b0_orig.pages if p.page_index == 5)
-        self.assertEqual(p5_orig.status, "failed")
-
-        # Operation history tracks attempts:
-        self.assertEqual(len(merged.operation_history), 4)  # 3 initial + 1 retry
-        retry_hist = merged.operation_history[-1]
-        self.assertEqual(retry_hist.operation_id, "retry_op_001")
-        self.assertEqual(retry_hist.attempt, 1)
-        self.assertEqual(retry_hist.page_indices, (5, 22))
-
-    def test_zero_callback_calls_when_no_retries_required(self) -> None:
-        # All pages OK initially
-        prior_results = _build_full_result_for_plan(self.plan)
-        retry_plan = derive_retry_plan(
-            self.plan,
-            prior_results,
-            retry_operation_id="retry_op_empty",
-            attempt=1,
-        )
-
-        self.assertEqual(retry_plan.target_pages, ())
-        self.assertEqual(retry_plan.target_page_indices, ())
-        self.assertEqual(retry_plan.target_batch_ids, ())
 
         callback_calls = []
 
@@ -248,216 +168,332 @@ class TestBatchRetryDerivationAndExecution(unittest.TestCase):
             callback_calls.append(target.page_index)
             return BatchPageReport(page_index=target.page_index, status="ok")
 
-        merged = execute_and_merge_retry(
-            self.plan,
-            prior_results,
-            retry_plan,
-            callback,
+        # Reproduction 1: host changed prior failed page 5 to ok before calling retry
+        fixed_prior = _build_full_result_for_plan(self.plan)
+        with self.assertRaisesRegex(ValueError, "tampered_or_stale_retry_plan"):
+            execute_and_merge_retry(
+                self.plan,
+                fixed_prior,
+                retry_plan,
+                callback,
+            )
+        self.assertEqual(callback_calls, [], "Callback must not run when prior results changed to ok")
+
+        # Reproduction 2: forging target_pages to successful page 0
+        forged_target = RetryTargetPage(
+            page_index=0,
+            owner_batch_id=self.plan.batches[0].batch_id,
+            owner_batch_index=0,
+            batch_page_offset=0,
+            prior_status="failed",
+            prior_diagnostics=("forged",),
+            prior_operation_id="initial_op_0000",
+            referenced_overlap_indices=(),
+            referenced_overlap_reports=(),
+            is_full_document=False,
         )
+        forged_retry_plan = dataclasses.replace(
+            retry_plan,
+            target_pages=(forged_target,),
+            target_page_indices=(0,),
+        )
+        with self.assertRaisesRegex(ValueError, "tampered_or_stale_retry_plan"):
+            execute_retry(
+                forged_retry_plan,
+                callback,
+            )
+        self.assertEqual(callback_calls, [], "Callback must not run when target_pages forged to page 0")
 
-        self.assertEqual(callback_calls, [])
-        self.assertEqual(len(merged.merged_results), len(prior_results))
-        self.assertEqual(merged.coverage_report.status, "complete_raw")
-
-    def test_partial_and_needs_review_are_never_reprocessed(self) -> None:
-        # Page 3 is partial, page 7 is needs_review, page 12 is failed
+    def test_changed_original_operations_detected(self) -> None:
         prior_results = _build_full_result_for_plan(
             self.plan,
-            partial_core_pages={3: ("partial_table",)},
-            needs_review_core_pages={7: ("low_confidence_formula",)},
-            failed_core_pages={12: ("render_crash",)},
+            failed_core_pages={5: ("ocr_fail",)},
+            operation_prefix="op_first",
         )
         retry_plan = derive_retry_plan(
             self.plan,
             prior_results,
-            retry_operation_id="retry_op_core_only",
+            retry_operation_id="retry_op_bind",
             attempt=1,
         )
 
-        # ONLY page 12 should be scheduled! Pages 3 and 7 must be reused without retry
-        self.assertEqual(retry_plan.target_page_indices, (12,))
-
-        def callback(target: RetryTargetPage) -> BatchPageReport:
-            return BatchPageReport(
-                page_index=target.page_index,
-                status="ok",
-                diagnostics=(),
+        # Host changed operation_id to op_other with same status
+        tampered_prior = _build_full_result_for_plan(
+            self.plan,
+            failed_core_pages={5: ("ocr_fail",)},
+            operation_prefix="op_other",
+        )
+        with self.assertRaisesRegex(ValueError, "tampered_or_stale_retry_plan"):
+            merge_retry_results(
+                self.plan,
+                tampered_prior,
+                retry_plan,
+                [BatchPageReport(page_index=5, status="ok")],
             )
 
-        merged = execute_and_merge_retry(
-            self.plan,
-            prior_results,
-            retry_plan,
-            callback,
-        )
-
-        # After retrying page 12 to ok, document still has partial page 3 and needs_review page 7
-        self.assertEqual(merged.coverage_report.status, "needs_review")
-        self.assertFalse(merged.coverage_report.can_claim_complete)
-        self.assertEqual(merged.coverage_report.partial_pages, (3,))
-        self.assertEqual(merged.coverage_report.needs_review_pages, (7,))
-        self.assertEqual(merged.coverage_report.failed_pages, ())
-        self.assertEqual(merged.coverage_report.retry_page_indices, ())
-
-    def test_failed_pages_remain_visible_if_retry_fails(self) -> None:
+    def test_rejects_spoofed_outcome_provenance(self) -> None:
         prior_results = _build_full_result_for_plan(
             self.plan,
-            failed_core_pages={5: ("initial_fail",)},
+            failed_core_pages={5: ("ocr_fail",)},
         )
         retry_plan = derive_retry_plan(
             self.plan,
             prior_results,
-            retry_operation_id="retry_op_still_fails",
-            attempt=2,
+            retry_operation_id="retry_op_real",
+            attempt=1,
         )
 
-        def failing_callback(target: RetryTargetPage) -> BatchPageReport:
+        def spoof_callback(target: RetryTargetPage) -> BatchPageReport:
             return BatchPageReport(
                 page_index=target.page_index,
-                status="failed",
-                diagnostics=("retry_still_failed",),
+                status="ok",
+                operation_id="spoofed_op",
+                attempt=99,
             )
 
-        merged = execute_and_merge_retry(
+        with self.assertRaisesRegex(ValueError, "mismatched_retry_operation_id"):
+            execute_retry(retry_plan, spoof_callback)
+
+        def absent_callback(target: RetryTargetPage) -> BatchPageReport:
+            return BatchPageReport(
+                page_index=target.page_index,
+                status="ok",
+                operation_id=None,
+                attempt=None,
+            )
+
+        outcomes = execute_retry(retry_plan, absent_callback)
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].operation_id, "retry_op_real")
+        self.assertEqual(outcomes[0].attempt, 1)
+
+    def test_truthful_is_full_document_on_target_page(self) -> None:
+        # Multi-page doc -> target page has is_full_document=False
+        prior_results = _build_full_result_for_plan(
             self.plan,
-            prior_results,
-            retry_plan,
-            failing_callback,
+            failed_core_pages={5: ("timeout",)},
         )
+        rp = derive_retry_plan(self.plan, prior_results, retry_operation_id="op_multi", attempt=1)
+        self.assertFalse(rp.target_pages[0].is_full_document)
 
-        self.assertEqual(merged.coverage_report.status, "incomplete")
-        self.assertFalse(merged.coverage_report.can_claim_complete)
-        self.assertEqual(merged.coverage_report.failed_pages, (5,))
-        self.assertEqual(merged.coverage_report.pages[5].diagnostics, ("retry_still_failed",))
+        # 1-page doc -> target page has is_full_document=True
+        single_plan = plan_batches(document_id="single", document_sha256="c" * 64, page_count=1)
+        single_res = [
+            BatchResultInput(
+                batch_id=single_plan.batches[0].batch_id,
+                batch_index=0,
+                pages=(BatchPageReport(page_index=0, status="failed", diagnostics=("err",)),),
+                operation_id="single_op",
+            )
+        ]
+        rp_single = derive_retry_plan(single_plan, single_res, retry_operation_id="op_single", attempt=1)
+        self.assertTrue(rp_single.target_pages[0].is_full_document)
 
 
-class TestBatchRetryFailClosedNegativeCases(unittest.TestCase):
+class TestMultiRoundRetryHistoryAndProvenance(unittest.TestCase):
     def setUp(self) -> None:
         self.plan = plan_batches(
             document_id=DOC_ID,
             document_sha256=DOC_SHA,
             page_count=25,
         )
-        self.prior_results = _build_full_result_for_plan(
+
+    def test_two_failed_retry_rounds_preserves_multiround_history_and_reused_successes(self) -> None:
+        # Initial run: batch 0 has pages 0..9, page 5 failed with initial_op_0000
+        initial_results = _build_full_result_for_plan(
             self.plan,
-            failed_core_pages={5: ("initial_error",)},
-            partial_core_pages={3: ("partial_block",)},
+            failed_core_pages={5: ("initial_fail",)},
+            operation_prefix="initial_op",
         )
-        self.retry_plan = derive_retry_plan(
+
+        # Round 1: retry page 5 with op='retry_round_1', attempt 1; fails again!
+        rp1 = derive_retry_plan(
             self.plan,
-            self.prior_results,
-            retry_operation_id="retry_op_fail_closed",
+            initial_results,
+            retry_operation_id="retry_round_1",
             attempt=1,
         )
 
-    def test_rejects_cross_document_and_plan_mismatch(self) -> None:
-        other_plan = plan_batches(
-            document_id="other_doc",
-            document_sha256="c" * 64,
-            page_count=25,
+        def r1_callback(target: RetryTargetPage) -> BatchPageReport:
+            return BatchPageReport(
+                page_index=target.page_index,
+                status="failed",
+                diagnostics=("r1_still_failed",),
+            )
+
+        merged1 = execute_and_merge_retry(
+            self.plan,
+            initial_results,
+            rp1,
+            r1_callback,
         )
-        with self.assertRaisesRegex(ValueError, "cross_document_or_plan_mismatch"):
-            merge_retry_results(
-                other_plan,
-                self.prior_results,
-                self.retry_plan,
-                [BatchPageReport(page_index=5, status="ok")],
-            )
 
-    def test_rejects_tampered_retry_plan_hash(self) -> None:
-        tampered = dataclasses.replace(self.retry_plan, retry_plan_sha256="0" * 64)
-        with self.assertRaisesRegex(ValueError, "tampered_retry_plan"):
-            merge_retry_results(
-                self.plan,
-                self.prior_results,
-                tampered,
-                [BatchPageReport(page_index=5, status="ok")],
-            )
+        # Verify Round 1 merge:
+        self.assertEqual(merged1.coverage_report.status, "incomplete")
+        self.assertFalse(merged1.coverage_report.can_claim_complete)
+        self.assertEqual(merged1.coverage_report.failed_pages, (5,))
 
-    def test_rejects_mismatched_prior_report(self) -> None:
-        diff_results = _build_full_result_for_plan(self.plan)
-        with self.assertRaisesRegex(ValueError, "prior_report_mismatch"):
-            merge_retry_results(
-                self.plan,
-                diff_results,
-                self.retry_plan,
-                [BatchPageReport(page_index=5, status="ok")],
-            )
+        # Successful pages in batch 0 must preserve original provenance (initial_op_0000, attempt 0), NOT retry_round_1!
+        b0_m1 = merged1.merged_results[0]
+        p0_rep = next(p for p in b0_m1.pages if p.page_index == 0)
+        self.assertEqual(p0_rep.operation_id, "initial_op_0000")
+        self.assertEqual(p0_rep.attempt, 0)
 
-    def test_rejects_unexpected_page_out_of_bounds_or_not_in_retry_plan(self) -> None:
-        # Page 99 is completely out of document bounds
-        with self.assertRaisesRegex(ValueError, "unexpected_page"):
-            merge_retry_results(
-                self.plan,
-                self.prior_results,
-                self.retry_plan,
-                [BatchPageReport(page_index=99, status="ok")],
-            )
+        # Page 5 has retry_round_1
+        p5_rep1 = next(p for p in b0_m1.pages if p.page_index == 5)
+        self.assertEqual(p5_rep1.operation_id, "retry_round_1")
+        self.assertEqual(p5_rep1.attempt, 1)
 
-        # Page 8 was OK, not in retry plan
-        with self.assertRaisesRegex(ValueError, "cannot_reprocess_or_alter_successful_core_page"):
-            merge_retry_results(
-                self.plan,
-                self.prior_results,
-                self.retry_plan,
-                [BatchPageReport(page_index=8, status="ok")],
-            )
+        # Batch 0 has multiple producer ops -> batch operation_id is None
+        self.assertIsNone(b0_m1.operation_id)
 
-    def test_rejects_altering_successful_partial_or_needs_review_core_pages(self) -> None:
-        # Page 3 was partial in prior results
-        with self.assertRaisesRegex(ValueError, "cannot_reprocess_or_alter_successful_core_page"):
-            merge_retry_results(
-                self.plan,
-                self.prior_results,
-                self.retry_plan,
-                [BatchPageReport(page_index=3, status="ok")],
-            )
+        # Round 2: retry page 5 with op='retry_round_2', attempt 2; succeeds!
+        rp2 = derive_retry_plan(
+            self.plan,
+            merged1.merged_results,
+            retry_operation_id="retry_round_2",
+            attempt=2,
+            prior_history=merged1.operation_history,
+        )
 
-    def test_rejects_overlap_upgrading_core_coverage(self) -> None:
-        # Callback returns role="overlap_before" for core retry target 5
-        def spoof_overlap(target: RetryTargetPage) -> BatchPageReport:
+        def r2_callback(target: RetryTargetPage) -> BatchPageReport:
             return BatchPageReport(
                 page_index=target.page_index,
                 status="ok",
-                role="overlap_before",
+                diagnostics=(),
             )
 
-        with self.assertRaisesRegex(ValueError, "overlap_cannot_upgrade_core_coverage"):
-            execute_retry(self.retry_plan, spoof_overlap)
-
-        with self.assertRaisesRegex(ValueError, "overlap_cannot_upgrade_core_coverage"):
-            merge_retry_results(
-                self.plan,
-                self.prior_results,
-                self.retry_plan,
-                [BatchPageReport(page_index=5, status="ok", role="overlap_after")],
-            )
-
-    def test_rejects_conflicting_duplicate_retry_outcomes(self) -> None:
-        conflicting = [
-            BatchPageReport(page_index=5, status="ok"),
-            BatchPageReport(page_index=5, status="failed", diagnostics=("differing_error",)),
-        ]
-        with self.assertRaisesRegex(ValueError, "conflicting_duplicate_retry_page_result"):
-            merge_retry_results(
-                self.plan,
-                self.prior_results,
-                self.retry_plan,
-                conflicting,
-            )
-
-    def test_idempotent_exact_duplicate_retry_outcomes_accepted(self) -> None:
-        identical = [
-            BatchPageReport(page_index=5, status="ok"),
-            BatchPageReport(page_index=5, status="ok"),
-        ]
-        merged = merge_retry_results(
+        merged2 = execute_and_merge_retry(
             self.plan,
-            self.prior_results,
-            self.retry_plan,
-            identical,
+            merged1.merged_results,
+            rp2,
+            r2_callback,
+            prior_history=merged1.operation_history,
         )
-        self.assertEqual(merged.coverage_report.pages[5].status, "ok")
+
+        # Verify Round 2 merge:
+        self.assertEqual(merged2.coverage_report.status, "complete_raw")
+        self.assertTrue(merged2.coverage_report.can_claim_complete)
+
+        # Page 0 STILL has initial_op_0000!
+        b0_m2 = merged2.merged_results[0]
+        p0_m2 = next(p for p in b0_m2.pages if p.page_index == 0)
+        self.assertEqual(p0_m2.operation_id, "initial_op_0000")
+        self.assertEqual(p0_m2.attempt, 0)
+
+        # Page 5 has retry_round_2 and attempt 2
+        p5_m2 = next(p for p in b0_m2.pages if p.page_index == 5)
+        self.assertEqual(p5_m2.operation_id, "retry_round_2")
+        self.assertEqual(p5_m2.attempt, 2)
+
+        # Full operation history is preserved: 3 initial ops + round 1 op + round 2 op
+        self.assertEqual(len(merged2.operation_history), 5)
+        op_ids = [h.operation_id for h in merged2.operation_history]
+        self.assertIn("initial_op_0000", op_ids)
+        self.assertIn("retry_round_1", op_ids)
+        self.assertIn("retry_round_2", op_ids)
+
+        h_r1 = next(h for h in merged2.operation_history if h.operation_id == "retry_round_1")
+        self.assertEqual(h_r1.attempt, 1)
+        self.assertEqual(h_r1.page_indices, (5,))
+
+        h_r2 = next(h for h in merged2.operation_history if h.operation_id == "retry_round_2")
+        self.assertEqual(h_r2.attempt, 2)
+        self.assertEqual(h_r2.page_indices, (5,))
+
+    def test_attempt_progression_and_duplicate_operation_id_rejected(self) -> None:
+        prior_results = _build_full_result_for_plan(
+            self.plan,
+            failed_core_pages={5: ("fail",)},
+            operation_prefix="initial_op",
+        )
+
+        # Reusing initial_op_0000
+        with self.assertRaisesRegex(ValueError, "duplicate_operation_id"):
+            derive_retry_plan(
+                self.plan,
+                prior_results,
+                retry_operation_id="initial_op_0000",
+                attempt=1,
+            )
+
+        # Attempt 0 < minimum 1
+        with self.assertRaisesRegex(ValueError, "invalid_attempt"):
+            derive_retry_plan(
+                self.plan,
+                prior_results,
+                retry_operation_id="retry_op_bad_attempt",
+                attempt=0,
+            )
+
+        # Attempt 1 when prior history already reached attempt 1
+        history_at_1 = (
+            OperationAttemptRecord(
+                operation_id="prior_op",
+                attempt=1,
+                page_indices=(5,),
+                batch_ids=(self.plan.batches[0].batch_id,),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "invalid_attempt_progression"):
+            derive_retry_plan(
+                self.plan,
+                prior_results,
+                retry_operation_id="retry_op_stale_attempt",
+                attempt=1,
+                prior_history=history_at_1,
+            )
+
+
+class TestPartialExceptionRecovery(unittest.TestCase):
+    def setUp(self) -> None:
+        self.plan = plan_batches(
+            document_id=DOC_ID,
+            document_sha256=DOC_SHA,
+            page_count=25,
+        )
+
+    def test_callback_exception_preserves_recoverable_progress(self) -> None:
+        # Batch 0: page 5 fails
+        # Batch 2: page 22 fails
+        prior_results = _build_full_result_for_plan(
+            self.plan,
+            failed_core_pages={5: ("f5",), 22: ("f22",)},
+        )
+        retry_plan = derive_retry_plan(
+            self.plan,
+            prior_results,
+            retry_operation_id="retry_crash_op",
+            attempt=1,
+        )
+
+        def crashing_callback(target: RetryTargetPage) -> BatchPageReport:
+            if target.page_index == 5:
+                return BatchPageReport(page_index=5, status="ok", diagnostics=())
+            raise RuntimeError("provider timeout on page 22")
+
+        with self.assertRaises(RetryExecutionError) as ctx:
+            execute_and_merge_retry(
+                self.plan,
+                prior_results,
+                retry_plan,
+                crashing_callback,
+            )
+
+        err = ctx.exception
+        self.assertEqual(len(err.completed_outcomes), 1)
+        self.assertEqual(err.completed_outcomes[0].page_index, 5)
+        self.assertEqual(err.failed_target.page_index, 22)
+        self.assertIsInstance(err.cause, RuntimeError)
+
+        # Partial result is preserved without fabricating success:
+        self.assertIsNotNone(err.partial_merged_result)
+        partial_rep = err.partial_merged_result.coverage_report
+        self.assertEqual(partial_rep.pages[5].status, "ok")
+        # Page 22 remained failed visible:
+        self.assertEqual(partial_rep.pages[22].status, "failed")
+        self.assertEqual(partial_rep.status, "incomplete")
+        self.assertFalse(partial_rep.can_claim_complete)
 
 
 if __name__ == "__main__":

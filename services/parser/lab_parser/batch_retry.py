@@ -3,19 +3,23 @@
 Implements the pure-Python retry foundation for SPEC 2, 4.2, 16.6, and 19.4:
 - Derives executable failed/missing-only original physical page selections from
   validated prior results without re-scheduling successful core pages.
+- Validates source plan and prior results snapshot before executing callbacks.
 - Retains per-page successful results, prior operation provenance, and immutable
-  originals without reprocessing them.
-- Explicit parent plan/result identity, retry operation identity, and attempt
-  provenance.
-- Fails closed for cross-document/plan, unexpected page, duplicate conflicting
+  originals across multiple retry rounds without reprocessing them.
+- Binds canonical source BatchResultInput signatures (including operation and page
+  provenance) to the retry plan.
+- Explicit parent plan/result identity, fresh retry operation identity, and strict
+  attempt progression provenance; rejects spoofed outcome provenance.
+- Fails closed for cross-document/plan, unexpected pages, duplicate conflicting
   results, altering successful/partial/needs_review core outcomes, or overlap
   upgrading core coverage.
 - Bounded callback execution accepting ONLY retry core pages (adjacent overlap
   may be referenced from existing results, never silently reprocessed).
-- Merges retry outcomes preserving prior operation history, immutable originals,
-  and coverage calculation using the existing evaluate_coverage contract.
+- Truthful execution selection metadata: RetryTargetPage.is_full_document is True
+  only if the source document itself has one page.
+- Preserves recoverable progress on callback exceptions via RetryExecutionError,
+  leaving unexecuted targets visible as failed/missing without fabricating success.
 - Finite, caller-explicit execution with zero calls when no retries are required.
-- Failed/missing pages remain visible; full_document flags remain honest.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from lab_parser.batch_coverage import (
 __all__ = [
     "MergedRetryResult",
     "OperationAttemptRecord",
+    "RetryExecutionError",
     "RetryPlan",
     "RetryTargetPage",
     "derive_retry_plan",
@@ -54,6 +59,29 @@ __all__ = [
     "execute_retry",
     "merge_retry_results",
 ]
+
+
+class RetryExecutionError(RuntimeError):
+    """Raised when a retry callback fails after one or more pages were processed.
+
+    Preserves completed outcomes and optional partial merged result so caller
+    does not lose recoverable progress.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        completed_outcomes: Sequence[BatchPageReport],
+        failed_target: RetryTargetPage,
+        cause: BaseException,
+        partial_merged_result: MergedRetryResult | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.completed_outcomes = tuple(completed_outcomes)
+        self.failed_target = failed_target
+        self.cause = cause
+        self.partial_merged_result = partial_merged_result
 
 
 @dataclass(frozen=True)
@@ -88,6 +116,9 @@ class RetryTargetPage:
     validated prior coverage results. Includes read-only references to existing
     adjacent overlap reports from prior results so callbacks may reference
     boundary context without reprocessing successful pages.
+
+    ``is_full_document`` is True ONLY if the source document itself has 1 page,
+    because one callback call processes exactly one physical page.
     """
 
     page_index: int
@@ -99,6 +130,7 @@ class RetryTargetPage:
     prior_operation_id: str | None
     referenced_overlap_indices: tuple[int, ...]
     referenced_overlap_reports: tuple[BatchPageReport, ...]
+    is_full_document: bool
 
     def __post_init__(self) -> None:
         _require_strict_int(self.page_index, "page_index", minimum=0)
@@ -128,17 +160,20 @@ class RetryTargetPage:
         object.__setattr__(
             self, "referenced_overlap_reports", tuple(self.referenced_overlap_reports)
         )
+        if not isinstance(self.is_full_document, bool):
+            raise ValueError("invalid_is_full_document: must be a bool")
 
 
 @dataclass(frozen=True)
 class RetryPlan:
-    """Explicit, immutable plan for retrying failed or missing core pages."""
+    """Explicit, immutable plan binding source plan and prior results to retry targets."""
 
     rule_version: str
     document_id: str
     document_sha256: str
     plan_id: str
     plan_sha256: str
+    prior_results_sha256: str
     prior_report_sha256: str
     retry_operation_id: str
     attempt: int
@@ -146,6 +181,36 @@ class RetryPlan:
     target_page_indices: tuple[int, ...]
     target_batch_ids: tuple[str, ...]
     retry_plan_sha256: str
+    plan: BatchPlan
+    prior_results: tuple[BatchResultInput, ...]
+    prior_history: tuple[OperationAttemptRecord, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan, BatchPlan):
+            raise ValueError("invalid_plan: must be a BatchPlan instance")
+        if not isinstance(self.prior_results, (list, tuple)):
+            raise ValueError("invalid_prior_results: must be a sequence of BatchResultInput")
+        for r in self.prior_results:
+            if not isinstance(r, BatchResultInput):
+                raise ValueError("invalid_prior_results: elements must be BatchResultInput")
+        object.__setattr__(self, "prior_results", tuple(self.prior_results))
+        if not isinstance(self.prior_history, (list, tuple)):
+            raise ValueError("invalid_prior_history: must be a sequence of OperationAttemptRecord")
+        for h in self.prior_history:
+            if not isinstance(h, OperationAttemptRecord):
+                raise ValueError("invalid_prior_history: elements must be OperationAttemptRecord")
+        object.__setattr__(self, "prior_history", tuple(self.prior_history))
+        if not isinstance(self.target_pages, (list, tuple)):
+            raise ValueError("invalid_target_pages: must be a sequence of RetryTargetPage")
+        if len(self.target_pages) > self.plan.page_count:
+            raise ValueError("target_pages exceeds plan page_count")
+        object.__setattr__(self, "target_pages", tuple(self.target_pages))
+        if not isinstance(self.target_page_indices, (list, tuple)):
+            raise ValueError("invalid_target_page_indices: must be a sequence of int")
+        object.__setattr__(self, "target_page_indices", tuple(self.target_page_indices))
+        if not isinstance(self.target_batch_ids, (list, tuple)):
+            raise ValueError("invalid_target_batch_ids: must be a sequence of str")
+        object.__setattr__(self, "target_batch_ids", tuple(self.target_batch_ids))
 
 
 @dataclass(frozen=True)
@@ -163,6 +228,29 @@ class MergedRetryResult:
     operation_history: tuple[OperationAttemptRecord, ...]
 
 
+def _prior_results_hash(results: Sequence[BatchResultInput]) -> str:
+    canonical_list = [
+        {
+            "batch_id": r.batch_id,
+            "batch_index": r.batch_index,
+            "operation_id": r.operation_id,
+            "pages": [
+                {
+                    "page_index": p.page_index,
+                    "status": p.status,
+                    "diagnostics": list(p.diagnostics),
+                    "role": p.role,
+                    "operation_id": p.operation_id,
+                    "attempt": p.attempt,
+                }
+                for p in sorted(r.pages, key=lambda x: x.page_index)
+            ],
+        }
+        for r in sorted(results, key=lambda x: (x.batch_index, x.batch_id))
+    ]
+    return _canonical_hash({"results": canonical_list})
+
+
 def derive_retry_plan(
     plan: BatchPlan,
     prior_results: Sequence[BatchResultInput],
@@ -170,6 +258,7 @@ def derive_retry_plan(
     retry_operation_id: str,
     attempt: int = 1,
     prior_report: CoverageReport | None = None,
+    prior_history: Sequence[OperationAttemptRecord] = (),
 ) -> RetryPlan:
     """Derive executable failed/missing-only physical page targets from validated prior results.
 
@@ -179,6 +268,42 @@ def derive_retry_plan(
     batches_by_id = _validate_plan_integrity(plan)
     op_id = _require_non_empty_id(retry_operation_id, "retry_operation_id")
     att = _require_strict_int(attempt, "attempt", minimum=1)
+
+    if not isinstance(prior_results, (list, tuple)):
+        raise ValueError("invalid_prior_results: must be a sequence of BatchResultInput")
+    for r in prior_results:
+        if not isinstance(r, BatchResultInput):
+            raise ValueError("invalid_prior_results: elements must be BatchResultInput")
+
+    if not isinstance(prior_history, (list, tuple)):
+        raise ValueError("invalid_prior_history: must be a sequence of OperationAttemptRecord")
+    for h in prior_history:
+        if not isinstance(h, OperationAttemptRecord):
+            raise ValueError("invalid_prior_history: elements must be OperationAttemptRecord")
+
+    # Check operation freshness and attempt progression
+    prior_ops: set[str] = set()
+    max_prior_attempt = 0
+    for h in prior_history:
+        prior_ops.add(h.operation_id)
+        max_prior_attempt = max(max_prior_attempt, h.attempt)
+    for r in prior_results:
+        if r.operation_id is not None:
+            prior_ops.add(r.operation_id)
+        for p in r.pages:
+            if p.operation_id is not None:
+                prior_ops.add(p.operation_id)
+            if p.attempt is not None:
+                max_prior_attempt = max(max_prior_attempt, p.attempt)
+
+    if op_id in prior_ops:
+        raise ValueError(
+            f"duplicate_operation_id: operation_id {op_id!r} was already used in prior operations"
+        )
+    if att <= max_prior_attempt:
+        raise ValueError(
+            f"invalid_attempt_progression: attempt {att} must be > max prior attempt {max_prior_attempt}"
+        )
 
     eval_report = evaluate_coverage(plan, prior_results)
     if prior_report is not None:
@@ -204,6 +329,18 @@ def derive_retry_plan(
         entry = next(e for e in spec.page_entries if e.page_index == p_idx)
         prior_res = prior_by_batch_id.get(spec.batch_id)
 
+        prior_page_rep: BatchPageReport | None = None
+        if prior_res is not None:
+            prior_page_rep = next(
+                (p for p in prior_res.pages if p.page_index == p_idx), None
+            )
+
+        prior_p_op = (
+            prior_page_rep.operation_id
+            if prior_page_rep and prior_page_rep.operation_id is not None
+            else (prior_res.operation_id if prior_res else None)
+        )
+
         referenced_indices: list[int] = []
         referenced_reports: list[BatchPageReport] = []
         for w_p_idx in spec.window_page_indices:
@@ -215,6 +352,9 @@ def derive_retry_plan(
                             referenced_reports.append(page_rep)
                             break
 
+        # Single page callback execution has is_full_document=True ONLY if total doc has 1 page
+        is_full_doc = (plan.page_count == 1)
+
         target_pages.append(
             RetryTargetPage(
                 page_index=p_idx,
@@ -223,9 +363,10 @@ def derive_retry_plan(
                 batch_page_offset=entry.batch_page_offset,
                 prior_status=item.status,
                 prior_diagnostics=item.diagnostics,
-                prior_operation_id=prior_res.operation_id if prior_res else None,
+                prior_operation_id=prior_p_op,
                 referenced_overlap_indices=tuple(referenced_indices),
                 referenced_overlap_reports=tuple(referenced_reports),
+                is_full_document=is_full_doc,
             )
         )
         target_page_indices.append(p_idx)
@@ -237,17 +378,35 @@ def derive_retry_plan(
         if any(p in target_page_set for p in b.core_page_indices)
     )
 
+    prior_res_sha = _prior_results_hash(prior_results)
+
     plan_payload = {
         "rule_version": BATCH_PLAN_RULE_VERSION,
         "document_id": plan.document_id,
         "document_sha256": plan.document_sha256,
         "plan_id": plan.plan_id,
         "plan_sha256": plan.plan_sha256,
+        "prior_results_sha256": prior_res_sha,
         "prior_report_sha256": base_report.report_sha256,
         "retry_operation_id": op_id,
         "attempt": att,
         "target_page_indices": target_page_indices,
         "target_batch_ids": list(target_batch_ids),
+        "target_page_hashes": [
+            _canonical_hash(
+                {
+                    "page_index": t.page_index,
+                    "owner_batch_id": t.owner_batch_id,
+                    "owner_batch_index": t.owner_batch_index,
+                    "batch_page_offset": t.batch_page_offset,
+                    "prior_status": t.prior_status,
+                    "prior_diagnostics": list(t.prior_diagnostics),
+                    "prior_operation_id": t.prior_operation_id,
+                    "is_full_document": t.is_full_document,
+                }
+            )
+            for t in target_pages
+        ],
     }
     retry_sha256 = _canonical_hash(plan_payload)
 
@@ -257,6 +416,7 @@ def derive_retry_plan(
         document_sha256=plan.document_sha256,
         plan_id=plan.plan_id,
         plan_sha256=plan.plan_sha256,
+        prior_results_sha256=prior_res_sha,
         prior_report_sha256=base_report.report_sha256,
         retry_operation_id=op_id,
         attempt=att,
@@ -264,60 +424,24 @@ def derive_retry_plan(
         target_page_indices=tuple(target_page_indices),
         target_batch_ids=target_batch_ids,
         retry_plan_sha256=retry_sha256,
+        plan=plan,
+        prior_results=tuple(prior_results),
+        prior_history=tuple(prior_history),
     )
 
 
-def execute_retry(
-    retry_plan: RetryPlan,
-    callback: Callable[[RetryTargetPage], BatchPageReport],
-) -> tuple[BatchPageReport, ...]:
-    """Execute a finite, bounded retry callback accepting ONLY retry core pages.
-
-    If retry_plan has zero targets, executes zero calls to callback.
-    """
-    if not isinstance(retry_plan, RetryPlan):
-        raise ValueError("invalid_retry_plan: must be a RetryPlan instance")
-    if not callable(callback):
-        raise ValueError("invalid_callback: must be callable")
-
-    if not retry_plan.target_pages:
-        return ()
-
-    outcomes: list[BatchPageReport] = []
-    for target in retry_plan.target_pages:
-        rep = callback(target)
-        if not isinstance(rep, BatchPageReport):
-            raise ValueError(
-                f"invalid_callback_return: expected BatchPageReport for page {target.page_index}, got {type(rep).__name__}"
-            )
-        if rep.page_index != target.page_index:
-            raise ValueError(
-                f"unexpected_retry_page: expected page_index {target.page_index}, got {rep.page_index}"
-            )
-        if rep.role is not None and rep.role != "core":
-            raise ValueError(
-                f"overlap_cannot_upgrade_core_coverage: page {rep.page_index} must have role 'core', got {rep.role!r}"
-            )
-        outcomes.append(rep)
-
-    return tuple(outcomes)
-
-
-def merge_retry_results(
+def _validate_retry_plan_and_sources(
     plan: BatchPlan,
     prior_results: Sequence[BatchResultInput],
     retry_plan: RetryPlan,
-    retry_outcomes: Sequence[BatchPageReport],
-) -> MergedRetryResult:
-    """Merge retry page outcomes with prior results, preserving prior history and immutable originals.
-
-    Fails closed for cross-document/plan, unexpected pages, duplicate conflicting
-    results, changing successful/partial/needs_review core outcomes, or overlap
-    upgrading core coverage.
-    """
-    batches_by_id = _validate_plan_integrity(plan)
+    *,
+    prior_history: Sequence[OperationAttemptRecord] = (),
+) -> None:
+    _validate_plan_integrity(plan)
     if not isinstance(retry_plan, RetryPlan):
         raise ValueError("invalid_retry_plan: must be a RetryPlan instance")
+    if not isinstance(prior_results, (list, tuple)):
+        raise ValueError("invalid_prior_results: must be a sequence of BatchResultInput")
 
     if (
         retry_plan.document_id != plan.document_id
@@ -330,30 +454,141 @@ def merge_retry_results(
             "cross_document_or_plan_mismatch: retry_plan does not match plan identity"
         )
 
-    expected_plan_payload = {
-        "rule_version": retry_plan.rule_version,
-        "document_id": retry_plan.document_id,
-        "document_sha256": retry_plan.document_sha256,
-        "plan_id": retry_plan.plan_id,
-        "plan_sha256": retry_plan.plan_sha256,
-        "prior_report_sha256": retry_plan.prior_report_sha256,
-        "retry_operation_id": retry_plan.retry_operation_id,
-        "attempt": retry_plan.attempt,
-        "target_page_indices": list(retry_plan.target_page_indices),
-        "target_batch_ids": list(retry_plan.target_batch_ids),
-    }
-    if retry_plan.retry_plan_sha256 != _canonical_hash(expected_plan_payload):
-        raise ValueError("tampered_retry_plan: retry_plan_sha256 mismatch")
+    # Recompute canonical derivation from plan and prior_results
+    canonical_plan = derive_retry_plan(
+        plan,
+        prior_results,
+        retry_operation_id=retry_plan.retry_operation_id,
+        attempt=retry_plan.attempt,
+        prior_history=prior_history,
+    )
 
-    prior_report = evaluate_coverage(plan, prior_results)
-    if prior_report.report_sha256 != retry_plan.prior_report_sha256:
+    if (
+        retry_plan.target_pages != canonical_plan.target_pages
+        or retry_plan.target_page_indices != canonical_plan.target_page_indices
+        or retry_plan.target_batch_ids != canonical_plan.target_batch_ids
+        or retry_plan.prior_results_sha256 != canonical_plan.prior_results_sha256
+        or retry_plan.prior_report_sha256 != canonical_plan.prior_report_sha256
+        or retry_plan.retry_plan_sha256 != canonical_plan.retry_plan_sha256
+    ):
         raise ValueError(
-            "prior_report_mismatch: prior_results do not match retry_plan base report"
+            "tampered_or_stale_retry_plan: retry_plan does not match canonical derivation from source plan and results"
         )
+
+
+def execute_retry(
+    *args: Any,
+    plan: BatchPlan | None = None,
+    prior_results: Sequence[BatchResultInput] | None = None,
+    retry_plan: RetryPlan | None = None,
+    callback: Callable[[RetryTargetPage], BatchPageReport] | None = None,
+    prior_history: Sequence[OperationAttemptRecord] | None = None,
+) -> tuple[BatchPageReport, ...]:
+    """Execute a finite, bounded retry callback accepting ONLY retry core pages.
+
+    Validates complete source plan, base results snapshot, and canonical derived
+    targets BEFORE ANY callback invocation.
+    """
+    if len(args) == 4:
+        p_in, res_in, rp_in, cb_in = args
+    elif len(args) == 2:
+        rp_in, cb_in = args
+        p_in = plan if plan is not None else rp_in.plan
+        res_in = prior_results if prior_results is not None else rp_in.prior_results
+    elif len(args) == 0:
+        if retry_plan is None or callback is None:
+            raise ValueError("execute_retry requires retry_plan and callback")
+        rp_in = retry_plan
+        cb_in = callback
+        p_in = plan if plan is not None else rp_in.plan
+        res_in = prior_results if prior_results is not None else rp_in.prior_results
+    else:
+        raise ValueError(f"invalid_arguments: expected 2 or 4 arguments, got {len(args)}")
+
+    if not isinstance(rp_in, RetryPlan):
+        raise ValueError("invalid_retry_plan: must be a RetryPlan instance")
+    if not callable(cb_in):
+        raise ValueError("invalid_callback: must be callable")
+
+    history_in = (
+        prior_history if prior_history is not None else rp_in.prior_history
+    )
+
+    # Validate complete plan, base results, and all targets BEFORE ANY callback!
+    _validate_retry_plan_and_sources(p_in, res_in, rp_in, prior_history=history_in)
+
+    if not rp_in.target_pages:
+        return ()
+
+    outcomes: list[BatchPageReport] = []
+    for target in rp_in.target_pages:
+        try:
+            rep = cb_in(target)
+        except Exception as exc:
+            raise RetryExecutionError(
+                f"retry_callback_failed on page {target.page_index}: {exc}",
+                completed_outcomes=tuple(outcomes),
+                failed_target=target,
+                cause=exc,
+            ) from exc
+
+        if not isinstance(rep, BatchPageReport):
+            raise ValueError(
+                f"invalid_callback_return: expected BatchPageReport for page {target.page_index}, got {type(rep).__name__}"
+            )
+        if rep.page_index != target.page_index:
+            raise ValueError(
+                f"unexpected_retry_page: expected page_index {target.page_index}, got {rep.page_index}"
+            )
+        if rep.role is not None and rep.role != "core":
+            raise ValueError(
+                f"overlap_cannot_upgrade_core_coverage: page {rep.page_index} must have role 'core', got {rep.role!r}"
+            )
+
+        # Reject spoofed provenance; fill absent fields ONLY from explicit retry execution identity
+        if rep.operation_id is not None and rep.operation_id != rp_in.retry_operation_id:
+            raise ValueError(
+                f"mismatched_retry_operation_id: expected {rp_in.retry_operation_id!r}, got {rep.operation_id!r}"
+            )
+        if rep.attempt is not None and rep.attempt != rp_in.attempt:
+            raise ValueError(
+                f"mismatched_retry_attempt: expected {rp_in.attempt}, got {rep.attempt}"
+            )
+
+        clean_rep = BatchPageReport(
+            page_index=rep.page_index,
+            status=rep.status,
+            diagnostics=rep.diagnostics,
+            role="core",
+            operation_id=rp_in.retry_operation_id,
+            attempt=rp_in.attempt,
+        )
+        outcomes.append(clean_rep)
+
+    return tuple(outcomes)
+
+
+def merge_retry_results(
+    plan: BatchPlan,
+    prior_results: Sequence[BatchResultInput],
+    retry_plan: RetryPlan,
+    retry_outcomes: Sequence[BatchPageReport],
+    *,
+    prior_history: Sequence[OperationAttemptRecord] = (),
+) -> MergedRetryResult:
+    """Merge retry page outcomes with prior results, preserving prior history and immutable originals.
+
+    Fails closed for cross-document/plan, unexpected pages, duplicate conflicting
+    results, changing successful/partial/needs_review core outcomes, or overlap
+    upgrading core coverage.
+    """
+    history_in = prior_history if prior_history else retry_plan.prior_history
+    _validate_retry_plan_and_sources(plan, prior_results, retry_plan, prior_history=history_in)
 
     if not isinstance(retry_outcomes, (list, tuple)):
         raise ValueError("invalid_retry_outcomes: must be a sequence of BatchPageReport")
 
+    prior_report = evaluate_coverage(plan, prior_results)
     target_set = set(retry_plan.target_page_indices)
     seen_retry: dict[int, BatchPageReport] = {}
 
@@ -384,20 +619,37 @@ def merge_retry_results(
                 f"overlap_cannot_upgrade_core_coverage: retry page {p_idx} has role {outcome.role!r}, must be 'core'"
             )
 
+        # Reject spoofed provenance; absent fields filled from retry plan
+        if outcome.operation_id is not None and outcome.operation_id != retry_plan.retry_operation_id:
+            raise ValueError(
+                f"mismatched_retry_operation_id: expected {retry_plan.retry_operation_id!r}, got {outcome.operation_id!r}"
+            )
+        if outcome.attempt is not None and outcome.attempt != retry_plan.attempt:
+            raise ValueError(
+                f"mismatched_retry_attempt: expected {retry_plan.attempt}, got {outcome.attempt}"
+            )
+
+        clean_outcome = BatchPageReport(
+            page_index=p_idx,
+            status=outcome.status,
+            diagnostics=outcome.diagnostics,
+            role="core",
+            operation_id=retry_plan.retry_operation_id,
+            attempt=retry_plan.attempt,
+        )
+
         if p_idx in seen_retry:
             prev = seen_retry[p_idx]
             if (
-                prev.status != outcome.status
-                or prev.diagnostics != outcome.diagnostics
-                or prev.role != outcome.role
-                or prev.operation_id != outcome.operation_id
-                or prev.attempt != outcome.attempt
+                prev.status != clean_outcome.status
+                or prev.diagnostics != clean_outcome.diagnostics
+                or prev.role != clean_outcome.role
             ):
                 raise ValueError(
                     f"conflicting_duplicate_retry_page_result: page {p_idx} reported multiple times with differing outcomes"
                 )
             continue
-        seen_retry[p_idx] = outcome
+        seen_retry[p_idx] = clean_outcome
 
     prior_by_batch_id: dict[str, BatchResultInput] = {
         res.batch_id: res for res in prior_results
@@ -408,54 +660,34 @@ def merge_retry_results(
         prior_b_res = prior_by_batch_id.get(spec.batch_id)
         if prior_b_res is not None:
             new_pages: list[BatchPageReport] = []
-            any_retried_in_batch = False
             for p_rep in prior_b_res.pages:
                 role = next(
                     e.role for e in spec.page_entries if e.page_index == p_rep.page_index
                 )
                 if role == "core" and p_rep.page_index in seen_retry:
-                    retry_rep = seen_retry[p_rep.page_index]
-                    new_pages.append(
-                        BatchPageReport(
-                            page_index=p_rep.page_index,
-                            status=retry_rep.status,
-                            diagnostics=retry_rep.diagnostics,
-                            role="core",
-                            operation_id=retry_rep.operation_id
-                            or retry_plan.retry_operation_id,
-                            attempt=retry_rep.attempt
-                            if retry_rep.attempt is not None
-                            else retry_plan.attempt,
-                        )
-                    )
-                    any_retried_in_batch = True
+                    new_pages.append(seen_retry[p_rep.page_index])
                 else:
+                    # PRESERVE PER-PAGE ORIGINAL PROVENANCE EXACTLY
+                    # Reused successful pages keep their original operation_id and attempt
+                    # Legacy unknown None remains unknown
                     new_pages.append(p_rep)
 
             existing_indices = {p.page_index for p in prior_b_res.pages}
             for c_idx in spec.core_page_indices:
                 if c_idx not in existing_indices and c_idx in seen_retry:
-                    retry_rep = seen_retry[c_idx]
-                    new_pages.append(
-                        BatchPageReport(
-                            page_index=c_idx,
-                            status=retry_rep.status,
-                            diagnostics=retry_rep.diagnostics,
-                            role="core",
-                            operation_id=retry_rep.operation_id
-                            or retry_plan.retry_operation_id,
-                            attempt=retry_rep.attempt
-                            if retry_rep.attempt is not None
-                            else retry_plan.attempt,
-                        )
-                    )
-                    any_retried_in_batch = True
+                    new_pages.append(seen_retry[c_idx])
 
-            batch_op_id = (
-                retry_plan.retry_operation_id
-                if any_retried_in_batch
-                else prior_b_res.operation_id
-            )
+            # A merged projection with multiple producer ops should not assert a single batch op
+            producer_ops = {
+                p.operation_id for p in new_pages if p.operation_id is not None
+            }
+            if len(producer_ops) == 1 and len(new_pages) == len(
+                [p for p in new_pages if p.operation_id is not None]
+            ):
+                batch_op_id: str | None = next(iter(producer_ops))
+            else:
+                batch_op_id = None
+
             merged_results.append(
                 BatchResultInput(
                     batch_id=spec.batch_id,
@@ -468,43 +700,42 @@ def merge_retry_results(
             new_pages = []
             for c_idx in spec.core_page_indices:
                 if c_idx in seen_retry:
-                    retry_rep = seen_retry[c_idx]
-                    new_pages.append(
-                        BatchPageReport(
-                            page_index=c_idx,
-                            status=retry_rep.status,
-                            diagnostics=retry_rep.diagnostics,
-                            role="core",
-                            operation_id=retry_rep.operation_id
-                            or retry_plan.retry_operation_id,
-                            attempt=retry_rep.attempt
-                            if retry_rep.attempt is not None
-                            else retry_plan.attempt,
-                        )
-                    )
+                    new_pages.append(seen_retry[c_idx])
             if new_pages:
+                producer_ops = {
+                    p.operation_id for p in new_pages if p.operation_id is not None
+                }
+                batch_op_id = (
+                    next(iter(producer_ops)) if len(producer_ops) == 1 else None
+                )
                 merged_results.append(
                     BatchResultInput(
                         batch_id=spec.batch_id,
                         batch_index=spec.batch_index,
                         pages=tuple(sorted(new_pages, key=lambda x: x.page_index)),
-                        operation_id=retry_plan.retry_operation_id,
+                        operation_id=batch_op_id,
                     )
                 )
 
     new_coverage_report = evaluate_coverage(plan, merged_results)
 
+    # Build or append history
     history: list[OperationAttemptRecord] = []
-    for res in prior_results:
-        if res.operation_id is not None:
-            history.append(
-                OperationAttemptRecord(
-                    operation_id=res.operation_id,
-                    attempt=0,
-                    page_indices=tuple(sorted(p.page_index for p in res.pages)),
-                    batch_ids=(res.batch_id,),
+    if history_in:
+        history.extend(history_in)
+    else:
+        # Build base history from prior_results
+        for res in prior_results:
+            if res.operation_id is not None:
+                history.append(
+                    OperationAttemptRecord(
+                        operation_id=res.operation_id,
+                        attempt=0,
+                        page_indices=tuple(sorted(p.page_index for p in res.pages)),
+                        batch_ids=(res.batch_id,),
+                    )
                 )
-            )
+
     if seen_retry:
         retried_batches = tuple(
             sorted(
@@ -542,7 +773,50 @@ def execute_and_merge_retry(
     prior_results: Sequence[BatchResultInput],
     retry_plan: RetryPlan,
     callback: Callable[[RetryTargetPage], BatchPageReport],
+    *,
+    prior_history: Sequence[OperationAttemptRecord] = (),
 ) -> MergedRetryResult:
-    """Convenience helper to execute bounded retry callback and merge outcomes."""
-    outcomes = execute_retry(retry_plan, callback)
-    return merge_retry_results(plan, prior_results, retry_plan, outcomes)
+    """Execute bounded retry callback and merge outcomes into prior results.
+
+    Validates complete source plan and base results snapshot before invoking callback.
+    Preserves recoverable progress on partial callback failure via RetryExecutionError.
+    """
+    history_in = prior_history if prior_history else retry_plan.prior_history
+    _validate_retry_plan_and_sources(plan, prior_results, retry_plan, prior_history=history_in)
+
+    try:
+        outcomes = execute_retry(
+            plan=plan,
+            prior_results=prior_results,
+            retry_plan=retry_plan,
+            callback=callback,
+            prior_history=history_in,
+        )
+    except RetryExecutionError as exc:
+        partial_merged: MergedRetryResult | None = None
+        if exc.completed_outcomes:
+            try:
+                partial_merged = merge_retry_results(
+                    plan,
+                    prior_results,
+                    retry_plan,
+                    exc.completed_outcomes,
+                    prior_history=history_in,
+                )
+            except Exception:
+                partial_merged = None
+        raise RetryExecutionError(
+            str(exc),
+            completed_outcomes=exc.completed_outcomes,
+            failed_target=exc.failed_target,
+            cause=exc.cause,
+            partial_merged_result=partial_merged,
+        ) from exc.cause
+
+    return merge_retry_results(
+        plan,
+        prior_results,
+        retry_plan,
+        outcomes,
+        prior_history=history_in,
+    )

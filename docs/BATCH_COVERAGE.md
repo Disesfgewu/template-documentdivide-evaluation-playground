@@ -40,30 +40,30 @@ scripts/check.sh --scope "parser governance"
 
 ## Failed/Missing-Only Retry Planning and Merge (`batch_retry`)
 
-`services/parser/lab_parser/batch_retry.py` (also re-exported from `batch_coverage`) addresses the gap where whole mixed batches would reprocess previously successful core pages, and enables merging newer retry outcomes:
+`services/parser/lab_parser/batch_retry.py` addresses the gap where whole mixed batches would reprocess previously successful core pages, and enables merging newer retry outcomes:
 
 - **Executable failed/missing-only target derivation (`derive_retry_plan`)**:
-  - Validates `plan` and evaluates `prior_results` (or validates `prior_report`).
+  - Validates source plan and binds full source `BatchResultInput` signatures (`prior_results_sha256`) including operation IDs and per-page attempt provenance.
   - Selects **only** core pages with `failed` or `missing` status for retry (`RetryTargetPage`).
   - Succeeded (`ok`), `partial`, and `needs_review` core pages are never scheduled for retry.
   - Preserves prior batch offset, original physical `page_index`, owner batch ID, prior diagnostics, prior operation ID, and read-only adjacent overlap reports from existing results for neighbor context without reprocessing them.
-  - Explicit `retry_operation_id` and positive integer `attempt` provenance.
+  - Truthful `is_full_document`: set to `True` on `RetryTargetPage` only if the source document itself has 1 page, never inheriting parent batch flags.
+  - Enforces fresh `retry_operation_id` versus previous operations and strictly increasing `attempt` progression.
 - **Bounded callback execution (`execute_retry`)**:
+  - Validates complete source plan, base results snapshot, and canonical derived targets **before** executing any callback, executing zero callbacks on forged or stale plans.
   - Callback receives **only** retry core pages (`RetryTargetPage`). Adjacent context is available as read-only references.
   - When no retries are required (`target_pages` is empty), exactly **zero** calls to the callback are executed.
-  - Rejects callbacks returning unexpected pages or attempting to return overlap roles (`overlap_cannot_upgrade_core_coverage`).
+  - Rejects callbacks returning unexpected pages, spoofed outcome provenance, or attempting to return overlap roles (`overlap_cannot_upgrade_core_coverage`).
+  - Preserves partial progress on callback exceptions via `RetryExecutionError`, leaving unexecuted targets visible without fabricating success.
 - **Merge preserving history and immutable originals (`merge_retry_results`, `execute_and_merge_retry`)**:
-  - Prior results remain immutable; newly constructed `BatchResultInput` objects reflect the updated retry outcomes while retaining original successful pages.
+  - Prior results remain immutable; newly constructed `BatchResultInput` objects reflect updated retry outcomes while retaining original successful pages and their original per-page provenance across multiple rounds (>= 2 rounds).
+  - Mixed batches with multiple producer operations do not assert a single batch `operation_id` (`None`).
+  - Tracks full operation attempt history (`OperationAttemptRecord`) across initial and multi-round retry operations.
   - Re-evaluates coverage using the existing `evaluate_coverage` contract.
-  - Tracks full operation attempt history (`OperationAttemptRecord`) across initial and retry operations.
   - Failed or missing pages that fail again on retry remain visible (`status="incomplete"`).
   - Honest completion flags: `can_claim_complete` requires all physical pages to reach `ok`; `can_freeze_benchmark` remains `False`.
-- **Fail-closed rules**:
-  - Mismatched document/plan IDs or hashes fail closed (`cross_document_or_plan_mismatch`).
-  - Out-of-bounds or unscheduled page indices fail closed (`unexpected_page`, `unexpected_retry_page`).
-  - Altering previously successful, partial, or needs-review core pages fails closed (`cannot_reprocess_or_alter_successful_core_page`).
-  - Overlap roles attempting to upgrade core coverage fail closed (`overlap_cannot_upgrade_core_coverage`).
-  - Conflicting duplicate outcomes fail closed (`conflicting_duplicate_retry_page_result`).
+- **Scope and Limits**:
+  - Pure document status and provenance accounting foundation. Does not claim durable storage, checkpoint acceptance, or real parser artifact recovery. No automatic retry loops.
 
 ## Scope and Remaining Gates
 
