@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 import psycopg
-from psycopg import sql
+from psycopg import errors, sql
 from psycopg.types.json import Jsonb
 
 Role = Literal["owner", "maintainer", "reviewer", "participant", "observer"]
@@ -196,7 +196,7 @@ class StaleVersion(Exception):
     """row_version did not match: someone else changed the row (409)."""
 
 
-class FreezeIneligible(Exception):
+class FreezeIneligible(errors.CheckViolation):
     """The benchmark revision cannot be frozen: mandatory eligibility
     (independent question validation, human review gates, four-part records,
     and quota satisfaction) cannot be proven by the current database schema."""
@@ -230,23 +230,22 @@ def transition_benchmark(conn: psycopg.Connection, project_id: uuid.UUID, benchm
                 raise ValueError("a compliance designation ('compliant' or 'partial') is required to freeze a benchmark")
             if effective_compliance not in ("compliant", "partial"):
                 raise ValueError(f"invalid compliance {effective_compliance!r}: must be 'compliant' or 'partial'")
-            if effective_compliance == "compliant":
-                raise FreezeIneligible(
-                    f"benchmark revision {benchmark_id} cannot freeze as compliant: "
-                    "mandatory eligibility (independent question validation, human review gates, "
-                    "and quota verification) cannot be proven by the current database schema"
-                )
             if effective_compliance == "partial":
                 if decision.role != "owner":
                     raise PermissionDenied(f"{decision.role} may not freeze a partial benchmark: owner required")
         conn.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', %s, true)",
                      (str(actor_id), reason))
-        new_version = conn.execute(
-            "UPDATE benchmark_revisions SET status = %s, row_version = row_version + 1, "
-            "compliance = COALESCE(%s, compliance), "
-            "frozen_at = CASE WHEN %s::text = 'frozen' THEN now() ELSE frozen_at END "
-            "WHERE id = %s RETURNING row_version",
-            (to_status, compliance, to_status, benchmark_id)).fetchone()[0]
+        try:
+            new_version = conn.execute(
+                "UPDATE benchmark_revisions SET status = %s, row_version = row_version + 1, "
+                "compliance = COALESCE(%s, compliance), "
+                "frozen_at = CASE WHEN %s::text = 'frozen' THEN now() ELSE frozen_at END "
+                "WHERE id = %s RETURNING row_version",
+                (to_status, compliance, to_status, benchmark_id)).fetchone()[0]
+        except errors.CheckViolation as exc:
+            if "mandatory eligibility verification is not implemented" in str(exc):
+                raise FreezeIneligible(str(exc)) from exc
+            raise
         op_id = uuid.uuid4()
         conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
                      "VALUES (%s, %s, 'benchmark.transition', %s, 'succeeded', now())", (op_id, project_id, actor_id))
