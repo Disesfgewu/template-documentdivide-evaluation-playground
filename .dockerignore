@@ -1,0 +1,64 @@
+# Version control and agent metadata
+.git
+.git/**
+.github
+.github/**
+.agy-staff
+.agy-staff/**
+
+# Environment files and credentials
+.env*
+*.env
+**/.env*
+*secret*
+**/*secret*
+
+# Python caches, virtual environments, and bytecode
+__pycache__
+**/__pycache__
+*.py[cod]
+**/*.py[cod]
+.venv
+**/.venv
+.pytest_cache
+**/.pytest_cache
+.mypy_cache
+**/.mypy_cache
+.ruff_cache
+**/.ruff_cache
+.coverage
+htmlcov
+
+# Build artifacts, logs and reports
+*.log
+**/*.log
+test-reports
+**/test-reports
+pdf-fixture-evidence
+**/pdf-fixture-evidence
+smoke-report
+**/smoke-report
+.lab-artifacts
+**/.lab-artifacts
+
+# Node and frontend artifacts
+node_modules
+**/node_modules
+web
+**/web
+
+# Other services not in Python runtime images
+services/worker
+**/services/worker
+
+# Tests, fixtures, tools, docs, and private modules
+tests
+**/tests
+fixtures
+**/fixtures
+tools
+**/tools
+docs
+**/docs
+agentKit
+**/agentKit
