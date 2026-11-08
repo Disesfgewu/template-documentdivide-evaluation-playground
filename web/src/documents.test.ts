@@ -5,10 +5,12 @@ import {
   hasValidPdfSignature,
   parseErrorResponse,
   parseUploadResponse,
+  sanitizeErrorMessage,
   sanitizeFilename,
   uploadDocument,
   validateSha256,
   validateUuid,
+  containsToken,
 } from "./documents";
 
 const VALID_UUID_1 = "11111111-1111-1111-1111-111111111111";
@@ -1104,5 +1106,77 @@ describe("downloadDocument", () => {
         expect(result.error.message).toContain("[REDACTED]");
       }
     });
+  });
+});
+
+describe("header-derived values never echo the credential", () => {
+  const TOKEN = "lab_act_canarytokenvalue_1234";
+  const DOC = "11111111-1111-1111-1111-111111111111";
+
+  async function run(headers: Record<string, string>, saveSpy = vi.fn()) {
+    const fetchFn = vi.fn(async () => new Response("%PDF-1.4 body", { status: 200, headers }));
+    const result = await downloadDocument({
+      documentId: DOC,
+      token: TOKEN,
+      fetchFn: fetchFn as unknown as typeof fetch,
+      triggerSave: saveSpy,
+    });
+    return { result, saveSpy };
+  }
+
+  it("a media type that carries the token, in any case, is not echoed or saved", async () => {
+    for (const variant of [TOKEN, TOKEN.toUpperCase(), "Lab_Act_CanaryTokenValue_1234"]) {
+      const { result, saveSpy } = await run({ "Content-Type": `text/${variant}` });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("invalid_media_type");
+        expect(result.error.message).toContain("未知類型");
+      }
+      expect(JSON.stringify(result).toLowerCase()).not.toContain(TOKEN.toLowerCase());
+      expect(saveSpy).not.toHaveBeenCalled();
+    }
+  });
+
+  it("well-known types are still named, other types are reported as unknown without echo", async () => {
+    const known = await run({ "Content-Type": "text/html; charset=utf-8" });
+    expect(!known.result.ok && known.result.error.message).toContain("text/html");
+    const other = await run({ "Content-Type": "application/x-private-thing" });
+    expect(!other.result.ok && other.result.error.message).toContain("未知類型");
+    expect(!other.result.ok && other.result.error.message).not.toContain("x-private-thing");
+  });
+
+  it("a Content-Disposition filename carrying the token falls back to the document-id name", async () => {
+    for (const name of [`${TOKEN}.pdf`, `${TOKEN.toUpperCase()}.pdf`]) {
+      const { result, saveSpy } = await run({
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${name}"`,
+      });
+      expect(result.ok).toBe(true);
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+      expect(saveSpy.mock.calls[0][1]).toBe(`${DOC}.pdf`);
+      expect(JSON.stringify(result.ok ? { filename: result.data.filename } : result).toLowerCase())
+        .not.toContain(TOKEN.toLowerCase());
+    }
+    const harmless = await run({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": 'attachment; filename="report.pdf"',
+    });
+    expect(harmless.result.ok && harmless.result.data.filename).toBe("report.pdf");
+  });
+
+  it("sanitizeErrorMessage ignores case and treats regex characters literally", () => {
+    expect(sanitizeErrorMessage("x ABC y abc z", "aBc")).toBe("x [REDACTED] y [REDACTED] z");
+    expect(sanitizeErrorMessage("v A.B*C(D)[E] w", "a.b*c(d)[e]")).toBe("v [REDACTED] w");
+    expect(sanitizeErrorMessage("axbxc", "a.b")).toBe("axbxc");
+    expect(sanitizeErrorMessage("nothing here", "tok")).toBe("nothing here");
+    expect(sanitizeErrorMessage("keep Bearer", undefined)).toBe("keep Bearer");
+    expect(sanitizeErrorMessage("keep Bearer", "")).toBe("keep Bearer");
+  });
+
+  it("containsToken", () => {
+    expect(containsToken("A-TOKEN-B", "token")).toBe(true);
+    expect(containsToken("abc", "token")).toBe(false);
+    expect(containsToken("abc", "")).toBe(false);
+    expect(containsToken("abc", undefined)).toBe(false);
   });
 });

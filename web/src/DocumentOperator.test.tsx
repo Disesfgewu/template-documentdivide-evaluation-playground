@@ -728,4 +728,41 @@ describe("DocumentOperator", () => {
     });
     expect(screen.getByTestId("download-error").textContent).toContain("取消");
   });
+
+  it("never shows the token when the response Content-Type or filename carries it", async () => {
+    const lowerToken = MOCK_TOKEN.toLowerCase();
+    const seen = () => (document.body.textContent ?? "").toLowerCase();
+
+    // 1. Content-Type carries the token: error shown without it, nothing saved, form usable again
+    const badType = vi.fn(async () => new Response("%PDF-1.4 x", { status: 200, headers: { "Content-Type": `text/${lowerToken}` } }));
+    const triggerSave = vi.fn();
+    const first = render(<DocumentOperator fetchFn={badType as unknown as typeof fetch} triggerSave={triggerSave} />);
+    fireEvent.change(screen.getByLabelText(/認證 Token/i), { target: { value: MOCK_TOKEN } });
+    fireEvent.change(screen.getByLabelText(/Document ID/i), { target: { value: VALID_UUID_2 } });
+    fireEvent.click(screen.getByRole("button", { name: "下載 PDF" }));
+    await waitFor(() => expect(screen.getByTestId("download-error")).toBeTruthy());
+    expect(screen.getByTestId("download-error").textContent).toContain("未知類型");
+    expect(seen()).not.toContain(lowerToken);
+    expect(triggerSave).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("download-success")).toBeNull();
+    expect((screen.getByRole("button", { name: "下載 PDF" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText("文件下載中")).toBeNull();
+    expect(JSON.stringify({ ...localStorage })).not.toContain(lowerToken);
+    first.unmount();
+
+    // 2. Content-Disposition filename carries the token: success shows the safe fallback name only
+    const badName = vi.fn(async () => new Response("%PDF-1.4 x", {
+      status: 200,
+      headers: { "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="${MOCK_TOKEN}.pdf"` },
+    }));
+    render(<DocumentOperator fetchFn={badName as unknown as typeof fetch} triggerSave={triggerSave} />);
+    fireEvent.change(screen.getByLabelText(/認證 Token/i), { target: { value: MOCK_TOKEN } });
+    fireEvent.change(screen.getByLabelText(/Document ID/i), { target: { value: VALID_UUID_2 } });
+    fireEvent.click(screen.getByRole("button", { name: "下載 PDF" }));
+    await waitFor(() => expect(screen.getByTestId("download-success")).toBeTruthy());
+    expect(screen.getByTestId("download-success").textContent).toContain(`${VALID_UUID_2}.pdf`);
+    expect(seen()).not.toContain(lowerToken);
+    expect(triggerSave).toHaveBeenCalledTimes(1);
+    expect(triggerSave.mock.calls[0][1]).toBe(`${VALID_UUID_2}.pdf`);
+  });
 });

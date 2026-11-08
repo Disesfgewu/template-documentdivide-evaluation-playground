@@ -75,11 +75,26 @@ const SHA256_REGEX = /^[0-9a-f]{64}$/i;
  * Sanitize error message to prevent inadvertent secret/token leakage.
  */
 export function sanitizeErrorMessage(msg: string, token?: string): string {
-  if (token && msg.includes(token)) {
-    return msg.replaceAll(token, "[REDACTED]");
+  if (token && containsToken(msg, token)) {
+    // Case-insensitive: a value that went through toLowerCase() (a media type, a header name)
+    // must not slip past a case-sensitive match.
+    return msg.replace(new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "[REDACTED]");
   }
   return msg;
 }
+
+/** Whether ``value`` contains the credential, ignoring case. */
+export function containsToken(value: string, token?: string): boolean {
+  return Boolean(token) && value.toLowerCase().includes((token as string).toLowerCase());
+}
+
+// Media types that may be named in an error. Anything else is reported as unknown and never
+// echoed, because a response header is attacker- or proxy-controlled text.
+const KNOWN_MEDIA_TYPES = new Set([
+  "text/html", "text/plain", "text/css", "text/csv", "text/xml", "application/json", "application/xml",
+  "application/octet-stream", "application/zip", "application/x-www-form-urlencoded", "multipart/form-data",
+  "image/png", "image/jpeg", "image/gif", "image/svg+xml",
+]);
 
 /**
  * Verifies that bytes represent a valid PDF file.
@@ -753,7 +768,7 @@ export async function downloadDocument({
       return {
         ok: false,
         error: {
-          message: `伺服器回應之內容類型非 PDF（收到 ${mediaType || "未知類型"}）`,
+          message: `伺服器回應之內容類型非 PDF（收到 ${KNOWN_MEDIA_TYPES.has(mediaType) ? mediaType : "未知類型"}）`,
           status: res.status,
           code: "invalid_media_type",
         },
@@ -894,10 +909,12 @@ export async function downloadDocument({
     const blob = new Blob(chunks as BlobPart[], { type: "application/pdf" });
 
     const fallbackFilename = `${cleanDocId}.pdf`;
-    const filename = extractFilenameFromHeader(
+    const headerFilename = extractFilenameFromHeader(
       res.headers?.get("Content-Disposition") ?? null,
       fallbackFilename,
     );
+    // The name is shown in the UI; a header that carries the credential is not trusted.
+    const filename = containsToken(headerFilename, cleanToken) ? fallbackFilename : headerFilename;
 
     if (triggerSave) {
       triggerSave(blob, filename);
