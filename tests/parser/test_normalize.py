@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import unittest
+import unittest.mock
 import zlib
 
 from lab_contracts.parse import (
@@ -22,6 +23,8 @@ from lab_contracts.parse import (
 )
 from lab_parser.normalize import (
     ADAPTER_REVISION,
+    Artifact,
+    _Builder,
     DisplayFrame,
     MAX_RAW_BYTES,
     MinerUParser,
@@ -1288,6 +1291,92 @@ class TestMinerUNegative(unittest.TestCase):
             )
             self.assertEqual(batch.quarantine_reason, "invalid_mineru_output", f"Failed for {bad_ext}")
             self.assertEqual(batch.result.pages[0].status, "failed")
+
+
+class TestNormalizationCost(unittest.TestCase):
+    """Normalization work must stay linear in the number of elements (reproduced: 20000 small
+    elements, 4 MB, took 101 s because the raw artifact was re-hashed three times per element
+    and every new element scanned all earlier evidence). The tests count operations instead of
+    measuring time, so they do not depend on the speed of the machine."""
+
+    @staticmethod
+    def _elements(count: int) -> bytes:
+        return json.dumps([{"type": "NarrativeText", "text": "a", "metadata": {
+            "page_number": 1, "coordinates": {"system": "PixelSpace", "layout_width": 612.0,
+            "layout_height": 792.0, "points": [[1, 1], [1, 10], [10, 10], [10, 1]]}}} for _ in range(count)]).encode()
+
+    def _normalize(self, raw: bytes):
+        pages = [0]
+        return UnstructuredParser().normalize(
+            raw, _make_request(pages), _make_unstructured_manifest(pages), UnstructuredProfile(strategy="fast"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames=_default_frames(pages), document_page_count=1)
+
+    def test_the_raw_artifact_is_hashed_once_not_once_per_element(self):
+        raw = self._elements(300)
+        real = hashlib.sha256
+        large = []
+
+        def counting(data=b"", *args, **kwargs):
+            if len(data) >= len(raw):
+                large.append(len(data))
+            return real(data, *args, **kwargs)
+
+        with unittest.mock.patch("lab_parser.normalize.hashlib.sha256", side_effect=counting):
+            batch = self._normalize(raw)
+        self.assertEqual(len(batch.evidence), 300)
+        self.assertEqual(len(large), 1, f"the whole raw artifact was hashed {len(large)} times")
+
+    def test_artifact_ref_is_computed_at_construction_and_stays_stable(self):
+        content = b"x" * 5000
+        real = hashlib.sha256
+        calls = []
+        with unittest.mock.patch("lab_parser.normalize.hashlib.sha256",
+                                 side_effect=lambda d=b"", *a, **k: (calls.append(len(d)), real(d, *a, **k))[1]):
+            artifact = Artifact(content)
+            refs = {artifact.ref for _ in range(50)}
+        self.assertEqual(calls, [5000])
+        self.assertEqual(refs, {"sha256:" + real(content).hexdigest()})
+        self.assertEqual(Artifact(content), artifact)           # equality is still by content
+        self.assertEqual(len({Artifact(content), artifact}), 1)  # and so is the hash
+        self.assertNotIn("sha256:", repr(artifact))
+
+    def test_adding_an_element_never_scans_the_evidence_collected_so_far(self):
+        class NoScan(list):
+            def __iter__(self):
+                raise AssertionError("evidence was scanned")
+
+        pages = [0]
+        builder = _Builder(b"[]", _make_request(pages), _make_unstructured_manifest(pages), SYNTHETIC_DOC_ID,
+                           SYNTHETIC_DOC_SHA256, _default_frames(pages), {}, 1)
+        builder.evidence = NoScan()
+        for i in range(25):
+            builder.add(builder.raw, f"/{i}", 0, "NarrativeText", "a", [0.1, 0.1, 0.2, 0.2])
+        self.assertEqual(len(builder.evidence), 25)
+        self.assertEqual(len({o.evidence_id for o in builder.observations}), 25)
+
+    def test_a_repeated_pointer_is_still_one_evidence_unit(self):
+        pages = [0]
+        builder = _Builder(b"[]", _make_request(pages), _make_unstructured_manifest(pages), SYNTHETIC_DOC_ID,
+                           SYNTHETIC_DOC_SHA256, _default_frames(pages), {}, 1)
+        for _ in range(3):
+            builder.add(builder.raw, "/0", 0, "NarrativeText", "a", [0.1, 0.1, 0.2, 0.2])
+        self.assertEqual(len(builder.evidence), 1)
+        self.assertEqual(len(builder.observations), 3)  # every observation is kept, evidence is deduplicated
+
+    def test_quarantine_discards_evidence_and_its_index(self):
+        good = json.loads(self._elements(3))
+        raw = json.dumps(good + [{"type": "NarrativeText", "text": 5}]).encode()  # a later element is invalid
+        batch = self._normalize(raw)
+        self.assertEqual(batch.quarantine_reason, "invalid_unstructured_output")
+        self.assertEqual((batch.evidence, batch.observations), ((), ()))
+        pages = [0]
+        builder = _Builder(b"[]", _make_request(pages), _make_unstructured_manifest(pages), SYNTHETIC_DOC_ID,
+                           SYNTHETIC_DOC_SHA256, _default_frames(pages), {}, 1)
+        builder.add(builder.raw, "/0", 0, "NarrativeText", "a", [0.1, 0.1, 0.2, 0.2])
+        builder.quarantine("invalid_unstructured_output")
+        builder.add(builder.raw, "/0", 0, "NarrativeText", "a", [0.1, 0.1, 0.2, 0.2])  # same pointer after a reset
+        self.assertEqual(len(builder.evidence), 1)
 
 
 class TestCommonConstraints(unittest.TestCase):

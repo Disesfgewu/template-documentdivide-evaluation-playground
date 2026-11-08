@@ -6,7 +6,7 @@ output is L1 data, never verified gold. Missing geometry/assets remain visible.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -67,10 +67,12 @@ class DisplayFrame(Contract):
 @dataclass(frozen=True)
 class Artifact:
     content: bytes
+    # Hashed once: ``ref`` is read for every element, and rehashing a multi-megabyte raw
+    # artifact each time made normalization cost grow with elements x artifact size.
+    ref: str = field(init=False, repr=False, compare=False)
 
-    @property
-    def ref(self) -> str:
-        return "sha256:" + hashlib.sha256(self.content).hexdigest()
+    def __post_init__(self):
+        object.__setattr__(self, "ref", "sha256:" + hashlib.sha256(self.content).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,7 @@ class _Builder:
         self.frames, self.asset_refs = frames, asset_refs
         self.document_page_count = document_page_count
         self.evidence, self.observations = [], []
+        self._evidence_ids: set[str] = set()  # O(1) duplicate check, was a scan of every evidence unit
         self.diagnostics = {p: [] for p in req.page_indices}
         self.seen_pages = set()
         self.reason = None
@@ -242,7 +245,8 @@ class _Builder:
                     raw_content=text, normalized_content=text,
                     extractor_revision=ADAPTER_REVISION, ocr_confidence=None,
                     asset_refs=list(dict.fromkeys(assets)))))
-                if not any(e.evidence_id == computed_eid for e in self.evidence):
+                if computed_eid not in self._evidence_ids:
+                    self._evidence_ids.add(computed_eid)
                     self.evidence.append(evidence)
                 eid = computed_eid
             except (ValueError, TypeError, ValidationError):
@@ -270,6 +274,7 @@ class _Builder:
         self.reason = reason
         self.artifacts = [self.raw]
         self.evidence.clear()
+        self._evidence_ids.clear()
         self.observations.clear()
         self.warn(None, reason)
         return self.finish()
