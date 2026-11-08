@@ -128,6 +128,7 @@ class CursorTests(unittest.TestCase):
 
     def test_tampered_or_foreign_cursors_are_400(self):
         base = q()
+        valid = api.encode_cursor(base, 1, uid(3))
         cases = {
             "not base64": "!!!notbase64!!!",
             "not json": base64.urlsafe_b64encode(b"nope").decode().rstrip("="),
@@ -146,6 +147,12 @@ class CursorTests(unittest.TestCase):
                 json.dumps({"v": 1, "q": base.binding(), "d": 1, "id": str(uid(3))}).encode()
             ).rstrip(b"=").decode(),
             "wrong signature": self.forge(s="0" * 32),
+            "non-ascii signature": self.forge(s="é"),
+            "short signature": self.forge(s="abc"),
+            "uppercase signature": self.forge(s="A" * 32),
+            "invalid hex signature": self.forge(s="g" * 32),
+            "invalid alphabet suffix": valid + "!!!!",
+            "non-canonical padding": valid + "=",
         }
         for label, cursor in cases.items():
             with self.subTest(label):

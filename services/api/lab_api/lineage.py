@@ -139,7 +139,9 @@ def decode_cursor(
     if not isinstance(cursor, str) or not (1 <= len(cursor) <= MAX_CURSOR_CHARS):
         raise bad
     try:
-        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        if base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != cursor:
+            raise bad
         payload = json.loads(raw.decode("utf-8"))
     except (binascii.Error, UnicodeDecodeError, ValueError):
         raise bad from None
@@ -154,6 +156,8 @@ def decode_cursor(
         or not (0 <= depth <= query.depth)
         or not isinstance(node_id, str)
         or not isinstance(sig, str)
+        or len(sig) != 32
+        or not (sig.isascii() and all(c in "0123456789abcdef" for c in sig))
     ):
         raise bad
     try:
@@ -163,8 +167,11 @@ def decode_cursor(
     if normalized != node_id:
         raise bad
     expected_sig = _cursor_signature(secret, query.binding(), depth, node_id)
-    if not hmac.compare_digest(sig, expected_sig):
-        raise bad
+    try:
+        if not hmac.compare_digest(sig, expected_sig):
+            raise bad
+    except (TypeError, ValueError):
+        raise bad from None
     return depth, node_id
 
 

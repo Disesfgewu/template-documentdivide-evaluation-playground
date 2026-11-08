@@ -219,6 +219,28 @@ class RealLineageEndpointTests(FreshDatabase):
         res_sig = self.get(head, ids[3], depth=3, limit=1, cursor=tampered_sig_cursor)
         self.assertEqual(res_sig.status_code, 400)
 
+        # Non-ASCII signature (e.g. s="é") must return 400 bad_request, never raise TypeError / 500
+        payload["s"] = "é"
+        non_ascii_sig_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        non_ascii_cursor = base64.urlsafe_b64encode(non_ascii_sig_bytes).rstrip(b"=").decode("ascii")
+        res_non_ascii = self.get(head, ids[3], depth=3, limit=1, cursor=non_ascii_cursor)
+        self.assertEqual(res_non_ascii.status_code, 400)
+        self.assertEqual(res_non_ascii.json()["error"]["code"], "bad_request")
+
+        # Invalid alphabet suffix must be rejected with 400
+        res_suffix = self.get(head, ids[3], depth=3, limit=1, cursor=cursor1 + "!!!!")
+        self.assertEqual(res_suffix.status_code, 400)
+        self.assertEqual(res_suffix.json()["error"]["code"], "bad_request")
+
+        # Trailing padding on canonical unpadded base64url must be rejected with 400
+        res_padding = self.get(head, ids[3], depth=3, limit=1, cursor=cursor1 + "=")
+        self.assertEqual(res_padding.status_code, 400)
+        self.assertEqual(res_padding.json()["error"]["code"], "bad_request")
+
+        # Valid roundtrip continues pagination normally (200 OK)
+        res_valid = self.get(head, ids[3], depth=3, limit=1, cursor=cursor1)
+        self.assertEqual(res_valid.status_code, 200)
+
     def test_high_fanout_resource_bounds_database_reads_and_frontier(self) -> None:
         """P1 regression: high fanout resource enforces bounded reads and frontier."""
         with self.connect() as conn:
