@@ -36,6 +36,7 @@ from .pdf_body import (
     PdfRequestBodyError,
     read_pdf_request_body,
 )
+from .preview import DEFAULT_PREVIEW_TIMEOUT_S, PreviewError, render_preview_in_subprocess
 from .readiness import connect
 
 DEFAULT_MAX_PDF_PAGES = 2000
@@ -279,6 +280,7 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 DEFAULT_UPLOAD_CONCURRENCY = 2
 DEFAULT_DOWNLOAD_CONCURRENCY = 2
+DEFAULT_PREVIEW_CONCURRENCY = 2
 DEFAULT_METADATA_CONCURRENCY = 8
 MULTIPART_OVERHEAD_BYTES = 65536
 # An admitted upload must deliver its body within this many seconds, or it
@@ -308,6 +310,8 @@ async def _run_blocking(request: Request, pool: str, fn, *args):
         size = _positive_int(request, "upload_concurrency", DEFAULT_UPLOAD_CONCURRENCY)
     elif pool == "download":
         size = _positive_int(request, "download_concurrency", DEFAULT_DOWNLOAD_CONCURRENCY)
+    elif pool == "preview":
+        size = _positive_int(request, "preview_concurrency", DEFAULT_PREVIEW_CONCURRENCY)
     limiter = _state_object(request, f"{pool}_threads", lambda: anyio.CapacityLimiter(size))
     # The thread runs as its own task so that cancelling *this* task, by
     # anyio's cancel scopes or by a plain task.cancel(), cannot abandon it:
@@ -914,17 +918,118 @@ def _get_page(conn: psycopg.Connection, actor_id: uuid.UUID, document_id: uuid.U
     }
 
 
+async def _preview_response(
+    request: Request,
+    store: LocalArtifactStore,
+    conn: psycopg.Connection,
+    actor_id: uuid.UUID,
+    document_id: uuid.UUID,
+    page_index: int,
+    server_max_bytes: int,
+) -> Response:
+    """Authorized PDF page preview rendering at fixed 150 DPI in an isolated subprocess."""
+    # 1. Authorize document access and validate committed artifact state BEFORE slot or render
+    doc = await _run_blocking(request, "meta", _readable_document, conn, actor_id, document_id, server_max_bytes)
+    if page_index < 0 or page_index >= doc.page_count:
+        raise ApiError(404, "not_found", f"page_index {page_index} out of range")
+
+    # 2. Acquire admission slot BEFORE PDF read
+    slot = _take_slot(request, "preview", DEFAULT_PREVIEW_CONCURRENCY, "page previews")
+    try:
+        # 3. Read artifact bytes under the preview pool
+        pdf_bytes = await _run_blocking(request, "preview", _read_artifact, store, doc, server_max_bytes)
+
+        # 4. Supervised subprocess preview rendering under the preview pool
+        timeout_s = getattr(request.app.state, "preview_timeout_s", DEFAULT_PREVIEW_TIMEOUT_S)
+        try:
+            asset = await _run_blocking(
+                request,
+                "preview",
+                render_preview_in_subprocess,
+                pdf_bytes,
+                page_index,
+                timeout_s,
+            )
+        except PreviewError as exc:
+            raise ApiError(exc.status_code, exc.code, exc.message, retryable=exc.retryable) from exc
+
+        response = Response(
+            content=asset.png,
+            media_type="image/png",
+            headers={
+                "Content-Length": str(len(asset.png)),
+                "Cache-Control": "no-store",
+                "ETag": f'"{asset.sha256}"',
+                "X-Document-Sha256": doc.doc_sha,
+                "X-Page-Index": str(page_index),
+                "X-Image-Sha256": asset.sha256,
+                "X-Image-Width": str(asset.width_px),
+                "X-Image-Height": str(asset.height_px),
+            },
+        )
+        request.scope["lab.download_release_callbacks"].append(slot.release)
+        return response
+    except BaseException:
+        slot.release()
+        raise
+
+
 async def get_page_handler(
     document_id: uuid.UUID,
     page_index: int,
     request: Request,
     conn: psycopg.Connection = Depends(get_db),
+    store: LocalArtifactStore = Depends(get_store),
     actor_id: uuid.UUID = Depends(get_authenticated_actor),
-) -> JSONResponse:
-    """Get per-page normalized geometry and dimensions (SPEC 8)."""
+) -> Response:
+    """Get per-page normalized geometry (JSON) or rendered page preview (Accept: image/png)."""
+    if "image/png" in request.headers.get("Accept", ""):
+        server_max_bytes = getattr(request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES)
+        return await _preview_response(
+            request, store, conn, actor_id, document_id, page_index, server_max_bytes
+        )
+
     content = await _run_blocking(request, "meta", _get_page, conn, actor_id, document_id, page_index)
     return JSONResponse(status_code=200, content=content)
 
+
+PAGE_RESPONSES = {
+    200: {
+        "description": "Normalized page geometry (JSON) or rendered page preview (PNG).",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "document_version_id": {"type": "string", "format": "uuid"},
+                        "page_index": {"type": "integer"},
+                        "page_label": {"type": "string", "nullable": True},
+                        "rotation": {"type": "integer"},
+                        "width_pt": {"type": "number"},
+                        "height_pt": {"type": "number"},
+                    },
+                    "required": ["document_version_id", "page_index", "page_label", "rotation", "width_pt", "height_pt"],
+                }
+            },
+            "image/png": {
+                "schema": {"type": "string", "format": "binary"},
+                "headers": {
+                    "X-Document-Sha256": {"schema": {"type": "string"}, "description": "Actual document SHA-256"},
+                    "X-Page-Index": {"schema": {"type": "integer"}, "description": "0-based page index"},
+                    "X-Image-Sha256": {"schema": {"type": "string"}, "description": "Actual rendered PNG SHA-256"},
+                    "X-Image-Width": {"schema": {"type": "integer"}, "description": "Actual PNG width in pixels"},
+                    "X-Image-Height": {"schema": {"type": "integer"}, "description": "Actual PNG height in pixels"},
+                    "Cache-Control": {"schema": {"type": "string"}, "description": "no-store"},
+                },
+            },
+        },
+    },
+    403: {"description": "Observer or cross-project permission denied."},
+    404: {"description": "Document not found or page index out of range."},
+    422: {"description": "Malformed path or render pixel limit exceeded."},
+    503: {"description": "Server busy or renderer temporarily unavailable."},
+    504: {"description": "Page rendering timed out."},
+}
 
 # Route registrations
 router.add_api_route(
@@ -989,10 +1094,12 @@ router.add_api_route(
     get_page_handler,
     methods=["GET"],
     name="get_document_page_v1",
+    responses=PAGE_RESPONSES,
 )
 router.add_api_route(
     "/documents/{document_id}/pages/{page_index}",
     get_page_handler,
     methods=["GET"],
     name="get_document_page_compat",
+    responses=PAGE_RESPONSES,
 )
