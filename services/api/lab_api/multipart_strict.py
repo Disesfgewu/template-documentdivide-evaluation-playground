@@ -92,8 +92,9 @@ def _parse_headers(block: bytes) -> dict[str, str]:
     for line in lines:
         if not line or line[0] in " \t":
             raise _bad("malformed or folded part header")
-        name, sep, value = line.partition(":")
-        name = name.strip().lower()
+        raw_name, sep, value = line.partition(":")
+        name = raw_name.lower()
+        # RFC 9110 5.1: no whitespace between the field name and the colon.
         if not sep or not name or name != name.strip() or any(c in name for c in " \t"):
             raise _bad("malformed part header")
         if name in headers:

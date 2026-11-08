@@ -549,5 +549,23 @@ class TestMultipartStrict(unittest.TestCase):
         return ctx.exception
 
 
+    def test_whitespace_between_header_name_and_colon_is_rejected(self) -> None:
+        """RFC 9110 5.1: `Content-Disposition : ...` is malformed, and the
+        part's headers are never normalised into something acceptable."""
+        for label, header in {
+            "space before colon": b'Content-Disposition : form-data; name="file"; filename="a.pdf"\r\n',
+            "tab before colon": b'Content-Disposition\t: form-data; name="file"; filename="a.pdf"\r\n',
+        }.items():
+            with self.subTest(label):
+                body = (b"--BOUNDARY\r\n" + header + b"Content-Type: application/pdf\r\n\r\n" + PDF
+                        + b"\r\n--BOUNDARY--\r\n")
+                exc = self.assertRaisesMessage(body, "malformed part header")
+                self.assertEqual((exc.status_code, exc.code), (400, "invalid_request"))
+        # Whitespace after the colon stays fine.
+        ok_body = (b'--BOUNDARY\r\nContent-Disposition:   form-data; name="file"; filename="a.pdf"\r\n'
+                   b"Content-Type:application/pdf\r\n\r\n" + PDF + b"\r\n--BOUNDARY--\r\n")
+        self.assertEqual(parse_upload(CT, ok_body, 10_000_000).pdf, PDF)
+
+
 if __name__ == "__main__":
     unittest.main()
