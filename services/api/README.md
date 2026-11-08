@@ -26,3 +26,16 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 - `/readyz`：真的連資料庫並確認 `vector` extension 存在，並在 artifact 根目錄實際建立後刪除暫存檔。任一項失敗回 503 `not_ready`；檢查本身拋例外也算失敗。回應只帶例外類別名稱，不回傳連線字串或主機資訊。
 - 設定：`LAB_ENV`、`LAB_PROVIDER_MODE`、`LAB_DATABASE_URL`、`LAB_ARTIFACT_ROOT` 沒有預設值，缺少或不合法時啟動失敗。資料庫只接受 `postgresql://`（不以 SQLite 代替）。
 - mock 與真 provider 分開：`mock` 是本機決定性假回應；`real` 目前**直接拒絕啟動**，因為尚無真 provider adapter（T84 待後續）。`prod` 禁止搭配 `mock`。
+
+## PDF 上傳與原檔下載（#67／#7 增量）
+
+`POST /api/v1/documents`（亦有 `/documents`、`/api/v1/projects/{project_id}/documents`）、`GET /api/v1/documents/{id}`（`Accept: application/pdf` 取原檔）、`.../original`、`.../download`、`.../pages/{n}`。一律需要簽章的 Bearer actor token，project 角色由 PostgreSQL 判定；沒有在請求內自稱身分的方式。
+
+- **先授權、再讀 body**：授權（`import_and_configure_parse`）通過後才取得 admission slot 並讀取請求內容；未授權的請求不佔 slot、不讀任何 body 位元組。
+- **有界記憶體**：同時上傳數由 slot 控制（`app.state.upload_concurrency`，預設 2；下載 `download_concurrency`，預設 2），沒有 slot 時立刻回 503 `server_busy`（`retryable: true`），不排隊。最壞記憶體約為 `上傳並行數 × 2 × (max_pdf_bytes + 64 KiB)`：multipart body 保存一份，PDF part 再切出一份。`max_pdf_bytes` 預設 512 MiB。
+- **不阻塞 event loop、取消安全**：multipart 解析、sha256、PDF 檢查、SQL、artifact 讀寫都在 worker thread 執行（各用有上限的 `CapacityLimiter`）。請求被取消（斷線、逾時、關機）時，取消會等 worker 結束才繼續，因此 request 專用的連線與 store 不會在 worker 還在用時被關閉。不使用 `run_in_executor`（取消時它會立即返回、thread 仍在執行）。
+- **嚴格 multipart**（`lab_api/multipart_strict.py`）：只接受固定格式（不接受 preamble、折行或重複 header、`base64`／`quoted-printable` 編碼）、最多 4 個 part、只允許一個 PDF part 與最多一個 `logical_id` 文字欄位；其他 part 一律拒絕而非忽略。PDF part 超過上限回 413，非 PDF 媒體型別回 415。
+- **冪等重播**：帶 `Idempotency-Key` 時，同 key 同內容重送會重播原結果；成功回傳 200 `replayed: true`。被拒絕的請求（例如加密 PDF、頁面幾何錯誤）的**原始回應**與 operation 在同一交易中存入 `operation_results`（0009，append-only），重送時原樣回傳，只換上新請求的 `request_id`，不會重新執行 parser、也不受當下限制或程式版本影響。0009 之前就已失敗、沒有保存回應的 operation 回 409，並說明原回應未保留。同 key 不同內容回 409。
+- **下載**：授權與 artifact 狀態、大小上限、checksum 都先在資料庫層檢查，才讀取檔案；讀檔受 `max_pdf_bytes` 限制並驗證 sha256。
+
+尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。

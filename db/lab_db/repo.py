@@ -165,7 +165,7 @@ def record_change(conn: psycopg.Connection, ch: Change) -> uuid.UUID:
     return rv_id
 
 
-APPEND_ONLY_TABLES = ("audit_events", "benchmark_transitions", "job_transitions", "graph_checkpoints",
+APPEND_ONLY_TABLES = ("audit_events", "operation_results", "benchmark_transitions", "job_transitions", "graph_checkpoints",
                       "log_events", "submissions", "retrieved_hits", "citations",
                       "visual_observations", "evidence_verifications")
 READ_ONLY_TABLES = ("schema_migrations", "benchmark_transitions_allowed", "job_transitions_allowed")

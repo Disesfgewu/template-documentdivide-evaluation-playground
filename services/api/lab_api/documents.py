@@ -1,8 +1,9 @@
 """Document ingestion, versioning, and download endpoints (SPEC R01, 8, 10.1-10.2, 16.4)."""
 from __future__ import annotations
 
-import email
-import email.policy
+import asyncio
+import dataclasses
+import functools
 import hashlib
 import sys
 import uuid
@@ -14,9 +15,12 @@ for _sub in (_REPO_ROOT / "db", _REPO_ROOT / "services" / "parser", _REPO_ROOT /
     if _sub.exists() and str(_sub) not in sys.path:
         sys.path.insert(0, str(_sub))
 
+import anyio
+import anyio.to_thread
 import psycopg
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
+from psycopg.types.json import Jsonb
 
 from lab_db.ingest import IngestRejected, Inspection, PageGeometry, ingest_document
 from lab_db.repo import NotFound, PermissionDenied, authorize
@@ -26,6 +30,7 @@ from lab_parser.pages import extract_pages
 
 from .auth import AuthError, get_signing_secret, verify_actor_token
 from .config import Settings
+from .multipart_strict import MultipartError, parse_upload as parse_multipart
 from .pdf_body import (
     DEFAULT_MAX_PDF_BYTES,
     PdfRequestBodyError,
@@ -78,6 +83,41 @@ REJECTION_CODE_MAP = {
 }
 
 
+def _rejection_error(
+    reason: str,
+    *,
+    sha256: str = "",
+    size_bytes: int = 0,
+    page_count: Optional[int] = None,
+    error_type: Optional[str] = None,
+) -> tuple[int, dict[str, Any]]:
+    """The rejection's HTTP status and error object, without the per-request
+    ``request_id``. This exact object is stored with the operation and
+    replayed to idempotent retries."""
+    if reason == "invalid_page_geometry":
+        return 422, {
+            "code": "invalid_page_geometry",
+            "message": "failed to parse page geometry from PDF",
+            "retryable": False,
+            "details": {"error": error_type or "ValueError"},
+            "retry_after": None,
+        }
+
+    code, status_code = REJECTION_CODE_MAP.get(reason, ("invalid_pdf", 422))
+    return status_code, {
+        "code": code,
+        "message": f"document rejected: {reason}",
+        "retryable": False,
+        "details": {
+            "reason": reason,
+            "sha256": sha256,
+            "size_bytes": size_bytes,
+            "page_count": page_count,
+        },
+        "retry_after": None,
+    }
+
+
 def _make_rejection_error_response(
     reason: str,
     *,
@@ -87,26 +127,10 @@ def _make_rejection_error_response(
     page_count: Optional[int] = None,
     error_type: Optional[str] = None,
 ) -> JSONResponse:
-    if reason == "invalid_page_geometry":
-        return ApiError(
-            status_code=422,
-            code="invalid_page_geometry",
-            message="failed to parse page geometry from PDF",
-            details={"error": error_type or "ValueError"},
-        ).to_error_response(request_id)
-
-    code, status_code = REJECTION_CODE_MAP.get(reason, ("invalid_pdf", 422))
-    return ApiError(
-        status_code=status_code,
-        code=code,
-        message=f"document rejected: {reason}",
-        details={
-            "reason": reason,
-            "sha256": sha256,
-            "size_bytes": size_bytes,
-            "page_count": page_count,
-        },
-    ).to_error_response(request_id)
+    status_code, error = _rejection_error(
+        reason, sha256=sha256, size_bytes=size_bytes, page_count=page_count, error_type=error_type
+    )
+    return JSONResponse(status_code=status_code, content={"error": {**error, "request_id": request_id}})
 
 
 def get_db(request: Request):
@@ -236,135 +260,219 @@ def resolve_logical_id(request: Request, form_logical_id: Optional[str] = None) 
 
 router = APIRouter()
 
+# ---------------------------------------------------------------------------
+# Blocking work, admission and memory bounds (SPEC 12.3, 16.6; PM review on #73)
+#
+# Everything that blocks (multipart parsing, sha256, PDF inspection, SQL,
+# artifact storage) runs in a worker thread through ``_run_blocking``: if the
+# request is cancelled (disconnect, shutdown, timeout) the cancellation waits
+# until the thread has finished. The request-scoped connection and store
+# therefore cannot be closed underneath a running worker
+# (``loop.run_in_executor`` returns on cancel while the thread keeps going,
+# which is the defect found in the first attempt).
+#
+# Memory is bounded by admission, not by thread counts: a request must take a
+# slot *before* its body is read, and slots are refused (503, retryable)
+# when none is free. Worst case is about
+#   upload_concurrency * 2 * (max_pdf_bytes + MULTIPART_OVERHEAD_BYTES)
+# because a multipart body is held once and its PDF part is copied once.
+# ---------------------------------------------------------------------------
+DEFAULT_UPLOAD_CONCURRENCY = 2
+DEFAULT_DOWNLOAD_CONCURRENCY = 2
+DEFAULT_METADATA_CONCURRENCY = 8
+MULTIPART_OVERHEAD_BYTES = 65536
 
-async def extract_upload_data(request: Request, max_bytes: int) -> tuple[bytes, Optional[str]]:
-    """Extract PDF bytes and optional logical_id from bounded streaming multipart or raw PDF body."""
+
+def _state_object(request: Request, name: str, factory):
+    """Lazily create one shared primitive on app.state (single event loop
+    thread, no await between check and set, so this is race-free)."""
+    obj = getattr(request.app.state, name, None)
+    if obj is None:
+        obj = factory()
+        setattr(request.app.state, name, obj)
+    return obj
+
+
+def _positive_int(request: Request, name: str, default: int) -> int:
+    value = getattr(request.app.state, name, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else default
+
+
+async def _run_blocking(request: Request, pool: str, fn, *args):
+    """Run ``fn(*args)`` in a worker thread; cancellation is deferred until it ends."""
+    size = DEFAULT_METADATA_CONCURRENCY
+    if pool == "upload":
+        size = _positive_int(request, "upload_concurrency", DEFAULT_UPLOAD_CONCURRENCY)
+    elif pool == "download":
+        size = _positive_int(request, "download_concurrency", DEFAULT_DOWNLOAD_CONCURRENCY)
+    limiter = _state_object(request, f"{pool}_threads", lambda: anyio.CapacityLimiter(size))
+    # The thread runs as its own task so that cancelling *this* task, by
+    # anyio's cancel scopes or by a plain task.cancel(), cannot abandon it:
+    # we wait for the worker (which owns the request's connection) before
+    # letting the cancellation continue.
+    job = asyncio.ensure_future(
+        anyio.to_thread.run_sync(functools.partial(fn, *args), abandon_on_cancel=False, limiter=limiter)
+    )
+    try:
+        await asyncio.wait({job})  # cancelling this wait never cancels the job
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            while not job.done():
+                try:
+                    await asyncio.wait({job})
+                except asyncio.CancelledError:
+                    continue
+        if not job.cancelled():
+            job.exception()  # mark retrieved; the request is gone, nobody can use it
+        raise
+    return job.result()
+
+
+def _take_slot(request: Request, pool: str, default: int, what: str) -> anyio.Semaphore:
+    """Take an admission slot without waiting; release it in ``finally``."""
+    size = _positive_int(request, f"{pool}_concurrency", default)
+    sem = _state_object(request, f"{pool}_slots", lambda: anyio.Semaphore(size))
+    try:
+        sem.acquire_nowait()
+    except anyio.WouldBlock:
+        raise ApiError(
+            503, "server_busy", f"too many concurrent {what}; retry later", retryable=True
+        ) from None
+    return sem
+
+
+@dataclasses.dataclass(frozen=True)
+class RawUpload:
+    """A bounded request body that has been read but not yet parsed."""
+
+    kind: str  # "pdf" or "multipart"
+    content_type: str
+    body: "bytes | bytearray"
+
+
+async def read_upload_body(request: Request, max_bytes: int) -> RawUpload:
+    """Read the request body under a hard byte bound (no parsing, no copying)."""
     raw_ct = request.headers.get("Content-Type", "").strip()
     ct_lower = raw_ct.lower()
 
     if ct_lower.startswith("application/pdf"):
-        data = await read_pdf_request_body(request, max_bytes=max_bytes)
-        return data, None
+        try:
+            body = await read_pdf_request_body(request, max_bytes=max_bytes)
+        except PdfRequestBodyError as exc:
+            raise ApiError(status_code=exc.status_code, code=exc.code, message=exc.message) from exc
+        return RawUpload("pdf", raw_ct, body)
 
     if ct_lower.startswith("multipart/form-data"):
-        max_multipart_bytes = max_bytes + 65536
-        cl_header = request.headers.get("Content-Length")
-        if cl_header:
-            try:
-                cl = int(cl_header.strip())
-            except ValueError:
-                raise ApiError(400, "invalid_content_length", "invalid Content-Length header")
-            if cl < 0:
-                raise ApiError(400, "invalid_content_length", "negative Content-Length header")
-            if cl > max_multipart_bytes:
-                raise ApiError(413, "payload_too_large", "request body exceeds size limit")
-
-        # Stream chunks with strict byte limit to prevent unbounded memory buffering
-        chunks = []
-        total_bytes = 0
-        async for chunk in request.stream():
-            if chunk:
-                total_bytes += len(chunk)
-                if total_bytes > max_multipart_bytes:
-                    raise ApiError(413, "payload_too_large", "request body exceeds size limit")
-                chunks.append(chunk)
-
-        raw_body = b"".join(chunks)
-
         try:
-            header_bytes = f"Content-Type: {raw_ct}\r\n\r\n".encode("latin-1")
-        except UnicodeEncodeError:
-            raise ApiError(400, "invalid_request", "invalid characters in Content-Type header")
-
-        try:
-            msg = email.message_from_bytes(header_bytes + raw_body, policy=email.policy.default)
-        except Exception as exc:
-            raise ApiError(400, "invalid_request", f"malformed multipart body ({type(exc).__name__})")
-
-        if not msg.is_multipart():
-            raise ApiError(400, "invalid_request", "expected multipart body")
-
-        pdf_bytes: Optional[bytes] = None
-        form_logical_id: Optional[str] = None
-
-        for part in msg.iter_parts():
-            part_ct = part.get_content_type()
-            part_name = part.get_param("name", header="content-disposition")
-            filename = part.get_filename()
-
-            if part_name == "logical_id":
-                try:
-                    form_logical_id = part.get_content().strip()
-                except Exception:
-                    pass
-            elif part_name in ("file", "pdf", "document") or part_ct == "application/pdf":
-                is_pdf_type = (part_ct == "application/pdf") or (
-                    part_ct == "application/octet-stream"
-                    and bool(filename and filename.lower().endswith(".pdf"))
-                )
-                if not is_pdf_type:
-                    raise ApiError(
-                        415,
-                        "unsupported_media_type",
-                        f"unsupported media type '{part_ct}' for PDF upload",
-                    )
-                if pdf_bytes is not None:
-                    raise ApiError(
-                        400,
-                        "invalid_request",
-                        "multiple PDF parts in multipart request",
-                    )
-                payload = part.get_payload(decode=True)
-                if not isinstance(payload, bytes):
-                    raise ApiError(400, "invalid_request", "failed to decode PDF part")
-                if len(payload) > max_bytes:
-                    raise ApiError(413, "payload_too_large", "PDF file exceeds size limit")
-                pdf_bytes = payload
-
-        if pdf_bytes is None:
-            raise ApiError(400, "invalid_request", "multipart body does not contain a PDF file")
-
-        return pdf_bytes, form_logical_id
+            body = await read_pdf_request_body(
+                request,
+                max_bytes=max_bytes + MULTIPART_OVERHEAD_BYTES,
+                media_type=b"multipart/form-data",
+                as_bytearray=True,
+            )
+        except PdfRequestBodyError as exc:
+            code = "payload_too_large" if exc.code == "file_too_large" else exc.code
+            raise ApiError(status_code=exc.status_code, code=code, message=exc.message) from exc
+        return RawUpload("multipart", raw_ct, body)
 
     raise ApiError(415, "unsupported_media_type", "Content-Type must be application/pdf or multipart/form-data")
 
 
-async def upload_document_handler(
-    request: Request,
-    conn: psycopg.Connection = Depends(get_db),
-    store: LocalArtifactStore = Depends(get_store),
-    actor_id: uuid.UUID = Depends(get_authenticated_actor),
-    project_id: Optional[uuid.UUID] = None,
-) -> JSONResponse:
-    """Authenticated and authorized PDF upload endpoint."""
-    proj_id = resolve_project_id(request, project_id)
-
+def parse_upload(raw: RawUpload, max_bytes: int) -> tuple[bytes, Optional[str]]:
+    """Blocking: return (PDF bytes, optional form logical_id) from a bounded body."""
+    if raw.kind == "pdf":
+        return bytes(raw.body), None
     try:
-        authorize(conn, proj_id, actor_id, "import_and_configure_parse")
+        parsed = parse_multipart(raw.content_type, raw.body, max_bytes)
+    except MultipartError as exc:
+        raise ApiError(exc.status_code, exc.code, exc.message) from exc
+    return parsed.pdf, parsed.logical_id
+
+
+async def extract_upload_data(request: Request, max_bytes: int) -> tuple[bytes, Optional[str]]:
+    """Read and parse an upload (kept for callers and tests that want both steps)."""
+    raw = await read_upload_body(request, max_bytes)
+    return await _run_blocking(request, "upload", parse_upload, raw, max_bytes)
+
+
+# ---------------------------------------------------------------------------
+# Upload
+# ---------------------------------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class _UploadContext:
+    project_id: uuid.UUID
+    actor_id: uuid.UUID
+    max_bytes: int
+    max_pages: int
+    idempotency_key: Optional[str]
+    request_id: str
+    logical_hint: Optional[str]  # query parameter or X-Logical-Id header
+
+
+def _authorize_upload(conn: psycopg.Connection, project_id: uuid.UUID, actor_id: uuid.UUID) -> None:
+    try:
+        authorize(conn, project_id, actor_id, "import_and_configure_parse")
     except NotFound:
         raise ApiError(404, "not_found", "project not found")
     except PermissionDenied as exc:
         raise ApiError(403, "permission_denied", str(exc))
 
-    max_bytes = getattr(request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES)
-    max_pages = getattr(request.app.state, "max_pdf_pages", DEFAULT_MAX_PDF_PAGES)
 
-    try:
-        data, form_logical_id = await extract_upload_data(request, max_bytes=max_bytes)
-    except PdfRequestBodyError as exc:
-        raise ApiError(status_code=exc.status_code, code=exc.code, message=exc.message) from exc
+def _pick_logical_id(form_logical_id: Optional[str], hint: Optional[str]) -> str:
+    val = form_logical_id or hint
+    if not val:
+        return "default"
+    if not (1 <= len(val) <= 128):
+        raise ApiError(400, "bad_request", "logical_id length must be between 1 and 128 characters")
+    return val
 
-    logical_id = resolve_logical_id(request, form_logical_id)
+
+def _save_rejection(conn, project_id, operation_id, status: int, error: dict) -> None:
+    """Persist the original rejection response with its operation (same
+    transaction as the audit event) so a retry replays it verbatim."""
+    conn.execute(
+        "INSERT INTO operation_results (project_id, operation_id, http_status, response_body) "
+        "VALUES (%s, %s, %s, %s)",
+        (project_id, operation_id, status, Jsonb(error)),
+    )
+
+
+_UNSET = object()
+
+
+def _upload_core(
+    conn: psycopg.Connection,
+    store: LocalArtifactStore,
+    ctx: _UploadContext,
+    raw: RawUpload,
+) -> tuple[int, dict]:
+    """Blocking upload body: parse, hash, inspect, persist. Returns (status, JSON)."""
+    data, form_logical_id = parse_upload(raw, ctx.max_bytes)
+    logical_id = _pick_logical_id(form_logical_id, ctx.logical_hint)
+    proj_id, actor_id = ctx.project_id, ctx.actor_id
     pdf_sha256 = hashlib.sha256(data).hexdigest()
     request_hash = hashlib.sha256(f"{logical_id}:{pdf_sha256}".encode("utf-8")).hexdigest()
-
-    idempotency_key = request.headers.get("Idempotency-Key")
+    idempotency_key = ctx.idempotency_key
     op_intent_id: Optional[uuid.UUID] = None
 
-    if idempotency_key:
-        idempotency_key = idempotency_key.strip()
-        if not (1 <= len(idempotency_key) <= 256):
-            raise ApiError(400, "bad_request", "invalid idempotency key format")
+    def reject(reason, *, sha256="", size_bytes=0, page_count=None, error_type=None, warnings=(), db_reason=_UNSET):
+        status, error = _rejection_error(
+            reason, sha256=sha256, size_bytes=size_bytes, page_count=page_count, error_type=error_type
+        )
+        db_inspection = Inspection(
+            outcome="reject", reason=reason if db_reason is _UNSET else db_reason, sha256=sha256,
+            size_bytes=size_bytes, page_count=page_count, warnings=warnings,
+        )
+        try:
+            ingest_document(
+                conn, store, project_id=proj_id, actor_id=actor_id, logical_id=logical_id,
+                data=data, inspection=db_inspection, pages=[], operation_id=op_intent_id,
+            )
+        except IngestRejected:
+            pass
+        if op_intent_id is not None:
+            _save_rejection(conn, proj_id, op_intent_id, status, error)
+        return status, {"error": {**error, "request_id": ctx.request_id}}
 
     with conn.transaction():
         conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))
@@ -404,56 +512,37 @@ async def upload_document_handler(
                     ).fetchone()
                     if row is not None:
                         doc_id, res_id, art_id, sha, page_cnt, log_id, rev, size_b = row
-                        return JSONResponse(
-                            status_code=200,
-                            content={
-                                "id": str(doc_id),
-                                "document_version_id": str(doc_id),
-                                "project_id": str(proj_id),
-                                "resource_id": str(res_id),
-                                "artifact_id": str(art_id),
-                                "logical_id": log_id,
-                                "revision": rev,
-                                "sha256": sha,
-                                "size_bytes": size_b,
-                                "page_count": page_cnt,
-                                "replayed": True,
-                            },
-                        )
+                        return 200, {
+                            "id": str(doc_id),
+                            "document_version_id": str(doc_id),
+                            "project_id": str(proj_id),
+                            "resource_id": str(res_id),
+                            "artifact_id": str(art_id),
+                            "logical_id": log_id,
+                            "revision": rev,
+                            "sha256": sha,
+                            "size_bytes": size_b,
+                            "page_count": page_cnt,
+                            "replayed": True,
+                        }
                     raise ApiError(500, "internal_error", "replayed document version not found")
 
                 if op_status == "failed":
-                    audit_row = conn.execute(
-                        """
-                        SELECT reason
-                        FROM audit_events
-                        WHERE project_id = %s AND operation_id = %s AND action = 'document.rejected'
-                        """,
+                    # Replay the response saved with the first attempt. It is
+                    # never recomputed: the parser, limits or code may differ
+                    # now, and re-inspecting would repeat the CPU cost.
+                    stored = conn.execute(
+                        "SELECT http_status, response_body FROM operation_results "
+                        "WHERE project_id = %s AND operation_id = %s",
                         (proj_id, existing_op),
                     ).fetchone()
-                    if audit_row is not None:
-                        rej_reason = audit_row[0] or ""
-                        req_id = request.headers.get("X-Request-Id", "req-1")
-                        if rej_reason == "invalid_page_geometry":
-                            try:
-                                extract_pages(data)
-                                err_name = "ValueError"
-                            except Exception as exc:
-                                err_name = type(exc).__name__
-                            return _make_rejection_error_response(
-                                "invalid_page_geometry",
-                                request_id=req_id,
-                                error_type=err_name,
-                            )
-                        inspection = inspect_pdf(data, limits=Limits(max_bytes=max_bytes, max_pages=max_pages))
-                        return _make_rejection_error_response(
-                            rej_reason or inspection.reason or "",
-                            request_id=req_id,
-                            sha256=inspection.sha256,
-                            size_bytes=inspection.size_bytes,
-                            page_count=inspection.page_count,
+                    if stored is None:
+                        raise ApiError(
+                            409, "conflict",
+                            "idempotency key was used for a failed operation whose original response was not retained",
                         )
-                    raise ApiError(409, "conflict", "idempotency key was used for a failed operation")
+                    status, error = stored
+                    return status, {"error": {**error, "request_id": ctx.request_id}}
 
                 # If op_status is 'intent' (concurrent request still running), fail closed
                 raise ApiError(409, "conflict", "idempotency key operation currently in progress")
@@ -469,70 +558,22 @@ async def upload_document_handler(
                 (proj_id, idempotency_key, request_hash, op_intent_id),
             )
 
-        inspection = inspect_pdf(data, limits=Limits(max_bytes=max_bytes, max_pages=max_pages))
+        inspection = inspect_pdf(data, limits=Limits(max_bytes=ctx.max_bytes, max_pages=ctx.max_pages))
 
         if inspection.outcome == "reject":
-            db_inspection = Inspection(
-                outcome="reject",
-                reason=inspection.reason,
-                sha256=inspection.sha256,
-                size_bytes=inspection.size_bytes,
-                page_count=inspection.page_count,
-                warnings=inspection.warnings,
-            )
-            try:
-                ingest_document(
-                    conn,
-                    store,
-                    project_id=proj_id,
-                    actor_id=actor_id,
-                    logical_id=logical_id,
-                    data=data,
-                    inspection=db_inspection,
-                    pages=[],
-                    operation_id=op_intent_id,
-                )
-            except IngestRejected:
-                pass
-
-            return _make_rejection_error_response(
-                inspection.reason or "",
-                request_id=request.headers.get("X-Request-Id", "req-1"),
-                sha256=inspection.sha256,
-                size_bytes=inspection.size_bytes,
-                page_count=inspection.page_count,
+            return reject(
+                inspection.reason or "", sha256=inspection.sha256, size_bytes=inspection.size_bytes,
+                page_count=inspection.page_count, warnings=inspection.warnings,
+                db_reason=inspection.reason,  # as before: the inspector's own value, even None
             )
 
         try:
             page_infos = extract_pages(data)
         except Exception as exc:
-            db_inspection = Inspection(
-                outcome="reject",
-                reason="invalid_page_geometry",
-                sha256=inspection.sha256,
-                size_bytes=inspection.size_bytes,
-                page_count=inspection.page_count,
+            return reject(
+                "invalid_page_geometry", sha256=inspection.sha256, size_bytes=inspection.size_bytes,
+                page_count=inspection.page_count, error_type=type(exc).__name__,
                 warnings=inspection.warnings,
-            )
-            try:
-                ingest_document(
-                    conn,
-                    store,
-                    project_id=proj_id,
-                    actor_id=actor_id,
-                    logical_id=logical_id,
-                    data=data,
-                    inspection=db_inspection,
-                    pages=[],
-                    operation_id=op_intent_id,
-                )
-            except IngestRejected:
-                pass
-
-            return _make_rejection_error_response(
-                "invalid_page_geometry",
-                request_id=request.headers.get("X-Request-Id", "req-1"),
-                error_type=type(exc).__name__,
             )
 
         pages = [
@@ -556,15 +597,8 @@ async def upload_document_handler(
         )
 
         doc_version_id = ingest_document(
-            conn,
-            store,
-            project_id=proj_id,
-            actor_id=actor_id,
-            logical_id=logical_id,
-            data=data,
-            inspection=db_inspection,
-            pages=pages,
-            operation_id=op_intent_id,
+            conn, store, project_id=proj_id, actor_id=actor_id, logical_id=logical_id,
+            data=data, inspection=db_inspection, pages=pages, operation_id=op_intent_id,
         )
 
         row = conn.execute(
@@ -581,110 +615,83 @@ async def upload_document_handler(
 
         resource_id, artifact_id, revision = row
 
-        return JSONResponse(
-            status_code=201,
-            content={
-                "id": str(doc_version_id),
-                "document_version_id": str(doc_version_id),
-                "project_id": str(proj_id),
-                "resource_id": str(resource_id),
-                "artifact_id": str(artifact_id),
-                "logical_id": logical_id,
-                "revision": revision,
-                "sha256": inspection.sha256,
-                "size_bytes": inspection.size_bytes,
-                "page_count": inspection.page_count,
-                "flagged": inspection.outcome == "flag",
-                "warnings": list(inspection.warnings),
-            },
-        )
+        return 201, {
+            "id": str(doc_version_id),
+            "document_version_id": str(doc_version_id),
+            "project_id": str(proj_id),
+            "resource_id": str(resource_id),
+            "artifact_id": str(artifact_id),
+            "logical_id": logical_id,
+            "revision": revision,
+            "sha256": inspection.sha256,
+            "size_bytes": inspection.size_bytes,
+            "page_count": inspection.page_count,
+            "flagged": inspection.outcome == "flag",
+            "warnings": list(inspection.warnings),
+        }
 
 
-async def download_document_handler(
-    document_id: uuid.UUID,
+async def upload_document_handler(
     request: Request,
     conn: psycopg.Connection = Depends(get_db),
     store: LocalArtifactStore = Depends(get_store),
     actor_id: uuid.UUID = Depends(get_authenticated_actor),
-) -> Response:
-    """Authorized project-scoped original PDF download endpoint."""
-    row = conn.execute(
-        """
-        SELECT dv.project_id, dv.sha256, a.sha256, a.object_key, a.size_bytes, a.state::text
-        FROM document_versions dv
-        JOIN artifacts a ON a.id = dv.artifact_id
-        WHERE dv.id = %s
-        """,
-        (document_id,),
-    ).fetchone()
-
-    if row is None:
-        raise ApiError(404, "not_found", "document not found")
-
-    project_id, doc_sha, art_sha, object_key, size_bytes, artifact_state = row
-
-    try:
-        decision = authorize(
-            conn, project_id, actor_id, "read_licensed_pdf_and_public_questions"
-        )
-        if decision.condition == "explicit_grant":
-            raise PermissionDenied("observer requires explicit grant")
-    except NotFound:
-        raise ApiError(404, "not_found", "document not found")
-    except PermissionDenied as exc:
-        raise ApiError(403, "permission_denied", str(exc))
-
-    if artifact_state != "committed":
-        raise ApiError(404, "not_found", "document artifact not committed")
-
-    if art_sha != doc_sha:
-        raise ApiError(500, "storage_corruption", "document and artifact checksum mismatch")
-
-    server_max_bytes = getattr(
-        request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES
+    project_id: Optional[uuid.UUID] = None,
+) -> JSONResponse:
+    """Authenticated and authorized PDF upload endpoint."""
+    proj_id = resolve_project_id(request, project_id)
+    idempotency_key = request.headers.get("Idempotency-Key")
+    if idempotency_key:
+        idempotency_key = idempotency_key.strip()
+        if not (1 <= len(idempotency_key) <= 256):
+            raise ApiError(400, "bad_request", "invalid idempotency key format")
+    max_bytes = getattr(request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES)
+    max_pages = getattr(request.app.state, "max_pdf_pages", DEFAULT_MAX_PDF_PAGES)
+    ctx = _UploadContext(
+        project_id=proj_id,
+        actor_id=actor_id,
+        max_bytes=max_bytes,
+        max_pages=max_pages,
+        idempotency_key=idempotency_key or None,
+        request_id=request.headers.get("X-Request-Id", "req-1"),
+        logical_hint=request.query_params.get("logical_id") or request.headers.get("X-Logical-Id"),
     )
 
-    if (
-        not isinstance(size_bytes, int)
-        or size_bytes < 0
-        or size_bytes > server_max_bytes
-    ):
-        raise ApiError(500, "storage_corruption", "invalid artifact size in database")
+    # Authorize before a single body byte is read or a slot is taken.
+    await _run_blocking(request, "meta", _authorize_upload, conn, proj_id, actor_id)
 
+    slot = _take_slot(request, "upload", DEFAULT_UPLOAD_CONCURRENCY, "uploads")
     try:
-        pdf_bytes = store.open(
-            object_key,
-            expected_size=size_bytes,
-            max_bytes=server_max_bytes,
-        )
-    except StorageCorruption as exc:
-        raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
-    except Exception as exc:
-        raise ApiError(
-            500, "storage_error", f"failed to open artifact ({type(exc).__name__})"
-        )
-
-    if len(pdf_bytes) != size_bytes or hashlib.sha256(pdf_bytes).hexdigest() != doc_sha:
-        raise ApiError(500, "storage_corruption", "artifact checksum or size mismatch")
-
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Length": str(len(pdf_bytes)),
-            "Content-Disposition": f'attachment; filename="{document_id}.pdf"',
-        },
-    )
+        raw = await read_upload_body(request, max_bytes)
+        status, content = await _run_blocking(request, "upload", _upload_core, conn, store, ctx, raw)
+    finally:
+        slot.release()
+    return JSONResponse(status_code=status, content=content)
 
 
-async def get_document_handler(
-    document_id: uuid.UUID,
-    request: Request,
-    conn: psycopg.Connection = Depends(get_db),
-    store: LocalArtifactStore = Depends(get_store),
-    actor_id: uuid.UUID = Depends(get_authenticated_actor),
-) -> Response:
-    """Get document version metadata, or download if Accept: application/pdf."""
+# ---------------------------------------------------------------------------
+# Read paths
+# ---------------------------------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class _ReadableDocument:
+    document_id: uuid.UUID
+    project_id: uuid.UUID
+    resource_id: uuid.UUID
+    artifact_id: uuid.UUID
+    doc_sha: str
+    page_count: int
+    logical_id: str
+    revision: int
+    size_bytes: int
+    object_key: str
+
+
+def _readable_document(
+    conn: psycopg.Connection, actor_id: uuid.UUID, document_id: uuid.UUID, server_max_bytes: int
+) -> _ReadableDocument:
+    """Blocking: look up a document version and check that the actor may read
+    its original and that its artifact is committed and consistent. Touches
+    no artifact bytes."""
     row = conn.execute(
         """
         SELECT dv.id, dv.project_id, dv.resource_id, dv.artifact_id, dv.sha256, dv.page_count,
@@ -696,29 +703,14 @@ async def get_document_handler(
         """,
         (document_id,),
     ).fetchone()
-
     if row is None:
         raise ApiError(404, "not_found", "document not found")
 
-    (
-        doc_id,
-        project_id,
-        res_id,
-        art_id,
-        doc_sha,
-        page_cnt,
-        logical_id,
-        rev,
-        art_sha,
-        size_bytes,
-        obj_key,
-        art_state,
-    ) = row
+    (doc_id, project_id, res_id, art_id, doc_sha, page_cnt, logical_id, rev,
+     art_sha, size_bytes, obj_key, art_state) = row
 
     try:
-        decision = authorize(
-            conn, project_id, actor_id, "read_licensed_pdf_and_public_questions"
-        )
+        decision = authorize(conn, project_id, actor_id, "read_licensed_pdf_and_public_questions")
         if decision.condition == "explicit_grant":
             raise PermissionDenied("observer requires explicit grant")
     except NotFound:
@@ -728,87 +720,106 @@ async def get_document_handler(
 
     if art_state != "committed":
         raise ApiError(404, "not_found", "document artifact not committed")
-
     if art_sha != doc_sha:
         raise ApiError(500, "storage_corruption", "document and artifact checksum mismatch")
-
-    server_max_bytes = getattr(
-        request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES
-    )
-
-    if (
-        not isinstance(size_bytes, int)
-        or size_bytes < 0
-        or size_bytes > server_max_bytes
-    ):
+    if not isinstance(size_bytes, int) or size_bytes < 0 or size_bytes > server_max_bytes:
         raise ApiError(500, "storage_corruption", "invalid artifact size in database")
 
-    accept = request.headers.get("Accept", "")
-    if "application/pdf" in accept:
-        try:
-            pdf_bytes = store.open(
-                obj_key,
-                expected_size=size_bytes,
-                max_bytes=server_max_bytes,
-            )
-        except StorageCorruption as exc:
-            raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
-        except Exception as exc:
-            raise ApiError(
-                500, "storage_error", f"failed to open artifact ({type(exc).__name__})"
-            )
+    return _ReadableDocument(
+        document_id=doc_id, project_id=project_id, resource_id=res_id, artifact_id=art_id,
+        doc_sha=doc_sha, page_count=page_cnt, logical_id=logical_id, revision=rev,
+        size_bytes=size_bytes, object_key=obj_key,
+    )
 
-        if len(pdf_bytes) != size_bytes or hashlib.sha256(pdf_bytes).hexdigest() != doc_sha:
-            raise ApiError(500, "storage_corruption", "artifact checksum or size mismatch")
 
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Length": str(len(pdf_bytes)),
-                "Content-Disposition": f'attachment; filename="{document_id}.pdf"',
-            },
-        )
+def _read_artifact(store: LocalArtifactStore, doc: _ReadableDocument, server_max_bytes: int) -> bytes:
+    """Blocking: read the original under the size ceiling and verify it."""
+    try:
+        pdf_bytes = store.open(doc.object_key, expected_size=doc.size_bytes, max_bytes=server_max_bytes)
+    except StorageCorruption as exc:
+        raise ApiError(500, "storage_corruption", f"artifact corrupted: {exc}")
+    except Exception as exc:
+        raise ApiError(500, "storage_error", f"failed to open artifact ({type(exc).__name__})")
 
-    return JSONResponse(
-        status_code=200,
-        content={
-            "id": str(doc_id),
-            "document_version_id": str(doc_id),
-            "project_id": str(project_id),
-            "resource_id": str(res_id),
-            "artifact_id": str(art_id),
-            "logical_id": logical_id,
-            "revision": rev,
-            "sha256": doc_sha,
-            "size_bytes": size_bytes,
-            "page_count": page_cnt,
+    if len(pdf_bytes) != doc.size_bytes or hashlib.sha256(pdf_bytes).hexdigest() != doc.doc_sha:
+        raise ApiError(500, "storage_corruption", "artifact checksum or size mismatch")
+    return pdf_bytes
+
+
+async def _pdf_response(
+    request: Request, store: LocalArtifactStore, doc: _ReadableDocument, server_max_bytes: int
+) -> Response:
+    slot = _take_slot(request, "download", DEFAULT_DOWNLOAD_CONCURRENCY, "downloads")
+    try:
+        pdf_bytes = await _run_blocking(request, "download", _read_artifact, store, doc, server_max_bytes)
+    finally:
+        slot.release()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Length": str(len(pdf_bytes)),
+            "Content-Disposition": f'attachment; filename="{doc.document_id}.pdf"',
         },
     )
 
 
-async def get_page_handler(
+async def download_document_handler(
     document_id: uuid.UUID,
-    page_index: int,
     request: Request,
     conn: psycopg.Connection = Depends(get_db),
+    store: LocalArtifactStore = Depends(get_store),
     actor_id: uuid.UUID = Depends(get_authenticated_actor),
-) -> JSONResponse:
-    """Get per-page normalized geometry and dimensions (SPEC 8)."""
+) -> Response:
+    """Authorized project-scoped original PDF download endpoint."""
+    server_max_bytes = getattr(request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES)
+    doc = await _run_blocking(request, "meta", _readable_document, conn, actor_id, document_id, server_max_bytes)
+    return await _pdf_response(request, store, doc, server_max_bytes)
+
+
+async def get_document_handler(
+    document_id: uuid.UUID,
+    request: Request,
+    conn: psycopg.Connection = Depends(get_db),
+    store: LocalArtifactStore = Depends(get_store),
+    actor_id: uuid.UUID = Depends(get_authenticated_actor),
+) -> Response:
+    """Get document version metadata, or download if Accept: application/pdf."""
+    server_max_bytes = getattr(request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES)
+    doc = await _run_blocking(request, "meta", _readable_document, conn, actor_id, document_id, server_max_bytes)
+
+    if "application/pdf" in request.headers.get("Accept", ""):
+        return await _pdf_response(request, store, doc, server_max_bytes)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "id": str(doc.document_id),
+            "document_version_id": str(doc.document_id),
+            "project_id": str(doc.project_id),
+            "resource_id": str(doc.resource_id),
+            "artifact_id": str(doc.artifact_id),
+            "logical_id": doc.logical_id,
+            "revision": doc.revision,
+            "sha256": doc.doc_sha,
+            "size_bytes": doc.size_bytes,
+            "page_count": doc.page_count,
+        },
+    )
+
+
+def _get_page(conn: psycopg.Connection, actor_id: uuid.UUID, document_id: uuid.UUID, page_index: int) -> dict:
     doc_row = conn.execute(
         "SELECT project_id, page_count FROM document_versions WHERE id = %s",
         (document_id,),
     ).fetchone()
-
     if doc_row is None:
         raise ApiError(404, "not_found", "document not found")
 
     project_id, page_count = doc_row
 
     try:
-        decision = authorize(
-            conn, project_id, actor_id, "read_licensed_pdf_and_public_questions"
-        )
+        decision = authorize(conn, project_id, actor_id, "read_licensed_pdf_and_public_questions")
         if decision.condition == "explicit_grant":
             raise PermissionDenied("observer requires explicit grant")
     except NotFound:
@@ -827,22 +838,30 @@ async def get_page_handler(
         """,
         (document_id, page_index),
     ).fetchone()
-
     if page_row is None:
         raise ApiError(404, "not_found", f"page {page_index} not found")
 
     idx, label, rot, width, height = page_row
-    return JSONResponse(
-        status_code=200,
-        content={
-            "document_version_id": str(document_id),
-            "page_index": idx,
-            "page_label": label,
-            "rotation": rot,
-            "width_pt": float(width),
-            "height_pt": float(height),
-        },
-    )
+    return {
+        "document_version_id": str(document_id),
+        "page_index": idx,
+        "page_label": label,
+        "rotation": rot,
+        "width_pt": float(width),
+        "height_pt": float(height),
+    }
+
+
+async def get_page_handler(
+    document_id: uuid.UUID,
+    page_index: int,
+    request: Request,
+    conn: psycopg.Connection = Depends(get_db),
+    actor_id: uuid.UUID = Depends(get_authenticated_actor),
+) -> JSONResponse:
+    """Get per-page normalized geometry and dimensions (SPEC 8)."""
+    content = await _run_blocking(request, "meta", _get_page, conn, actor_id, document_id, page_index)
+    return JSONResponse(status_code=200, content=content)
 
 
 # Route registrations

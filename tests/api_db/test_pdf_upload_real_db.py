@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import threading
 import unittest
 from pathlib import Path
@@ -577,6 +578,99 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 self.assertEqual(cur.fetchone()["cnt"], 1)
                 cur.execute("SELECT count(*) AS cnt FROM audit_events WHERE project_id = %s AND action = 'document.rejected'", (project_id,))
                 self.assertEqual(cur.fetchone()["cnt"], 1)
+
+    def test_rejected_replay_is_the_stored_original_and_never_recomputed(self) -> None:
+        """PM-REVIEW on #73: replay of a rejected request re-ran the parser.
+        The original response is saved with the operation (0009) and replayed
+        verbatim, even if the parser, limits or code would answer differently."""
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        token = issue_actor_token(owner_id, self.secret)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/pdf",
+            "Idempotency-Key": "stored-replay-1",
+        }
+        url = f"/api/v1/documents?project_id={project_id}&logical_id=doc-stored"
+        enc = bad_pdfs.build("encrypted")
+
+        first = self.client.post(url, headers={**headers, "X-Request-Id": "req-first"}, content=enc)
+        self.assertEqual(first.status_code, 422)
+        original = first.json()["error"]
+        self.assertEqual((original["code"], original["request_id"]), ("unsupported_encryption", "req-first"))
+
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM operation_results WHERE project_id = %s", (project_id,))
+                saved = cur.fetchall()
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["http_status"], 422)
+        stored = self._decode_jsonb(saved[0]["response_body"])
+        self.assertEqual(stored["code"], "unsupported_encryption")
+        self.assertNotIn("request_id", stored)  # per-request, supplied at replay time
+        self.assertEqual({k: v for k, v in original.items() if k != "request_id"}, stored)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("a replay must not run the parser again")
+
+        # 1. Replay touches neither the inspector nor the geometry extractor.
+        with patch("lab_api.documents.inspect_pdf", side_effect=forbidden), \
+                patch("lab_api.documents.extract_pages", side_effect=forbidden):
+            replay = self.client.post(url, headers={**headers, "X-Request-Id": "req-replay"}, content=enc)
+        self.assertEqual(replay.status_code, 422)
+        self.assertEqual(
+            {k: v for k, v in replay.json()["error"].items() if k != "request_id"}, stored
+        )
+        self.assertEqual(replay.json()["error"]["request_id"], "req-replay")
+
+        # 2. Even if today's parser would accept the file, the original stands.
+        accepting = types.SimpleNamespace(
+            outcome="accept", reason=None, sha256="0" * 64, size_bytes=1, page_count=1, warnings=()
+        )
+        with patch("lab_api.documents.inspect_pdf", return_value=accepting):
+            changed = self.client.post(url, headers=headers, content=enc)
+        self.assertEqual(changed.status_code, 422)
+        self.assertEqual(changed.json()["error"]["code"], "unsupported_encryption")
+
+        # 3. Replays created no new operation, result or audit event.
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                for table, extra in (("operations", " AND kind = 'document.import'"),
+                                     ("operation_results", ""),
+                                     ("audit_events", " AND action = 'document.rejected'")):
+                    cur.execute(f"SELECT count(*) AS cnt FROM {table} WHERE project_id = %s{extra}", (project_id,))
+                    self.assertEqual(cur.fetchone()["cnt"], 1, table)
+
+    def test_failed_operation_without_a_saved_result_is_not_recomputed(self) -> None:
+        """An operation that failed before 0009 has no saved response: the
+        retry is a 409 explaining that, not a guess from re-parsing."""
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+            op_id = uuid.uuid4()
+            logical_id = "doc-legacy"
+            request_hash = hashlib.sha256(f"{logical_id}:{hashlib.sha256(self.f01_1).hexdigest()}".encode()).hexdigest()
+            with conn.transaction():
+                conn.execute(
+                    "INSERT INTO operations (id, project_id, kind, actor_id, status) "
+                    "VALUES (%s, %s, 'document.import', %s, 'failed')",
+                    (op_id, project_id, owner_id),
+                )
+                conn.execute(
+                    "INSERT INTO idempotency_keys (project_id, idempotency_scope, idempotency_key, request_hash, operation_id) "
+                    "VALUES (%s, 'document.import', 'legacy-key', %s, %s)",
+                    (project_id, request_hash, op_id),
+                )
+        token = issue_actor_token(owner_id, self.secret)
+        with patch("lab_api.documents.inspect_pdf", side_effect=AssertionError("must not re-parse")):
+            res = self.client.post(
+                f"/api/v1/documents?project_id={project_id}&logical_id={logical_id}",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/pdf",
+                         "Idempotency-Key": "legacy-key"},
+                content=self.f01_1,
+            )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.json()["error"]["code"], "conflict")
+        self.assertIn("not retained", res.json()["error"]["message"])
 
     def test_invalid_page_geometry_rejection_and_atomic_replay_in_real_db(self) -> None:
         """Invalid page geometry persists failure without outbox; replay returns original 422, changed body is 409."""
