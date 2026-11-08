@@ -16,6 +16,14 @@ monotone in each of the three positions. The tolerance is an input fixed from
 the image resolution or a rubric before freeze; it is never widened after
 seeing participant answers.
 
+Numerics fail closed. Every input is normalized to a float (an integer beyond the
+float range is a reason code, not an ``OverflowError``), and every intermediate and
+final value, including the multiplier and ``difference``, must be finite, ordered
+(``low <= value <= high``) and have a positive width; otherwise the result is
+``AxisCalibrationError('unbounded_error')``. A pixel tolerance smaller than one float
+step at the position's magnitude is refused, so a zero-width interval is never
+published as an exact estimate.
+
 Covered cases: linear and log axes, dual axes (a reading must name its axis),
 truncated axes (flagged in the result), a label multiplier ("in thousands",
 "in millions"), percent vs percentage point (a difference of two percentages
@@ -53,9 +61,28 @@ class AxisCalibrationError(ValueError):
 
 
 def _number(value: object, code: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise AxisCalibrationError(code)
-    return float(value)
+    try:
+        result = float(value)  # an int beyond the float range raises OverflowError, not a reason code
+    except OverflowError:
+        raise AxisCalibrationError(code) from None
+    if not math.isfinite(result):
+        raise AxisCalibrationError(code)
+    return result
+
+
+def _finite(value: float) -> float:
+    """Every intermediate and final result must be finite: a float that overflowed, or that a
+    non-finite operand turned into inf or nan, is not a measurement."""
+    if not math.isfinite(value):
+        raise AxisCalibrationError("unbounded_error")
+    return value
+
+
+def _ordered(low: float, value: float, high: float) -> None:
+    if not low <= value <= high:
+        raise AxisCalibrationError("unbounded_error")
 
 
 @dataclass(frozen=True)
@@ -96,35 +123,40 @@ class AxisCalibration:
         if self.scale not in SCALES:
             raise AxisCalibrationError("invalid_scale")
         for name in ("pixel_a", "value_a", "pixel_b", "value_b"):
-            _number(getattr(self, name), "invalid_number")
-        if _number(self.pixel_tolerance, "invalid_tolerance") <= 0:
+            object.__setattr__(self, name, _number(getattr(self, name), "invalid_number"))
+        object.__setattr__(self, "pixel_tolerance", _number(self.pixel_tolerance, "invalid_tolerance"))
+        object.__setattr__(self, "multiplier", _number(self.multiplier, "invalid_multiplier"))
+        if self.pixel_tolerance <= 0:
             raise AxisCalibrationError("invalid_tolerance")
-        if _number(self.multiplier, "invalid_multiplier") <= 0:
+        if self.multiplier <= 0:
             raise AxisCalibrationError("invalid_multiplier")
         if self.unit is not None and (not isinstance(self.unit, str) or not 1 <= len(self.unit) <= 32):
             raise AxisCalibrationError("invalid_unit")
         if self.truncated is not None and not isinstance(self.truncated, bool):
             raise AxisCalibrationError("invalid_truncated")
+        _finite(self.pixel_b - self.pixel_a)  # a span that overflows would silently read as zero
         if abs(self.pixel_b - self.pixel_a) <= 2 * self.pixel_tolerance:
             raise AxisCalibrationError("ticks_too_close")  # the tick error could flip the axis
         if self.value_a == self.value_b:
             raise AxisCalibrationError("ticks_equal_value")
         if self.scale == "log" and (self.value_a <= 0 or self.value_b <= 0):
             raise AxisCalibrationError("log_needs_positive_ticks")
+        if self.scale == "linear":
+            _finite(self.value_b - self.value_a)
 
     def _map(self, pixel: float, pa: float, pb: float) -> float:
-        t = (pixel - pa) / (pb - pa)
+        t = _finite(_finite(pixel - pa) / _finite(pb - pa))
         if self.scale == "linear":
-            result = self.value_a + (self.value_b - self.value_a) * t
+            result = _finite(self.value_a + _finite(_finite(self.value_b - self.value_a) * t))
         else:
             la, lb = math.log(self.value_a), math.log(self.value_b)
             try:
-                result = math.exp(la + (lb - la) * t)
+                result = math.exp(_finite(la + _finite(_finite(lb - la) * t)))
             except OverflowError:
                 raise AxisCalibrationError("unbounded_error") from None
-        if not math.isfinite(result):
-            raise AxisCalibrationError("unbounded_error")
-        return result
+            if result <= 0.0:  # underflow: a positive axis value cannot read as zero
+                raise AxisCalibrationError("unbounded_error")
+        return _finite(result)
 
     def read(self, pixel: float) -> ReadValue:
         """The value at ``pixel`` with its worst-case interval."""
@@ -132,6 +164,11 @@ class AxisCalibration:
             raise AxisCalibrationError("unbounded_error")  # the axis law is unknown: no bounded error
         px = _number(pixel, "invalid_number")
         tol = self.pixel_tolerance
+        for position in (px, self.pixel_a, self.pixel_b):
+            # a tolerance below the float resolution at this magnitude would collapse the interval
+            # to a point and publish a zero-width estimate that is not real
+            if position + tol == position or position - tol == position:
+                raise AxisCalibrationError("unbounded_error")
         low_px, high_px = sorted((self.pixel_a, self.pixel_b))
         if px < low_px - tol or px > high_px + tol:
             # two ticks do not bound an extrapolation
@@ -141,16 +178,24 @@ class AxisCalibration:
             for dp, da, db in itertools.product((-tol, tol), repeat=3)
         ]
         value = self._map(px, self.pixel_a, self.pixel_b)
+        low, high = min(candidates), max(candidates)
+        _ordered(low, value, high)
+        if not low < high:  # positive pixel tolerance and distinct ticks always give a real width
+            raise AxisCalibrationError("unbounded_error")
+        m = self.multiplier
+        value, low, high = _finite(value * m), _finite(low * m), _finite(high * m)
+        _ordered(low, value, high)
+        if not low < high:  # scaling must not squeeze the interval to a point either
+            raise AxisCalibrationError("unbounded_error")
         notes: list[str] = []
         if self.truncated is True:
             notes.append("axis_truncated")
         elif self.truncated is None:
             notes.append("axis_truncation_unknown")
-        m = self.multiplier
         return ReadValue(
-            value=value * m,
-            low=min(candidates) * m,
-            high=max(candidates) * m,
+            value=value,
+            low=low,
+            high=high,
             unit=self.unit,
             value_source=ESTIMATED,
             axis_id=self.axis_id,
@@ -187,13 +232,19 @@ def read_value(axes: Mapping[str, AxisCalibration], axis_id: str | None, pixel: 
 def difference(a: ReadValue, b: ReadValue) -> ReadValue:
     """``a - b`` with interval arithmetic. A difference of two percentages is in
     percentage points (``pp``); other units must match."""
+    if not isinstance(a, ReadValue) or not isinstance(b, ReadValue):
+        raise AxisCalibrationError("invalid_reading")
     if a.unit != b.unit:
         raise AxisCalibrationError("unit_mismatch")
     unit = "pp" if a.unit == "%" else a.unit
+    value = _finite(_number(a.value, "invalid_number") - _number(b.value, "invalid_number"))
+    low = _finite(_number(a.low, "invalid_number") - _number(b.high, "invalid_number"))
+    high = _finite(_number(a.high, "invalid_number") - _number(b.low, "invalid_number"))
+    _ordered(low, value, high)
     return ReadValue(
-        value=a.value - b.value,
-        low=a.low - b.high,
-        high=a.high - b.low,
+        value=value,
+        low=low,
+        high=high,
         unit=unit,
         value_source=DERIVED,
         axis_id=None,

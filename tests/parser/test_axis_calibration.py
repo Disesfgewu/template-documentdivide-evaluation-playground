@@ -210,6 +210,92 @@ class DifferenceAndErrorBarTests(ErrorCode, unittest.TestCase):
         self.assertCode("inconsistent_error_bar", read_error_bar, cal(), 150.0, 200.0, 300.0)
 
 
+class NumericRobustnessTests(ErrorCode, unittest.TestCase):
+    """Finite inputs can still overflow or lose all resolution in the arithmetic: that must end in a
+    fixed error code, never in inf, nan, a silent zero or a zero-width interval (PM review on 076ab85)."""
+
+    def test_a_multiplier_that_overflows_the_value_is_refused(self):
+        self.assertCode("unbounded_error", cal(multiplier=1e308, unit=None).read, 250.0)
+
+    def test_a_difference_that_overflows_is_refused(self):
+        a = AxisCalibration("a", "linear", 0, 0, 100, 1e308, 0.1, unit=None).read(90)
+        b = AxisCalibration("b", "linear", 0, -1e308, 100, 0, 0.1, unit=None).read(10)
+        self.assertTrue(all(map(math.isfinite, (a.value, a.low, a.high, b.value, b.low, b.high))))
+        self.assertCode("unbounded_error", difference, a, b)
+
+    def test_a_tick_span_that_overflows_is_not_read_as_zero(self):
+        # pb - pa overflows to inf: the old code silently returned value=low=high=0 (the middle is 50)
+        self.assertCode("unbounded_error", AxisCalibration, "y", "linear", -1e308, 0, 1e308, 100, 0.5)
+        self.assertCode("unbounded_error", AxisCalibration, "y", "linear", 0, -1e308, 100, 1e308, 0.5)
+
+    def test_integers_beyond_the_float_range_get_reason_codes_not_overflow_errors(self):
+        huge = 10 ** 1000
+        for field in ("pixel_a", "value_a", "pixel_b", "value_b"):
+            kwargs = dict(axis_id="y", scale="linear", pixel_a=0, value_a=0, pixel_b=100, value_b=100, pixel_tolerance=0.5)
+            kwargs[field] = huge
+            self.assertCode("invalid_number", AxisCalibration, **kwargs)
+        self.assertCode("invalid_tolerance", cal, pixel_tolerance=huge)
+        self.assertCode("invalid_multiplier", cal, multiplier=huge)
+        self.assertCode("invalid_number", cal().read, huge)
+
+    def test_large_but_representable_numbers_still_work(self):
+        r = AxisCalibration("y", "linear", 0, 0, 100, 1e300, 0.5).read(50)
+        self.assertTrue(r.low < r.value < r.high)
+        self.assertAlmostEqual(r.value / 5e299, 1.0)
+        r = cal(multiplier=1e300, unit=None, value_b=1.0).read(250.0)  # a huge multiplier on a small value
+        self.assertTrue(math.isfinite(r.high) and r.low < r.value < r.high)
+
+    def test_a_tolerance_below_the_float_resolution_is_refused_not_published_as_exact(self):
+        # at 1e300 pixels 0.5 px is far below one float step: every corner equals the centre
+        self.assertCode("unbounded_error", AxisCalibration("y", "linear", 0, 0, 1e300, 100, 0.5).read, 5e299)
+
+    def test_a_tolerance_lost_at_only_some_positions_would_understate_the_interval(self):
+        # pa = 0 keeps its 0.5 px, but 0.5 px vanishes at 5e16 and 1e17 (one float step is 8 and 16):
+        # the interval would still have a width, yet it would ignore two of the three uncertainties
+        c = AxisCalibration("y", "linear", 0, 0, 1e17, 100, 0.5)
+        self.assertCode("unbounded_error", c.read, 5e16)
+
+    def test_scaling_that_squeezes_the_interval_to_a_point_is_refused(self):
+        # subnormal scaling leaves too few float steps: low and high would become equal
+        self.assertCode("unbounded_error", AxisCalibration("y", "linear", 400, 1, 100, 2, 0.5, multiplier=1e-322).read, 250.0)
+
+    def test_a_log_reading_that_underflows_to_zero_is_refused(self):
+        c = AxisCalibration("y", "log", 0, 1e-200, 10, 5e-324, 0.1)
+        self.assertCode("unbounded_error", c.read, 10.0)  # the value falls below the smallest positive float
+
+    def test_difference_checks_its_inputs_and_its_order(self):
+        good = cal().read(250.0)
+        from dataclasses import replace
+        self.assertCode("invalid_reading", difference, good, "x")
+        self.assertCode("invalid_reading", difference, None, good)
+        self.assertCode("unbounded_error", difference, replace(good, low=good.high + 1.0), good)  # low above value
+        self.assertCode("invalid_number", difference, replace(good, value=float("nan")), good)
+        self.assertCode("invalid_number", difference, replace(good, high=float("inf")), good)
+
+    def test_any_wide_range_input_is_a_reason_code_or_a_finite_ordered_interval(self):
+        rng = random.Random(23)
+        codes_seen, ok = set(), 0
+        for _ in range(4000):
+            mag = lambda: rng.choice((-1, 1)) * 10 ** rng.uniform(-30, 308) if rng.random() < 0.7 else rng.uniform(-1e3, 1e3)
+            try:
+                c = AxisCalibration("y", rng.choice(("linear", "log")), mag(), mag(), mag(), mag(),
+                                    10 ** rng.uniform(-10, 5), multiplier=10 ** rng.uniform(-330, 308))
+                r = c.read(mag())
+            except AxisCalibrationError as exc:
+                codes_seen.add(exc.code)
+                continue
+            ok += 1
+            self.assertTrue(all(math.isfinite(x) for x in (r.value, r.low, r.high)), (c, r))
+            self.assertTrue(r.low <= r.value <= r.high and r.low < r.high, (c, r))
+        self.assertGreater(ok, 20)
+        self.assertTrue(codes_seen <= {"invalid_number", "invalid_tolerance", "invalid_multiplier", "ticks_too_close",
+                                       "ticks_equal_value", "log_needs_positive_ticks", "unbounded_error",
+                                       "outside_calibrated_range"}, codes_seen)
+
+    def test_error_bar_ends_fail_closed_too(self):
+        self.assertCode("unbounded_error", read_error_bar, cal(multiplier=1e308, unit=None), 250.0, 200.0, 300.0)
+
+
 class ObservationFieldsTests(unittest.TestCase):
     def test_estimate_stores_its_interval_as_the_table_requires(self):
         f = cal().read(250.0).to_observation_fields()
