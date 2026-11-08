@@ -79,10 +79,14 @@ class TestOperationResults(FreshDatabase):
             with self.assertRaises(UniqueViolation):
                 self.insert(conn, p, op, status=409)
 
-    def test_status_must_be_an_error_status_and_body_an_object(self):
+    def test_status_must_be_an_http_response_status_and_body_an_object(self):
         with self.connect() as conn:
             p, a = self.make_project(conn)
-            for status in (200, 201, 399, 600, 0):
+            for status in (200, 201, 422, 599):  # successes and rejections are both stored
+                op = self.make_operation(conn, p, a)
+                with self.subTest(valid=status):
+                    self.insert(conn, p, op, status=status)
+            for status in (0, 100, 199, 600, 999):
                 op = self.make_operation(conn, p, a)
                 with self.subTest(status=status), self.assertRaises(CheckViolation):
                     self.insert(conn, p, op, status=status)

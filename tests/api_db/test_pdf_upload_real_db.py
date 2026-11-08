@@ -702,6 +702,35 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                     cur.execute(f"SELECT count(*) AS cnt FROM {table} WHERE project_id = %s{extra}", (project_id,))
                     self.assertEqual(cur.fetchone()["cnt"], 1, table)
 
+    def test_success_replay_is_the_stored_original_including_flags_and_warnings(self) -> None:
+        """A flagged upload (repaired xref) answered 201 with flagged/warnings;
+        its replay must carry the same fields, not a reconstruction without them."""
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        headers = {"Authorization": f"Bearer {issue_actor_token(owner_id, self.secret)}",
+                   "Content-Type": "application/pdf", "Idempotency-Key": "flagged-replay-1"}
+        url = f"/api/v1/documents?project_id={project_id}&logical_id=doc-flagged"
+        pdf = bad_pdfs.build("bad_xref")
+
+        first = self.client.post(url, headers=headers, content=pdf)
+        self.assertEqual(first.status_code, 201, first.text)
+        original = first.json()
+        self.assertTrue(original["flagged"])
+        self.assertTrue(original["warnings"])
+
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM operation_results WHERE project_id = %s", (project_id,))
+                saved = cur.fetchall()
+        self.assertEqual([r["http_status"] for r in saved], [201])
+        self.assertEqual(self._decode_jsonb(saved[0]["response_body"]), original)
+
+        with patch("lab_api.documents.inspect_pdf", side_effect=AssertionError("replay must not re-inspect")):
+            replay = self.client.post(url, headers=headers, content=pdf)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual({k: v for k, v in replay.json().items() if k != "replayed"}, original)
+        self.assertIs(replay.json()["replayed"], True)
+
     def test_failed_operation_without_a_saved_result_is_not_recomputed(self) -> None:
         """An operation that failed before 0009 has no saved response: the
         retry is a 409 explaining that, not a guess from re-parsing."""

@@ -333,6 +333,23 @@ class BodyReadTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bytes(raw.body), b"%PDF")
 
 
+class OversizeCodeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_every_upload_path_reports_payload_too_large(self) -> None:
+        """SPEC 16.4 clients should not need to know the content type to
+        recognise 'body too large' (it used to be file_too_large for PDFs)."""
+        multipart = (b"--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.pdf\"\r\n"
+                     b"Content-Type: application/pdf\r\n\r\n" + b"x" * 200 + b"\r\n--B--\r\n")
+        cases = {
+            "pdf, streamed": asgi_request(b"x" * 200, "application/pdf"),
+            "multipart, streamed": asgi_request(multipart * 400, "multipart/form-data; boundary=B"),
+        }
+        for label, req in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ApiError) as ctx:
+                    await documents.read_upload_body(req, 100)
+                self.assertEqual((ctx.exception.status_code, ctx.exception.code), (413, "payload_too_large"))
+
+
 class UploadEndpointDeadlineAndReauthTests(UploadEndpointCase):
     def test_slow_body_gets_408_and_the_slot_is_released(self) -> None:
         self.app.state.upload_read_timeout_s = 0.1

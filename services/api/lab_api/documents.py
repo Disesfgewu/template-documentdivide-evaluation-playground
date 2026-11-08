@@ -362,7 +362,9 @@ async def read_upload_body(request: Request, max_bytes: int) -> RawUpload:
         try:
             body = await read_pdf_request_body(request, max_bytes=max_bytes, as_bytearray=True)
         except PdfRequestBodyError as exc:
-            raise ApiError(status_code=exc.status_code, code=exc.code, message=exc.message) from exc
+            # One code for "body too large" on every upload path.
+            code = "payload_too_large" if exc.code == "file_too_large" else exc.code
+            raise ApiError(status_code=exc.status_code, code=code, message=exc.message) from exc
         return RawUpload("pdf", raw_ct, body)
 
     if ct_lower.startswith("multipart/form-data"):
@@ -443,14 +445,22 @@ def _pick_logical_id(form_logical_id: Optional[str], hint: Optional[str]) -> str
     return val
 
 
-def _save_rejection(conn, project_id, operation_id, status: int, error: dict) -> None:
-    """Persist the original rejection response with its operation (same
-    transaction as the audit event) so a retry replays it verbatim."""
+def _save_result(conn, project_id, operation_id, status: int, body: dict) -> None:
+    """Persist the original response with its operation (same transaction as
+    the outcome) so a retry replays it verbatim. A rejection stores its error
+    object (no request_id); a success stores its body."""
     conn.execute(
         "INSERT INTO operation_results (project_id, operation_id, http_status, response_body) "
         "VALUES (%s, %s, %s, %s)",
-        (project_id, operation_id, status, Jsonb(error)),
+        (project_id, operation_id, status, Jsonb(body)),
     )
+
+
+def _replay_body(status: int, stored: dict, request_id: str) -> tuple[int, dict]:
+    """The response a retry gets from a stored original."""
+    if status >= 400:
+        return status, {"error": {**stored, "request_id": request_id}}
+    return 200, {**stored, "replayed": True}
 
 
 _UNSET = object()
@@ -487,7 +497,7 @@ def _upload_core(
         except IngestRejected:
             pass
         if op_intent_id is not None:
-            _save_rejection(conn, proj_id, op_intent_id, status, error)
+            _save_result(conn, proj_id, op_intent_id, status, error)
         return status, {"error": {**error, "request_id": ctx.request_id}}
 
     with conn.transaction():
@@ -517,6 +527,15 @@ def _upload_core(
                     raise ApiError(409, "conflict", "idempotency key already used with different request")
 
                 if op_status == "succeeded":
+                    stored_ok = conn.execute(
+                        "SELECT http_status, response_body FROM operation_results "
+                        "WHERE project_id = %s AND operation_id = %s",
+                        (proj_id, existing_op),
+                    ).fetchone()
+                    if stored_ok is not None:
+                        return _replay_body(stored_ok[0], stored_ok[1], ctx.request_id)
+                    # Operations from before 0009 have no stored response:
+                    # rebuild the identity fields from the committed rows.
                     row = conn.execute(
                         """
                         SELECT dv.id, dv.resource_id, dv.artifact_id, dv.sha256, dv.page_count,
@@ -560,8 +579,7 @@ def _upload_core(
                             409, "conflict",
                             "idempotency key was used for a failed operation whose original response was not retained",
                         )
-                    status, error = stored
-                    return status, {"error": {**error, "request_id": ctx.request_id}}
+                    return _replay_body(stored[0], stored[1], ctx.request_id)
 
                 # If op_status is 'intent' (concurrent request still running), fail closed
                 raise ApiError(409, "conflict", "idempotency key operation currently in progress")
@@ -634,7 +652,7 @@ def _upload_core(
 
         resource_id, artifact_id, revision = row
 
-        return 201, {
+        created = {
             "id": str(doc_version_id),
             "document_version_id": str(doc_version_id),
             "project_id": str(proj_id),
@@ -648,6 +666,9 @@ def _upload_core(
             "flagged": inspection.outcome == "flag",
             "warnings": list(inspection.warnings),
         }
+        if op_intent_id is not None:
+            _save_result(conn, proj_id, op_intent_id, 201, created)
+        return 201, created
 
 
 async def upload_document_handler(
