@@ -82,9 +82,13 @@ class PublicQuestionTests(unittest.TestCase):
         for name, value in payload.items():
             self.assertEqual(item[name], value)
 
-    def test_non_object_payload_is_ignored(self):
-        for p in (None, [], "x", 3):
-            self.assertEqual(set(b.public_question(self.row(p))), {"id", "question_text"})
+    def test_missing_or_invalid_language_fails_closed(self):
+        for p in (None, [], "x", 3, {}, {"language": None}):
+            with self.subTest(payload=p):
+                with self.assertRaises(ApiError) as ctx:
+                    b.public_question(self.row(p))
+                self.assertEqual((ctx.exception.status_code, ctx.exception.code),
+                                 (500, "invalid_question_payload"))
 
 
 class AuthorizationOrderTests(unittest.TestCase):
@@ -124,7 +128,7 @@ class AuthorizationOrderTests(unittest.TestCase):
 
     def test_owner_sees_a_draft_and_paging_reports_the_next_cursor(self):
         conn = MagicMock()
-        rows = [(uuid.uuid4(), f"q{i}", i, "T", "b" * 64, "general", {}) for i in range(3)]
+        rows = [(uuid.uuid4(), f"q{i}", i, "T", "b" * 64, "general", {"language": "en"}) for i in range(3)]
         conn.execute.return_value.fetchone.return_value = (BID, "draft")
         conn.execute.return_value.fetchall.return_value = rows
         with patch.object(b, "authorize", return_value=Decision("owner", None)):

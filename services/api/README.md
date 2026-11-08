@@ -31,7 +31,7 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 
 `POST /api/v1/documents`（亦有 `/documents`、`/api/v1/projects/{project_id}/documents`）、`GET /api/v1/documents/{id}`（`Accept: application/pdf` 取原檔）、`.../original`、`.../download`、`.../pages/{n}`。一律需要簽章的 Bearer actor token，project 角色由 PostgreSQL 判定；沒有在請求內自稱身分的方式。
 
-`GET /api/v1/benchmarks/{logical_id}/revisions/{revision}/questions?project_id=…&limit=…&cursor=…`：公開問題集（依 ordinal 排序、cursor 分頁、limit 1–200）。每題只輸出 id、question_text、language（若有），不含答案、facts、evidence sets 與 distractors。owner/maintainer/reviewer 可看草稿；participant 只看已凍結版本，草稿一律 404；observer 無明確授權時 403；非成員 404。
+`GET /api/v1/benchmarks/{logical_id}/revisions/{revision}/questions?project_id=…&limit=…&cursor=…`：公開問題集（依 ordinal 排序、cursor 分頁、limit 1–200）。每題只輸出 id、question_text、language，不含答案、facts、evidence sets 與 distractors。owner/maintainer/reviewer 可看草稿；participant 只看已凍結版本，草稿一律 404；observer 無明確授權時 403；非成員 404。
 
 - **先授權、再讀 body**：授權（`import_and_configure_parse`）通過後才取得 admission slot 並讀取請求內容；未授權的請求不佔 slot、不讀任何 body 位元組。
 - **有界記憶體**：同時上傳數由 slot 控制（`app.state.upload_concurrency`，預設 2；下載 `download_concurrency`，預設 2），沒有 slot 時立刻回 503 `server_busy`（`retryable: true`），不排隊。最壞記憶體約為 `上傳並行數 × 2 × (max_pdf_bytes + 64 KiB)`：multipart body 保存一份，PDF part 再切出一份。`max_pdf_bytes` 預設 512 MiB。
