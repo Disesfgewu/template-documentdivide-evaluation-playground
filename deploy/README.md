@@ -11,7 +11,7 @@ Base image: digest-pinned Debian Bookworm Python 3.12 slim (`python:3.12.13-slim
 | LAB API | `deploy/api.Dockerfile` | `8000` | `10001:10001` (`lab:lab`) | `uvicorn --factory lab_api.main:create_app --host 0.0.0.0 --port 8000` |
 | Parser HTTP | `deploy/parser.Dockerfile` | `8100` | `10001:10001` (`lab:lab`) | `uvicorn --factory lab_parser.main:create_app --host 0.0.0.0 --port 8100` |
 
-Both containers execute `uvicorn` using shell-free JSON exec array syntax (`ENTRYPOINT ["uvicorn", "--factory"]`), and drop privileges to unprivileged non-root user `10001:10001`.
+Both containers execute `uvicorn` using shell-free JSON exec array syntax (`ENTRYPOINT ["uvicorn", "--factory"]`), drop privileges to unprivileged non-root user `10001:10001`, and run with dropped capabilities (`--cap-drop=ALL --security-opt=no-new-privileges`).
 
 ## Build
 
@@ -22,13 +22,13 @@ docker build -f deploy/api.Dockerfile -t lab-api:dev .
 docker build -f deploy/parser.Dockerfile -t lab-parser:dev .
 ```
 
-The root `.dockerignore` excludes version control (`.git`), private modules/staff tooling (`.agy-staff`), development caches, credentials, tests, fixtures, docs, frontend sources, and worker code.
+The root `.dockerignore` denies all files by default, selectively allowing only the required Dockerfiles, exact lockfiles, and application runtime source packages. Secrets, private staff tooling, tests, fixtures, frontend, worker, and logs are denied everywhere.
 
 ## Runtime Volume & Configuration
 
 - **Artifact Volume**: `/var/lib/lab/artifacts`
   - Writable volume owned by `10001:10001`.
-  - When mounting a host directory, ensure the host directory is writable by UID 10001 (e.g. `chmod 777 host-dir` or owned by `10001:10001`).
+  - For persistent storage, use a Docker named volume (e.g. `docker volume create lab-artifacts` mounted to `/var/lib/lab/artifacts`), or an explicitly owned host bind mount directory with permissions `0750` (owned by UID/GID 10001:10001) or `0770` with a shared group via `--group-add <gid>`. World-writable permissions (`chmod 777`) violate `LocalArtifactStore` security preconditions and are rejected.
 - **Required Environment Variables**:
   - API:
     - `LAB_ENV`: `dev` or `test`
@@ -40,22 +40,23 @@ The root `.dockerignore` excludes version control (`.git`), private modules/staf
     - `LAB_PARSER_ENV`: `dev` or `test`
     - `LAB_PARSER_ARTIFACT_ROOT`: `/var/lib/lab/artifacts`
 
-## Run Example (with Resource Limits & Read-Only Root)
+## Run Example (with Resource Limits, Read-Only Root, and Dropped Capabilities)
 
 ```bash
 # 1. Start PostgreSQL + pgvector
 docker compose -f deploy/compose.dev.yml up -d --wait
 
-# 2. Host artifact mount directory
-mkdir -p /tmp/lab-artifacts && chmod 777 /tmp/lab-artifacts
+# 2. Named volume for artifacts
+docker volume create lab-artifacts
 
 # 3. Start API container
 docker run -d --name lab-api \
   --network host \
   --cpus="1.0" --memory="512m" --pids-limit=100 \
   --read-only \
+  --cap-drop=ALL --security-opt=no-new-privileges \
   --tmpfs /tmp:rw,nosuid,size=64m \
-  -v /tmp/lab-artifacts:/var/lib/lab/artifacts \
+  -v lab-artifacts:/var/lib/lab/artifacts \
   -e LAB_ENV=dev \
   -e LAB_PROVIDER_MODE=mock \
   -e LAB_DATABASE_URL=postgresql://lab:lab-dev-only@127.0.0.1:55432/lab \
@@ -68,8 +69,9 @@ docker run -d --name lab-parser \
   --network host \
   --cpus="1.0" --memory="512m" --pids-limit=100 \
   --read-only \
+  --cap-drop=ALL --security-opt=no-new-privileges \
   --tmpfs /tmp:rw,nosuid,size=64m \
-  -v /tmp/lab-artifacts:/var/lib/lab/artifacts \
+  -v lab-artifacts:/var/lib/lab/artifacts \
   -e LAB_PARSER_ENV=dev \
   -e LAB_PARSER_ARTIFACT_ROOT=/var/lib/lab/artifacts \
   lab-parser:dev
