@@ -18,9 +18,9 @@ import psycopg
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from lab_db.repo import NotFound, PermissionDenied, authorize
-
+# .documents puts db/ and contracts/ on sys.path, so it is imported before lab_db.
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db, resolve_project_id
+from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
 
 router = APIRouter()
 
