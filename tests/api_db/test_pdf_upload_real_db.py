@@ -969,7 +969,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(res_conflict.status_code, 409)
 
         # 2. Rejected import replay under restricted role
-        empty_pdf = bad_pdfs.build_empty_bytes()
+        empty_pdf = bad_pdfs.build("empty")
         res_rej1 = client.post(
             f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-rej",
             headers={
@@ -1019,7 +1019,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             observed_actor.append(row[0] if row else None)
             return original_record_rejection(conn, **kwargs)
 
-        corrupt_pdf = bad_pdfs.build_header_only()
+        corrupt_pdf = bad_pdfs.build("truncated")
         with patch("lab_db.ingest._record_rejection", side_effect=spy_record_rejection):
             res = client.post(
                 f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-corrupt",
