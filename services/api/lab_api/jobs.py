@@ -114,7 +114,13 @@ def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -
 async def get_job_handler(job_id: uuid.UUID, request: Request,
                           conn: psycopg.Connection = Depends(get_db),
                           actor_id: uuid.UUID = Depends(get_authenticated_actor)) -> JSONResponse:
-    """Get job status and recent transitions without lease tokens."""
+    """Get job status and up to 50 recent transitions without lease tokens.
+
+    Each reason is bounded to 2000 Unicode characters (at most 8000 UTF-8
+    bytes). Overlong raw or redacted reasons are omitted entirely and carry
+    ``reason_truncated=true``; short reasons are credential-redacted.
+    Original database audit records are preserved. Staff project access only.
+    """
     return JSONResponse(status_code=200, content=await _run_blocking(request, "meta", _get_job, conn, actor_id, job_id))
 
 

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -209,6 +210,30 @@ class JobStatusRealDbTests(FreshDatabase):
         self.assertGreater(len(large_reason), MAX_REASON_CHARS)
         with self.connect() as c:
             jobs.finish(c, p, lease, "failed", large_reason)
+
+        # Assert actual PostgreSQL rows before Python's fallback can hide an
+        # accidentally unbounded SQL projection.
+        with self.connect() as c:
+            original_execute = c.execute
+            snapshots = []
+
+            def capture_snapshot(query, *args, **kwargs):
+                cursor = original_execute(query, *args, **kwargs)
+                if "FROM jobs j" in str(query) and "LEFT JOIN" in str(query):
+                    rows = cursor.fetchall()
+                    snapshots.append(rows)
+                    self.assertEqual(rows[0][10], REASON_TRUNCATED_MARKER)
+                    self.assertTrue(rows[0][12])
+                    for row in rows:
+                        if row[10] is not None:
+                            self.assertLessEqual(len(row[10]), MAX_REASON_CHARS)
+                            self.assertLessEqual(len(row[10].encode("utf-8")), 4 * MAX_REASON_CHARS)
+                    return SimpleNamespace(fetchall=lambda: rows)
+                return cursor
+
+            c.execute = capture_snapshot
+            _get_job(c, owner, job)
+            self.assertEqual(len(snapshots), 1)
 
         for actor in (owner, roles["reviewer"]):
             res = self.get_as(actor, job)

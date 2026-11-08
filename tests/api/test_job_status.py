@@ -201,6 +201,16 @@ class JobStatusTests(unittest.TestCase):
         self.assertEqual(out["transitions"][0]["reason"], j.REASON_TRUNCATED_MARKER)
         self.assertTrue(out["transitions"][0]["reason_truncated"])
 
+    def test_redaction_expansion_is_bounded_after_masking(self):
+        reason = "key=x " * 300
+        self.assertLessEqual(len(reason), j.MAX_REASON_CHARS)
+        self.assertGreater(len(j.redact(reason)), j.MAX_REASON_CHARS)
+        c = conn(transitions=[("queued", "running", reason, T)])
+        with patch.object(j, "authorize", return_value=Decision("owner", None)):
+            out = j._get_job(c, uuid.uuid4(), uuid.uuid4())
+        self.assertEqual(out["transitions"][0]["reason"], j.REASON_TRUNCATED_MARKER)
+        self.assertTrue(out["transitions"][0]["reason_truncated"])
+
     def test_snapshot_single_query_structure(self):
         c = conn(0)
         with patch.object(j, "authorize", return_value=Decision("owner", None)):
