@@ -128,16 +128,24 @@ class Change:
     outbox_topic: Optional[str] = None
     outbox_payload: Optional[dict] = None
     trace_id: Optional[str] = None
+    operation_id: Optional[uuid.UUID] = None
 
 
 def record_change(conn: psycopg.Connection, ch: Change) -> uuid.UUID:
     """Create a new resource version with its lineage, audit event and outbox
     event atomically. Returns the new resource_versions.id."""
-    rv_id, op_id = uuid.uuid4(), uuid.uuid4()
+    rv_id = uuid.uuid4()
+    op_id = ch.operation_id or uuid.uuid4()
     with conn.transaction():
-        conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, trace_id, status, finished_at) "
-                     "VALUES (%s, %s, %s, %s, %s, 'succeeded', now())",
-                     (op_id, ch.project_id, ch.operation_kind, ch.actor_id, ch.trace_id))
+        if ch.operation_id is not None:
+            conn.execute(
+                "UPDATE operations SET status = 'succeeded', finished_at = now() WHERE id = %s",
+                (op_id,),
+            )
+        else:
+            conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, trace_id, status, finished_at) "
+                         "VALUES (%s, %s, %s, %s, %s, 'succeeded', now())",
+                         (op_id, ch.project_id, ch.operation_kind, ch.actor_id, ch.trace_id))
         conn.execute("INSERT INTO resource_versions (id, project_id, resource_type, logical_id, revision, "
                      "content_hash, c14n_version, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                      (rv_id, ch.project_id, ch.resource_type, ch.logical_id, ch.revision,
@@ -157,7 +165,7 @@ def record_change(conn: psycopg.Connection, ch: Change) -> uuid.UUID:
     return rv_id
 
 
-APPEND_ONLY_TABLES = ("audit_events", "benchmark_transitions", "job_transitions", "graph_checkpoints",
+APPEND_ONLY_TABLES = ("audit_events", "operation_results", "benchmark_transitions", "job_transitions", "graph_checkpoints",
                       "log_events", "submissions", "retrieved_hits", "citations",
                       "visual_observations", "evidence_verifications",
                       "embedding_spaces", "vector_items", "vector_item_regions", "vector_index_revisions",
