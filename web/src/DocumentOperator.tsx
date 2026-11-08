@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   downloadDocument,
   uploadDocument,
@@ -43,6 +43,17 @@ export function DocumentOperator({
     file: File | Blob;
     logicalId: string;
   } | null>(null);
+
+  // Active request cancellation controllers
+  const uploadAbortControllerRef = useRef<AbortController | null>(null);
+  const downloadAbortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      uploadAbortControllerRef.current?.abort();
+      downloadAbortControllerRef.current?.abort();
+    };
+  }, []);
 
   // Download state
   const [downloadDocId, setDownloadDocId] = useState("");
@@ -123,6 +134,9 @@ export function DocumentOperator({
       };
     }
 
+    const controller = new AbortController();
+    uploadAbortControllerRef.current = controller;
+
     setIsUploading(true);
     try {
       const res = await uploadDocument({
@@ -132,6 +146,7 @@ export function DocumentOperator({
         logicalId: logicalId.trim() || undefined,
         idempotencyKey,
         fetchFn,
+        signal: controller.signal,
       });
 
       if (res.ok) {
@@ -140,7 +155,8 @@ export function DocumentOperator({
         setUploadResult(res.data);
       } else {
         // Preserve key for ALL ambiguous outcomes:
-        // - network failure / timeout
+        // - user cancel / timeout
+        // - network failure
         // - any HTTP 5xx (500, 502, 503, 504)
         // - malformed / failed 2xx (e.g. 201 with invalid response shape)
         // - HTTP 408 Request Timeout
@@ -148,8 +164,15 @@ export function DocumentOperator({
         // ambiguous attempt. Keep the key until success or the inputs change.
         setUploadError(res.error);
       }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setUploadError({
+        message: `上傳失敗（${msg}）`,
+        code: "upload_error",
+      });
     } finally {
       setIsUploading(false);
+      uploadAbortControllerRef.current = null;
     }
   };
 
@@ -190,6 +213,9 @@ export function DocumentOperator({
       return;
     }
 
+    const controller = new AbortController();
+    downloadAbortControllerRef.current = controller;
+
     setIsDownloading(true);
     try {
       const res = await downloadDocument({
@@ -197,6 +223,7 @@ export function DocumentOperator({
         token: trimmedToken,
         fetchFn,
         triggerSave,
+        signal: controller.signal,
       });
 
       if (res.ok) {
@@ -207,8 +234,15 @@ export function DocumentOperator({
       } else {
         setDownloadError(res.error);
       }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDownloadError({
+        message: `下載失敗（${msg}）`,
+        code: "download_error",
+      });
     } finally {
       setIsDownloading(false);
+      downloadAbortControllerRef.current = null;
     }
   };
 
@@ -282,13 +316,29 @@ export function DocumentOperator({
             />
           </div>
 
-          <button
-            type="submit"
-            disabled={isUploading}
-            style={{ padding: "0.4rem 1rem", cursor: isUploading ? "not-allowed" : "pointer" }}
-          >
-            {isUploading ? "上傳中…" : "上傳 PDF"}
-          </button>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <button
+              type="submit"
+              disabled={isUploading}
+              style={{ padding: "0.4rem 1rem", cursor: isUploading ? "not-allowed" : "pointer" }}
+            >
+              {isUploading ? "上傳中…" : "上傳 PDF"}
+            </button>
+            {isUploading && (
+              <button
+                type="button"
+                onClick={() => uploadAbortControllerRef.current?.abort()}
+                style={{
+                  padding: "0.4rem 1rem",
+                  cursor: "pointer",
+                  backgroundColor: "#fff0f0",
+                  borderColor: "#f99",
+                }}
+              >
+                取消上傳
+              </button>
+            )}
+          </div>
         </form>
 
         {/* Upload State Display */}
@@ -388,13 +438,29 @@ export function DocumentOperator({
             />
           </div>
 
-          <button
-            type="submit"
-            disabled={isDownloading}
-            style={{ padding: "0.4rem 1rem", cursor: isDownloading ? "not-allowed" : "pointer" }}
-          >
-            {isDownloading ? "下載中…" : "下載 PDF"}
-          </button>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <button
+              type="submit"
+              disabled={isDownloading}
+              style={{ padding: "0.4rem 1rem", cursor: isDownloading ? "not-allowed" : "pointer" }}
+            >
+              {isDownloading ? "下載中…" : "下載 PDF"}
+            </button>
+            {isDownloading && (
+              <button
+                type="button"
+                onClick={() => downloadAbortControllerRef.current?.abort()}
+                style={{
+                  padding: "0.4rem 1rem",
+                  cursor: "pointer",
+                  backgroundColor: "#fff0f0",
+                  borderColor: "#f99",
+                }}
+              >
+                取消下載
+              </button>
+            )}
+          </div>
         </form>
 
         {/* Download State Display */}
@@ -457,6 +523,12 @@ export function DocumentOperator({
       <section aria-label="系統限制與功能說明" style={{ padding: "0.75rem", backgroundColor: "#f9f9f9" }}>
         <h4>系統限制與功能說明</h4>
         <ul>
+          <li>
+            <strong>檔案容量上限</strong>：依據規範，單一 PDF 檔案上限為 512 MiB；錯誤回應上限為 64 KiB。
+          </li>
+          <li>
+            <strong>傳輸時限與取消</strong>：上傳與下載具備逾時中斷保護與串流保護，並支援使用者操作取消。
+          </li>
           <li>
             <strong>後端服務可用性</strong>：文件上傳與授權下載需依賴後端文件服務部署支援；若後端尚未啟用該服務，相關 API 請求將回傳 404。
           </li>

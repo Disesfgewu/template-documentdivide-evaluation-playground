@@ -667,4 +667,442 @@ describe("downloadDocument", () => {
       expect(result.error.code).toBe("empty_file");
     }
   });
+
+  describe("bounded streaming, Content-Length checks, and timeouts", () => {
+    it("rejects oversized Content-Length header without buffering stream", async () => {
+      let streamCancelled = false;
+      const mockStream = new ReadableStream({
+        start() {},
+        cancel() {
+          streamCancelled = true;
+        },
+      });
+
+      const mockFetch = vi.fn(async () =>
+        new Response(mockStream, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/pdf",
+            "Content-Length": "600000000", // 600 MB > 512 MiB limit
+          },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.status).toBe(413);
+        expect(result.error.code).toBe("payload_too_large");
+        expect(result.error.message).toContain("600000000");
+      }
+      expect(streamCancelled).toBe(true);
+    });
+
+    it("rejects oversized Content-Length with custom configured maxBytes", async () => {
+      const mockFetch = vi.fn(async () =>
+        new Response("%PDF-1.4 sample content", {
+          status: 200,
+          headers: {
+            "Content-Type": "application/pdf",
+            "Content-Length": "2000",
+          },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+        maxBytes: 1000,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.status).toBe(413);
+        expect(result.error.code).toBe("payload_too_large");
+      }
+    });
+
+    it("rejects malformed Content-Length header safely", async () => {
+      const mockFetch = vi.fn(async () =>
+        new Response("%PDF-1.4 sample content", {
+          status: 200,
+          headers: {
+            "Content-Type": "application/pdf",
+            "Content-Length": "not-a-number",
+          },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.status).toBe(400);
+        expect(result.error.code).toBe("invalid_content_length");
+      }
+    });
+
+    it("enforces actual byte count when Content-Length is missing and chunks exceed limit", async () => {
+      let streamCancelled = false;
+      const chunk1 = new TextEncoder().encode("%PDF-1.4 chunk 1 content ");
+      const chunk2 = new Uint8Array(200).fill(65);
+
+      let count = 0;
+      const mockStream = new ReadableStream({
+        pull(controller) {
+          if (count === 0) {
+            controller.enqueue(chunk1);
+            count++;
+          } else if (count === 1) {
+            controller.enqueue(chunk2);
+            count++;
+          }
+        },
+        cancel() {
+          streamCancelled = true;
+        },
+      });
+
+      const mockFetch = vi.fn(async () =>
+        new Response(mockStream, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/pdf",
+            // No Content-Length header
+          },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+        maxBytes: 50, // Small limit: chunk1 + chunk2 > 50 bytes
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.status).toBe(413);
+        expect(result.error.code).toBe("payload_too_large");
+      }
+      expect(streamCancelled).toBe(true);
+    });
+
+    it("succeeds when Content-Length is missing but streamed bytes are within bounds and valid PDF", async () => {
+      const validPdfData = new TextEncoder().encode("%PDF-1.4 valid binary stream");
+      const mockStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(validPdfData);
+          controller.close();
+        },
+      });
+
+      const mockFetch = vi.fn(async () =>
+        new Response(mockStream, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/pdf",
+            // Missing Content-Length
+          },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.sizeBytes).toBe(validPdfData.byteLength);
+      }
+    });
+
+    it("detects Content-Length mismatch when stream terminates prematurely", async () => {
+      const truncatedData = new TextEncoder().encode("%PDF-1.4 short");
+      const mockStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(truncatedData);
+          controller.close();
+        },
+      });
+
+      const mockFetch = vi.fn(async () =>
+        new Response(mockStream, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/pdf",
+            "Content-Length": "1000", // Promised 1000 bytes, delivered only 14
+          },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("read_error");
+        expect(result.error.message).toContain("Content-Length");
+      }
+    });
+
+    it("aborts download on finite deadline / timeout when stream hangs", async () => {
+      let cancelCalled = false;
+      const hangingStream = new ReadableStream({
+        pull() {
+          // Never delivers chunk
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelCalled = true;
+        },
+      });
+
+      const mockFetch = vi.fn(async () =>
+        new Response(hangingStream, {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+        timeoutMs: 50, // Finite 50ms deadline
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("timeout");
+        expect(result.error.status).toBe(408);
+      }
+      expect(cancelCalled).toBe(true);
+    });
+
+    it("aborts upload on finite deadline / timeout", async () => {
+      const hangingFetch = vi.fn(
+        (_url: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("The operation timed out.", "TimeoutError"));
+            });
+          }),
+      );
+
+      const result = await uploadDocument({
+        projectId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        file: new File(["%PDF-1.4 content"], "doc.pdf", { type: "application/pdf" }),
+        fetchFn: hangingFetch as unknown as typeof fetch,
+        timeoutMs: 50,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("timeout");
+        expect(result.error.status).toBe(408);
+      }
+    });
+
+    it("aborts download when user AbortSignal triggers", async () => {
+      const ac = new AbortController();
+      let cancelCalled = false;
+      const hangingStream = new ReadableStream({
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelCalled = true;
+        },
+      });
+
+      const mockFetch = vi.fn(async () =>
+        new Response(hangingStream, {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        }),
+      );
+
+      const downloadPromise = downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+        signal: ac.signal,
+      });
+
+      setTimeout(() => ac.abort(), 20);
+      const result = await downloadPromise;
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("aborted");
+        expect(result.error.message).toContain("取消");
+      }
+      expect(cancelCalled).toBe(true);
+    });
+
+    it("aborts upload when user AbortSignal triggers", async () => {
+      const ac = new AbortController();
+      const mockFetch = vi.fn(
+        (_url: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("User aborted", "AbortError"));
+            });
+          }),
+      );
+
+      const uploadPromise = uploadDocument({
+        projectId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        file: new File(["%PDF-1.4 content"], "doc.pdf", { type: "application/pdf" }),
+        fetchFn: mockFetch as unknown as typeof fetch,
+        signal: ac.signal,
+      });
+
+      setTimeout(() => ac.abort(), 20);
+      const result = await uploadPromise;
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("aborted");
+      }
+    });
+
+    it("handles stream network interruption during download", async () => {
+      const errorStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("%PDF-1.4"));
+          controller.error(new TypeError("network connection broken"));
+        },
+      });
+
+      const mockFetch = vi.fn(async () =>
+        new Response(errorStream, {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("read_error");
+        expect(result.error.message).toContain("network connection broken");
+      }
+    });
+
+    it("bounds error response body and cancels stream after maxErrorBytes", async () => {
+      let cancelCalled = false;
+      const bigChunk = new TextEncoder().encode("X".repeat(1024));
+      const mockErrorStream = new ReadableStream({
+        start(controller) {
+          // Stream 100 chunks = 100 KiB (> 1 KiB maxErrorBytes limit)
+          for (let i = 0; i < 100; i++) {
+            controller.enqueue(bigChunk);
+          }
+          controller.close();
+        },
+        cancel() {
+          cancelCalled = true;
+        },
+      });
+
+      const mockFetch = vi.fn(async () =>
+        new Response(mockErrorStream, {
+          status: 500,
+          headers: { "Content-Type": "text/plain" },
+        }),
+      );
+
+      const result = await downloadDocument({
+        documentId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        fetchFn: mockFetch as unknown as typeof fetch,
+        maxErrorBytes: 1024,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.status).toBe(500);
+      }
+      expect(cancelCalled).toBe(true);
+    });
+
+    it("creates and immediately revokes object URL in default download path", async () => {
+      const originalCreate = URL.createObjectURL;
+      const originalRevoke = URL.revokeObjectURL;
+      const createSpy = vi.fn(() => "blob:http://localhost/test-uuid");
+      const revokeSpy = vi.fn();
+
+      URL.createObjectURL = createSpy;
+      URL.revokeObjectURL = revokeSpy;
+
+      try {
+        const mockFetch = vi.fn(async () =>
+          new Response("%PDF-1.4 binary content", {
+            status: 200,
+            headers: {
+              "Content-Type": "application/pdf",
+              "Content-Disposition": `attachment; filename="${VALID_UUID_1}.pdf"`,
+            },
+          }),
+        );
+
+        const result = await downloadDocument({
+          documentId: VALID_UUID_1,
+          token: MOCK_TOKEN,
+          fetchFn: mockFetch as unknown as typeof fetch,
+        });
+
+        expect(result.ok).toBe(true);
+        expect(createSpy).toHaveBeenCalledTimes(1);
+        expect(revokeSpy).toHaveBeenCalledTimes(1);
+        expect(revokeSpy).toHaveBeenCalledWith("blob:http://localhost/test-uuid");
+      } finally {
+        URL.createObjectURL = originalCreate;
+        URL.revokeObjectURL = originalRevoke;
+      }
+    });
+
+    it("sanitizes error messages to ensure Bearer tokens are never leaked", async () => {
+      const mockFetch = vi.fn(async () => {
+        throw new Error(`Failed to connect with token ${MOCK_TOKEN}`);
+      });
+
+      const result = await uploadDocument({
+        projectId: VALID_UUID_1,
+        token: MOCK_TOKEN,
+        file: new File(["%PDF-1.4 test"], "doc.pdf", { type: "application/pdf" }),
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).not.toContain(MOCK_TOKEN);
+        expect(result.error.message).toContain("[REDACTED]");
+      }
+    });
+  });
 });

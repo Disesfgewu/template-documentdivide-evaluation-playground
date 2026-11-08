@@ -5,14 +5,37 @@
  * the contract in services/api/lab_api/documents.py.
  *
  * Security & Reliability Invariants:
- * - Token is held only in memory; never persisted, stored, or logged.
+ * - Token is held only in memory; never persisted, stored, or logged. Secrets are never shown.
  * - Project and Document IDs are strictly validated as UUIDs before any network call.
  * - Response shapes and hashes are strictly validated against request context; malformed responses fail closed.
  * - Downloads strictly enforce application/pdf media type and %PDF- magic signature before saving.
- * - SPEC 16.4 error structures are parsed safely.
+ * - Streaming download and error reads are bounded with explicit byte limits and finite deadlines.
+ * - SPEC 512 MiB maximum PDF capacity (SPEC 16.6) is preserved as the default ceiling.
+ * - SPEC 16.4 error structures are parsed safely within bounded memory (default 64 KiB).
  * - Malformed percent-encoded Content-Disposition headers never throw.
  * - Object URLs generated for PDF downloads are strictly managed and revoked immediately.
  */
+
+/**
+ * Default maximum PDF size: 512 MiB (SPEC 16.6).
+ * Preserved to match backend contract in services/api/lab_api/pdf_body.py.
+ */
+export const DEFAULT_MAX_PDF_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Default maximum error payload size: 64 KiB (SPEC 16.4 error structures are small).
+ */
+export const DEFAULT_MAX_ERROR_BYTES = 64 * 1024;
+
+/**
+ * Default finite timeout for uploads: 120 seconds.
+ */
+export const DEFAULT_UPLOAD_TIMEOUT_MS = 120_000;
+
+/**
+ * Default finite timeout for downloads: 120 seconds.
+ */
+export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120_000;
 
 export type UploadSuccess = {
   id: string;
@@ -47,6 +70,16 @@ const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const SHA256_REGEX = /^[0-9a-f]{64}$/i;
+
+/**
+ * Sanitize error message to prevent inadvertent secret/token leakage.
+ */
+export function sanitizeErrorMessage(msg: string, token?: string): string {
+  if (token && token.length > 5 && msg.includes(token)) {
+    return msg.replaceAll(token, "[REDACTED]");
+  }
+  return msg;
+}
 
 /**
  * Verifies that bytes represent a valid PDF file.
@@ -121,6 +154,179 @@ export function parseErrorResponse(status: number, body: unknown): ApiErrorDetai
     isUnauthorized,
     details,
   };
+}
+
+/**
+ * Reads response JSON with a strict byte limit and abort signal.
+ * Prevents unbounded memory buffering on large/malformed error responses.
+ */
+export async function readBoundedJson(
+  res: Response,
+  maxBytes: number = DEFAULT_MAX_ERROR_BYTES,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const abortPromise = signal
+    ? new Promise<never>((_, reject) => {
+        if (signal.aborted) {
+          reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError")),
+          { once: true },
+        );
+      })
+    : null;
+
+  if (res.body && typeof res.body.getReader === "function") {
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const readPromise = reader.read();
+        const { done, value } = abortPromise
+          ? await Promise.race([readPromise, abortPromise])
+          : await readPromise;
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          totalBytes += value.byteLength;
+          if (totalBytes > maxBytes) {
+            try {
+              await reader.cancel("payload_too_large");
+            } catch {
+              // ignore
+            }
+            break;
+          }
+          chunks.push(value);
+        }
+      }
+    } catch (err: unknown) {
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore
+      }
+      throw err;
+    }
+
+    const merged = new Uint8Array(Math.min(totalBytes, maxBytes));
+    let offset = 0;
+    for (const chunk of chunks) {
+      const take = Math.min(chunk.byteLength, merged.byteLength - offset);
+      merged.set(chunk.subarray(0, take), offset);
+      offset += take;
+      if (offset >= merged.byteLength) break;
+    }
+    const text = new TextDecoder("utf-8").decode(merged);
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text ? { message: text.slice(0, 500) } : null;
+    }
+  }
+
+  // Fallback for mocks without streaming res.body
+  if (typeof res.text === "function") {
+    const textPromise = res.text();
+    const text = abortPromise ? await Promise.race([textPromise, abortPromise]) : await textPromise;
+    const boundedText = text.slice(0, maxBytes);
+    try {
+      return JSON.parse(boundedText);
+    } catch {
+      return boundedText ? { message: boundedText.slice(0, 500) } : null;
+    }
+  } else if (typeof res.json === "function") {
+    const jsonPromise = res.json();
+    return abortPromise ? await Promise.race([jsonPromise, abortPromise]) : await jsonPromise;
+  }
+
+  return null;
+}
+
+/**
+ * Reads a ReadableStream with an upper bound on bytes, abort signal, and finite deadline.
+ * If the byte count exceeds maxBytes, cancels the stream immediately and throws payload_too_large error.
+ */
+export async function readBoundedStream(
+  bodyStream: ReadableStream<Uint8Array> | null | undefined,
+  fallbackResponse: Response,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<{ chunks: Uint8Array[]; totalBytes: number }> {
+  const abortPromise = new Promise<never>((_, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  if (bodyStream && typeof bodyStream.getReader === "function") {
+    const reader = bodyStream.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await Promise.race([reader.read(), abortPromise]);
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          totalBytes += value.byteLength;
+          if (totalBytes > maxBytes) {
+            try {
+              await reader.cancel("payload_too_large");
+            } catch {
+              // ignore
+            }
+            const err = new Error(`下載檔案大小超過上限（已讀取超過 ${maxBytes} 位元組）`);
+            (err as any).code = "payload_too_large";
+            (err as any).status = 413;
+            throw err;
+          }
+          chunks.push(value);
+        }
+      }
+      return { chunks, totalBytes };
+    } catch (err: unknown) {
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore
+      }
+      throw err;
+    }
+  }
+
+  // Fallback for mocks without ReadableStream getReader
+  if (typeof fallbackResponse.blob === "function") {
+    const blob = await Promise.race([fallbackResponse.blob(), abortPromise]);
+    if (blob.size > maxBytes) {
+      const err = new Error(`下載檔案大小超過上限（${blob.size} > ${maxBytes} 位元組）`);
+      (err as any).code = "payload_too_large";
+      (err as any).status = 413;
+      throw err;
+    }
+    const buf = await blob.arrayBuffer();
+    const u8 = new Uint8Array(buf);
+    return { chunks: [u8], totalBytes: u8.byteLength };
+  } else if (typeof fallbackResponse.arrayBuffer === "function") {
+    const buf = await Promise.race([fallbackResponse.arrayBuffer(), abortPromise]);
+    if (buf.byteLength > maxBytes) {
+      const err = new Error(`下載檔案大小超過上限（${buf.byteLength} > ${maxBytes} 位元組）`);
+      (err as any).code = "payload_too_large";
+      (err as any).status = 413;
+      throw err;
+    }
+    const u8 = new Uint8Array(buf);
+    return { chunks: [u8], totalBytes: u8.byteLength };
+  }
+
+  return { chunks: [], totalBytes: 0 };
 }
 
 export function parseUploadResponse(
@@ -243,6 +449,10 @@ export type UploadDocumentOptions = {
   idempotencyKey?: string;
   fetchFn?: typeof fetch;
   baseUrl?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  maxBytes?: number;
+  maxErrorBytes?: number;
 };
 
 export async function uploadDocument({
@@ -253,6 +463,10 @@ export async function uploadDocument({
   idempotencyKey,
   fetchFn = fetch,
   baseUrl = "",
+  signal,
+  timeoutMs = DEFAULT_UPLOAD_TIMEOUT_MS,
+  maxBytes = DEFAULT_MAX_PDF_BYTES,
+  maxErrorBytes = DEFAULT_MAX_ERROR_BYTES,
 }: UploadDocumentOptions): Promise<ApiResult<UploadSuccess>> {
   const cleanToken = token.trim();
   if (!cleanToken) {
@@ -290,6 +504,27 @@ export async function uploadDocument({
     };
   }
 
+  if (typeof file.size === "number" && file.size > maxBytes) {
+    return {
+      ok: false,
+      error: {
+        message: `檔案大小超過上限（${file.size} > ${maxBytes} 位元組）`,
+        status: 413,
+        code: "payload_too_large",
+      },
+    };
+  }
+
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      error: {
+        message: "上傳已由使用者取消",
+        code: "aborted",
+      },
+    };
+  }
+
   const formData = new FormData();
   formData.append("file", file);
 
@@ -307,28 +542,99 @@ export async function uploadDocument({
 
   const endpoint = `${baseUrl}/api/v1/projects/${encodeURIComponent(cleanProjId)}/documents`;
 
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  if (signal) {
+    signal.addEventListener(
+      "abort",
+      () => {
+        controller.abort(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+      },
+      { once: true },
+    );
+  }
+
+  if (timeoutMs > 0 && timeoutMs < Infinity) {
+    timeoutId = setTimeout(() => {
+      controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+    }, timeoutMs);
+  }
+
   let res: Response;
   try {
     res = await fetchFn(endpoint, {
       method: "POST",
       headers,
       body: formData,
+      signal: controller.signal,
     });
   } catch (err: unknown) {
     const errMessage = err instanceof Error ? err.message : String(err);
+    if (signal?.aborted) {
+      return {
+        ok: false,
+        error: {
+          message: "上傳已由使用者取消",
+          code: "aborted",
+        },
+      };
+    }
+    if (
+      controller.signal.aborted &&
+      (controller.signal.reason?.name === "TimeoutError" ||
+        (err instanceof DOMException && err.name === "TimeoutError") ||
+        errMessage.includes("timed out"))
+    ) {
+      return {
+        ok: false,
+        error: {
+          message: "請求逾時（操作超過設定時限）",
+          code: "timeout",
+          status: 408,
+        },
+      };
+    }
     return {
       ok: false,
       error: {
-        message: `連線失敗或逾時（${errMessage}）`,
+        message: sanitizeErrorMessage(`連線失敗或逾時（${errMessage}）`, cleanToken),
         code: "network_error",
       },
     };
+  } finally {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
   }
 
   let body: unknown;
   try {
-    body = await res.json();
-  } catch {
+    body = await readBoundedJson(res, maxErrorBytes, controller.signal);
+  } catch (err: unknown) {
+    if (signal?.aborted) {
+      return {
+        ok: false,
+        error: {
+          message: "上傳已由使用者取消",
+          code: "aborted",
+        },
+      };
+    }
+    if (
+      controller.signal.aborted &&
+      (controller.signal.reason?.name === "TimeoutError" ||
+        (err instanceof DOMException && err.name === "TimeoutError"))
+    ) {
+      return {
+        ok: false,
+        error: {
+          message: "請求逾時（操作超過設定時限）",
+          code: "timeout",
+          status: 408,
+        },
+      };
+    }
     body = null;
   }
 
@@ -360,6 +666,10 @@ export type DownloadDocumentOptions = {
   fetchFn?: typeof fetch;
   baseUrl?: string;
   triggerSave?: (blob: Blob, filename: string) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  maxBytes?: number;
+  maxErrorBytes?: number;
 };
 
 export function sanitizeFilename(rawFilename: string, fallback: string): string {
@@ -414,6 +724,10 @@ export async function downloadDocument({
   fetchFn = fetch,
   baseUrl = "",
   triggerSave,
+  signal,
+  timeoutMs = DEFAULT_DOWNLOAD_TIMEOUT_MS,
+  maxBytes = DEFAULT_MAX_PDF_BYTES,
+  maxErrorBytes = DEFAULT_MAX_ERROR_BYTES,
 }: DownloadDocumentOptions): Promise<
   ApiResult<{ blob: Blob; filename: string; sizeBytes: number }>
 > {
@@ -442,7 +756,36 @@ export async function downloadDocument({
     };
   }
 
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      error: {
+        message: "下載已由使用者取消",
+        code: "aborted",
+      },
+    };
+  }
+
   const endpoint = `${baseUrl}/api/v1/documents/${encodeURIComponent(cleanDocId)}/download`;
+
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  if (signal) {
+    signal.addEventListener(
+      "abort",
+      () => {
+        controller.abort(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+      },
+      { once: true },
+    );
+  }
+
+  if (timeoutMs > 0 && timeoutMs < Infinity) {
+    timeoutId = setTimeout(() => {
+      controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+    }, timeoutMs);
+  }
 
   let res: Response;
   try {
@@ -452,13 +795,38 @@ export async function downloadDocument({
         Authorization: `Bearer ${cleanToken}`,
         Accept: "application/pdf",
       },
+      signal: controller.signal,
     });
   } catch (err: unknown) {
     const errMessage = err instanceof Error ? err.message : String(err);
+    if (signal?.aborted) {
+      return {
+        ok: false,
+        error: {
+          message: "下載已由使用者取消",
+          code: "aborted",
+        },
+      };
+    }
+    if (
+      controller.signal.aborted &&
+      (controller.signal.reason?.name === "TimeoutError" ||
+        (err instanceof DOMException && err.name === "TimeoutError") ||
+        errMessage.includes("timed out"))
+    ) {
+      return {
+        ok: false,
+        error: {
+          message: "請求逾時（操作超過設定時限）",
+          code: "timeout",
+          status: 408,
+        },
+      };
+    }
     return {
       ok: false,
       error: {
-        message: `連線失敗或逾時（${errMessage}）`,
+        message: sanitizeErrorMessage(`連線失敗或逾時（${errMessage}）`, cleanToken),
         code: "network_error",
       },
     };
@@ -467,9 +835,13 @@ export async function downloadDocument({
   if (!res.ok) {
     let errBody: unknown;
     try {
-      errBody = await res.json();
+      errBody = await readBoundedJson(res, maxErrorBytes, controller.signal);
     } catch {
       errBody = null;
+    } finally {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
     }
     return {
       ok: false,
@@ -481,6 +853,16 @@ export async function downloadDocument({
   const rawContentType = res.headers?.get("Content-Type") ?? "";
   const mediaType = rawContentType.split(";")[0].trim().toLowerCase();
   if (mediaType !== "application/pdf") {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+    if (res.body && typeof res.body.cancel === "function") {
+      try {
+        await res.body.cancel();
+      } catch {
+        // ignore
+      }
+    }
     return {
       ok: false,
       error: {
@@ -491,23 +873,122 @@ export async function downloadDocument({
     };
   }
 
-  // 2. Read Blob
-  let blob: Blob;
+  // 2. Strict Content-Length header verification
+  const rawContentLength = res.headers?.get("Content-Length");
+  let expectedLength: number | null = null;
+  if (rawContentLength !== null && rawContentLength !== undefined && rawContentLength.trim() !== "") {
+    const parsedCl = Number(rawContentLength.trim());
+    if (!Number.isSafeInteger(parsedCl) || parsedCl < 0) {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+      if (res.body && typeof res.body.cancel === "function") {
+        try {
+          await res.body.cancel();
+        } catch {
+          // ignore
+        }
+      }
+      return {
+        ok: false,
+        error: {
+          message: "伺服器回應之 Content-Length 標頭格式不正確",
+          status: 400,
+          code: "invalid_content_length",
+        },
+      };
+    }
+    if (parsedCl > maxBytes) {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+      if (res.body && typeof res.body.cancel === "function") {
+        try {
+          await res.body.cancel();
+        } catch {
+          // ignore
+        }
+      }
+      return {
+        ok: false,
+        error: {
+          message: `檔案大小超過上限（Content-Length: ${parsedCl} > ${maxBytes} 位元組）`,
+          status: 413,
+          code: "payload_too_large",
+        },
+      };
+    }
+    expectedLength = parsedCl;
+  }
+
+  // 3. Read bounded stream with deadline and actual byte count enforcement
+  let streamResult: { chunks: Uint8Array[]; totalBytes: number };
   try {
-    blob = await res.blob();
+    streamResult = await readBoundedStream(res.body, res, maxBytes, controller.signal);
   } catch (err: unknown) {
     const errMessage = err instanceof Error ? err.message : String(err);
+    if (signal?.aborted) {
+      return {
+        ok: false,
+        error: {
+          message: "下載已由使用者取消",
+          code: "aborted",
+        },
+      };
+    }
+    if (
+      controller.signal.aborted &&
+      (controller.signal.reason?.name === "TimeoutError" ||
+        (err instanceof DOMException && err.name === "TimeoutError") ||
+        errMessage.includes("timed out"))
+    ) {
+      return {
+        ok: false,
+        error: {
+          message: "請求逾時（操作超過設定時限）",
+          code: "timeout",
+          status: 408,
+        },
+      };
+    }
+    if ((err as any)?.code === "payload_too_large") {
+      return {
+        ok: false,
+        error: {
+          message: errMessage,
+          status: 413,
+          code: "payload_too_large",
+        },
+      };
+    }
     return {
       ok: false,
       error: {
-        message: `讀取檔案內容失敗（${errMessage}）`,
+        message: sanitizeErrorMessage(`讀取檔案內容失敗（${errMessage}）`, cleanToken),
+        status: 500,
+        code: "read_error",
+      },
+    };
+  } finally {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  const { chunks, totalBytes } = streamResult;
+
+  if (expectedLength !== null && totalBytes !== expectedLength) {
+    return {
+      ok: false,
+      error: {
+        message: `下載檔案大小與 Content-Length 標頭不符（預期 ${expectedLength}，實際 ${totalBytes} 位元組）`,
         status: 500,
         code: "read_error",
       },
     };
   }
 
-  if (blob.size < 5) {
+  if (totalBytes < 5) {
     return {
       ok: false,
       error: {
@@ -518,31 +999,34 @@ export async function downloadDocument({
     };
   }
 
-  // 3. Strict PDF signature verification (%PDF- allowing leading whitespace within first 1024 bytes)
-  try {
-    const headerBuffer = await blob.slice(0, 1029).arrayBuffer();
-    const headerBytes = new Uint8Array(headerBuffer);
-    if (!hasValidPdfSignature(headerBytes)) {
-      return {
-        ok: false,
-        error: {
-          message: "檔案非有效 PDF 格式（未找到有效的 %PDF- 簽章標頭）",
-          status: 500,
-          code: "invalid_pdf_signature",
-        },
-      };
+  // 4. Strict PDF signature verification (%PDF- allowing leading whitespace within first 1024 bytes)
+  let headerBytes: Uint8Array;
+  if (chunks.length === 1) {
+    headerBytes = chunks[0].subarray(0, 1029);
+  } else {
+    const needed = Math.min(1029, totalBytes);
+    headerBytes = new Uint8Array(needed);
+    let offset = 0;
+    for (const chunk of chunks) {
+      const take = Math.min(chunk.byteLength, needed - offset);
+      headerBytes.set(chunk.subarray(0, take), offset);
+      offset += take;
+      if (offset >= needed) break;
     }
-  } catch (err: unknown) {
-    const errMessage = err instanceof Error ? err.message : String(err);
+  }
+
+  if (!hasValidPdfSignature(headerBytes)) {
     return {
       ok: false,
       error: {
-        message: `驗證 PDF 簽章失敗（${errMessage}）`,
+        message: "檔案非有效 PDF 格式（未找到有效的 %PDF- 簽章標頭）",
         status: 500,
-        code: "signature_check_error",
+        code: "invalid_pdf_signature",
       },
     };
   }
+
+  const blob = new Blob(chunks as BlobPart[], { type: "application/pdf" });
 
   const fallbackFilename = `${cleanDocId}.pdf`;
   const filename = extractFilenameFromHeader(
@@ -575,7 +1059,7 @@ export async function downloadDocument({
     data: {
       blob,
       filename,
-      sizeBytes: blob.size,
+      sizeBytes: totalBytes,
     },
   };
 }

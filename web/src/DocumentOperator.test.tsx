@@ -602,4 +602,130 @@ describe("DocumentOperator", () => {
     expect(alert.textContent).toContain("404 Not Found");
     expect(alert.textContent).toContain("document not found");
   });
+
+  it("allows user to cancel upload via UI, clears loading state, and retains exact idempotency key on retry", async () => {
+    let capturedKeys: string[] = [];
+
+    const mockFetch = vi.fn(
+      async (_url: RequestInfo | URL, init?: RequestInit) => {
+        const key = (init?.headers as Record<string, string>)?.["Idempotency-Key"] ?? "";
+        capturedKeys.push(key);
+
+        if (capturedKeys.length === 1) {
+          // First attempt: waits until cancelled
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("User cancelled", "AbortError"));
+            });
+          });
+        }
+
+        // Retry attempt: succeeds
+        return new Response(
+          JSON.stringify({
+            id: VALID_UUID_1,
+            document_version_id: VALID_UUID_1,
+            project_id: VALID_UUID_1,
+            resource_id: VALID_UUID_2,
+            artifact_id: VALID_UUID_3,
+            logical_id: "default",
+            revision: 1,
+            sha256: VALID_SHA256,
+            size_bytes: 100,
+            page_count: 1,
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+
+    let keyGenCount = 1;
+    const generateKey = vi.fn(() => `user-cancel-key-${keyGenCount++}`);
+
+    render(
+      <DocumentOperator
+        fetchFn={mockFetch as unknown as typeof fetch}
+        generateIdempotencyKey={generateKey}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/認證 Token/i), { target: { value: MOCK_TOKEN } });
+    fireEvent.change(screen.getByLabelText(/Project ID/i), { target: { value: VALID_UUID_1 } });
+
+    const file = createMockPdfFile("test-cancel.pdf", 100);
+    const fileInput = document.getElementById("upload-file") as HTMLInputElement;
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    fireEvent.change(fileInput);
+
+    // 1. Submit upload
+    fireEvent.click(screen.getByRole("button", { name: "上傳 PDF" }));
+
+    // 2. Loading state active and "取消上傳" button visible
+    expect(screen.getByRole("status").textContent).toContain("文件上傳中");
+    const cancelBtn = screen.getByRole("button", { name: "取消上傳" });
+    expect(cancelBtn).toBeTruthy();
+
+    // 3. User clicks "取消上傳"
+    fireEvent.click(cancelBtn);
+
+    // 4. Loading cleared, cancel button gone, alert shown
+    await waitFor(() => {
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByRole("button", { name: "取消上傳" })).toBeNull();
+      expect(screen.getByTestId("upload-error")).toBeTruthy();
+    });
+    expect(screen.getByTestId("upload-error").textContent).toContain("取消");
+
+    // 5. User clicks "上傳 PDF" again (retry)
+    fireEvent.click(screen.getByRole("button", { name: "上傳 PDF" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("upload-success")).toBeTruthy();
+    });
+
+    // 6. Verify BOTH attempts used the EXACT SAME idempotency key!
+    expect(capturedKeys.length).toBe(2);
+    expect(capturedKeys[0]).toBe("user-cancel-key-1");
+    expect(capturedKeys[1]).toBe("user-cancel-key-1");
+  });
+
+  it("allows user to cancel download via UI and clears loading state", async () => {
+    const hangingStream = new ReadableStream({
+      pull() {
+        return new Promise(() => {});
+      },
+    });
+
+    const mockFetch = vi.fn(
+      async () =>
+        new Response(hangingStream, {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        }),
+    );
+
+    render(<DocumentOperator fetchFn={mockFetch as unknown as typeof fetch} />);
+
+    fireEvent.change(screen.getByLabelText(/認證 Token/i), { target: { value: MOCK_TOKEN } });
+    fireEvent.change(screen.getByLabelText(/Document ID/i), { target: { value: VALID_UUID_1 } });
+
+    // Submit download
+    fireEvent.click(screen.getByRole("button", { name: "下載 PDF" }));
+
+    // Loading active, cancel button appears
+    expect(screen.getByRole("status").textContent).toContain("文件下載中");
+    const cancelBtn = screen.getByRole("button", { name: "取消下載" });
+    expect(cancelBtn).toBeTruthy();
+
+    // User cancels
+    fireEvent.click(cancelBtn);
+
+    // Loading clears, error alert shown
+    await waitFor(() => {
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByRole("button", { name: "取消下載" })).toBeNull();
+      expect(screen.getByTestId("download-error")).toBeTruthy();
+    });
+    expect(screen.getByTestId("download-error").textContent).toContain("取消");
+  });
 });
