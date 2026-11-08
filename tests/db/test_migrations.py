@@ -186,32 +186,61 @@ class ConcurrentMigratorTests(FreshDatabase):
             self.assertEqual(c.execute("SELECT count(*), count(DISTINCT version) FROM schema_migrations").fetchone(),
                              (len(discover()), len(discover())))
 
+
+def _barrier_worker(url: str, deployment: str, barrier, out_q):
+    """Child worker for concurrent migration test.
+    Synchronizes on barrier immediately before pg_advisory_lock acquisition
+    so both processes reach lock acquisition simultaneously. Under the old code,
+    both processes would have already read before={} outside the lock; under the
+    new code, before is only read once the lock is acquired.
+    """
+    orig_execute = psycopg.Connection.execute
+
+    def patched_execute(conn, query, *args, **kwargs):
+        if "pg_advisory_lock" in str(query):
+            barrier.wait(timeout=30)
+        return orig_execute(conn, query, *args, **kwargs)
+
+    try:
+        from unittest.mock import patch
+        with patch.object(psycopg.Connection, "execute", patched_execute):
+            res = migrate(url, deployment)
+            out_q.put((deployment, res, None))
+    except Exception as exc:
+        out_q.put((deployment, None, exc))
+
+
+class ConcurrentMigratorBarrierTests(FreshDatabase):
+    migrate_to_head = False
+
     def test_concurrent_migrators_with_barrier_report_only_applied(self):
-        """Two separate processes synchronized by a barrier on an empty database:
-        one truly applies migrations and reports [1..n]; the other applies none
-        and reports []. The database executes each migration exactly once."""
+        """Two separate processes synchronized immediately before pg_advisory_lock
+        on an empty database: one truly applies migrations and reports [1..n];
+        the other applies none and reports []. The database executes each migration
+        exactly once."""
         import multiprocessing
 
-        barrier = multiprocessing.Barrier(2)
-        q = multiprocessing.Queue()
+        ctx = multiprocessing.get_context()
+        barrier = ctx.Barrier(2)
+        q = ctx.Queue()
 
-        def _worker(url: str, deployment: str, b, out_q):
-            try:
-                b.wait(timeout=30)
-                res = migrate(url, deployment)
-                out_q.put((deployment, res, None))
-            except Exception as exc:
-                out_q.put((deployment, None, exc))
-
-        p1 = multiprocessing.Process(target=_worker, args=(self.url, "p1", barrier, q))
-        p2 = multiprocessing.Process(target=_worker, args=(self.url, "p2", barrier, q))
+        p1 = ctx.Process(target=_barrier_worker, args=(self.url, "p1", barrier, q))
+        p2 = ctx.Process(target=_barrier_worker, args=(self.url, "p2", barrier, q))
         p1.start()
         p2.start()
-        p1.join(timeout=60)
-        p2.join(timeout=60)
 
-        self.assertEqual(p1.exitcode, 0)
-        self.assertEqual(p2.exitcode, 0)
+        try:
+            p1.join(timeout=60)
+            p2.join(timeout=60)
+            self.assertEqual(p1.exitcode, 0)
+            self.assertEqual(p2.exitcode, 0)
+        finally:
+            if p1.is_alive():
+                p1.kill()
+                p1.join()
+            if p2.is_alive():
+                p2.kill()
+                p2.join()
 
         results = {}
         for _ in range(2):

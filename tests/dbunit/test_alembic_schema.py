@@ -307,12 +307,6 @@ class ProductionEntrypointOfflineTests(unittest.TestCase):
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("missing Alembic wrapper for SQL migration(s): 0002_b.sql", res.stderr)
 
-    def test_explicit_test_prefix_preserves_partial_migrations(self):
-        """Explicitly passed test-prefix migrations do not enforce trailing wrapper matching."""
-        cfg = Config()
-        cfg.attributes["explicit_migrations"] = True
-        self.assertTrue(cfg.attributes.get("explicit_migrations"))
-
 
 if __name__ == "__main__":
     unittest.main()
