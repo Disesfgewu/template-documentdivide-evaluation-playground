@@ -214,10 +214,13 @@ class InconsistentStateGappedSchemaMigrationsTests(FreshDatabase):
         migs = discover()
         with psycopg.connect(self.url) as c:
             c.execute(BOOKKEEPING)
-            for mig in [migs[0], migs[2]]:
+            # Apply dependent DDL in order, but simulate a damaged ledger
+            # whose middle version is missing.
+            for mig in migs[:3]:
                 c.execute(mig.sql)
-                c.execute("INSERT INTO schema_migrations (version, name, checksum, deployment) VALUES (%s, %s, %s, 'init')",
-                          (mig.version, mig.name, mig.checksum))
+                if mig.version != 2:
+                    c.execute("INSERT INTO schema_migrations (version, name, checksum, deployment) VALUES (%s, %s, %s, 'init')",
+                              (mig.version, mig.name, mig.checksum))
             c.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
             c.execute("INSERT INTO alembic_version (version_num) VALUES ('0003')")
             c.commit()
