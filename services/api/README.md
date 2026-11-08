@@ -43,3 +43,5 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
 
 `GET /api/v1/audit-events?project_id=…`：稽核事件查詢，可依 actor_id、resource_id、resource_type、action、outcome、since（含）/until（不含）過濾；新到舊、keyset cursor、limit 1–200。不認得的參數一律 400，避免拼錯的過濾條件悄悄放寬結果。存取暫用 `read_gold_trace_and_lineage`（owner/maintainer/reviewer），與 `GET /jobs/{id}` 相同，待 PM 決定；其他成員 403、非成員 404。
+
+`GET /api/v1/logs?project_id=…`：結構化日誌查詢，可依 level、event_name、trace_id、run_id、question_id、job_id、operation_id、since/until 過濾；以事件 id 由新到舊、keyset cursor、limit 1–200。只回該 project 的事件（無 project 的系統事件不可由此取得），且不回 `attributes` 與 `error_message`（可能含 participant 回報文字）。attempt 非 `log_events` 欄位，故沒有 attempt 過濾。存取暫用 `read_gold_trace_and_lineage`，待 PM 決定。

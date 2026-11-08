@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from .audit import router as audit_router
 from .config import Settings, load_settings
 from .documents import ApiError, DownloadAdmissionMiddleware, router as documents_router
+from .logs import router as logs_router
 from .readiness import Check, default_checks, run_checks
 
 API_VERSION = "0.1.0"
@@ -46,5 +47,6 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
 
     app.include_router(documents_router)
     app.include_router(audit_router)
+    app.include_router(logs_router)
 
     return app
