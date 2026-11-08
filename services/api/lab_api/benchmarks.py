@@ -72,15 +72,14 @@ def parse_limit(raw: Optional[str]) -> int:
 def public_question(row: tuple) -> dict:
     qid, key, ordinal, text, qhash, bucket, payload = row
     item = {"id": str(qid), "question_text": text}
-    if isinstance(payload, dict):
-        for name in PUBLIC_PAYLOAD_KEYS:
-            if name in payload:
-                adapter = PUBLIC_FIELD_ADAPTERS[name]
-                try:
-                    item[name] = adapter.dump_python(adapter.validate_python(payload[name]), mode="json")
-                except ValidationError:
-                    # Never include invalid stored values or validation details in the response.
-                    raise ApiError(500, "invalid_question_payload", "invalid public question payload") from None
+    if not isinstance(payload, dict) or "language" not in payload:
+        raise ApiError(500, "invalid_question_payload", "invalid public question payload")
+    adapter = PUBLIC_FIELD_ADAPTERS["language"]
+    try:
+        item["language"] = adapter.dump_python(adapter.validate_python(payload["language"]), mode="json")
+    except ValidationError:
+        # Never include invalid stored values or validation details in the response.
+        raise ApiError(500, "invalid_question_payload", "invalid public question payload") from None
     return item
 
 

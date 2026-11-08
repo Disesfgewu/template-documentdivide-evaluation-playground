@@ -53,6 +53,9 @@ class PublicQuestionsRealDbTests(FreshDatabase):
                                        "facts": ["SECRET-FACT"]}), f.q))
             for i in range(1, n):
                 f.question(f"q_{i + 1}", i)
+            with c.transaction():
+                c.execute("UPDATE questions SET payload = payload || %s::jsonb WHERE benchmark_id = %s",
+                          (json.dumps({"language": "en"}), f.bench))
             expected_ids = [str(row[0]) for row in c.execute(
                 "SELECT id FROM questions WHERE benchmark_id = %s ORDER BY ordinal", (f.bench,)).fetchall()]
             f.evidence_set(f.q, "s1", [f.e1])
