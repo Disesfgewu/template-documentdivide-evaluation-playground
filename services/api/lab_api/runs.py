@@ -49,13 +49,29 @@ def _get_run(conn: psycopg.Connection, actor_id: uuid.UUID, run_id: uuid.UUID) -
     else:  # observer: published aggregates only, none exist yet
         raise ApiError(403, "permission_denied", "observer may only read published aggregates")
 
-    total = conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0]
-    attempts = conn.execute("SELECT count(*) FROM attempts WHERE run_id = %s", (run_id,)).fetchone()[0]
-    by_status = dict(conn.execute("SELECT status, count(*) FROM submissions WHERE run_id = %s GROUP BY 1",
-                                  (run_id,)).fetchall())
-    by_answer = dict(conn.execute("SELECT answer_status, count(*) FROM submissions WHERE run_id = %s "
-                                  "AND status = 'accepted' GROUP BY 1", (run_id,)).fetchall())
-    answered, abstained = int(by_answer.get("answered", 0)), int(by_answer.get("abstained", 0))
+    # READ COMMITTED assigns a snapshot per statement.  Read the run metadata
+    # and all counters together after authorization, so a concurrent commit
+    # cannot create a response assembled from different points in time.
+    snapshot = conn.execute(
+        "SELECT r.project_id, r.status::text, r.budget_profile, r.finalized_at, r.benchmark_id, "
+        "r.method_revision_id, m.owner_actor_id, rv.logical_id, rv.revision, "
+        "(SELECT count(*) FROM questions q WHERE q.benchmark_id = r.benchmark_id), "
+        "(SELECT count(*) FROM attempts a WHERE a.run_id = r.id), "
+        "(SELECT count(*) FROM submissions s WHERE s.run_id = r.id AND s.status = 'accepted' AND s.answer_status = 'answered'), "
+        "(SELECT count(*) FROM submissions s WHERE s.run_id = r.id AND s.status = 'accepted' AND s.answer_status = 'abstained'), "
+        "(SELECT count(*) FROM submissions s WHERE s.run_id = r.id AND s.status = 'rejected'), "
+        "(SELECT count(*) FROM submissions s WHERE s.run_id = r.id AND s.status = 'late') "
+        "FROM runs r JOIN method_revisions m ON m.id = r.method_revision_id "
+        "JOIN benchmark_revisions br ON br.id = r.benchmark_id "
+        "JOIN resource_versions rv ON rv.id = br.resource_id WHERE r.id = %s", (run_id,)).fetchone()
+    if snapshot is None:
+        raise missing
+    (snapshot_project, status, budget_profile, finalized_at, benchmark_id, method_revision_id, snapshot_owner,
+     bench_logical, bench_revision, total, attempts, answered, abstained, rejected, late) = snapshot
+    # Recheck identities used for authorization if the run changed between
+    # the authorization lookup and its snapshot. Do not expose its counts.
+    if snapshot_project != project_id or (decision.role == "participant" and snapshot_owner != actor_id):
+        raise missing
     return {
         "id": str(run_id), "project_id": str(project_id), "status": status,
         "benchmark": {"revision_id": str(benchmark_id), "logical_id": bench_logical, "revision": bench_revision},
@@ -65,8 +81,8 @@ def _get_run(conn: psycopg.Connection, actor_id: uuid.UUID, run_id: uuid.UUID) -
             "question_count": int(total), "attempts": int(attempts),
             "accepted_answered": answered, "accepted_abstained": abstained,
             "pending": max(int(total) - answered - abstained, 0),
-            "rejected_submissions": int(by_status.get("rejected", 0)),
-            "late_submissions": int(by_status.get("late", 0)),
+            "rejected_submissions": int(rejected),
+            "late_submissions": int(late),
         },
     }
 

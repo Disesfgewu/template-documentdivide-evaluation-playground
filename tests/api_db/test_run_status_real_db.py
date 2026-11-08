@@ -19,6 +19,7 @@ for _sub in (_REPO_ROOT, _REPO_ROOT / "db", _REPO_ROOT / "services" / "api", _RE
 from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
 from lab_api.main import create_app
+from lab_api.runs import _get_run
 from lab_db.repo import Change, record_change
 
 try:
@@ -79,6 +80,39 @@ class RunStatusRealDbTests(FreshDatabase):
         self.assertEqual(body["progress"], {"question_count": 2, "attempts": 3, "accepted_answered": 1,
                                             "accepted_abstained": 1, "pending": 0, "rejected_submissions": 1,
                                             "late_submissions": 0})
+
+    def test_progress_uses_one_snapshot_when_a_writer_commits(self):
+        # Interleave a separate transaction after the attempts SELECT has
+        # executed, before its result is consumed. The old multi-query code
+        # returned zero attempts and one accepted answer in this situation.
+        with self.connect() as writer, self.connect() as reader:
+            f = RunFixture(self, writer)
+            run = f.run()
+
+            class CommitAfterAttempts:
+                def __init__(self):
+                    self.committed = False
+
+                def execute(proxy, sql, *args):
+                    result = reader.execute(sql, *args)
+                    if "FROM attempts" in sql and not proxy.committed:
+                        proxy.committed = True
+                        with writer.transaction():
+                            attempt = f.attempt(run, f.q)
+                            f.submission(run, attempt, f.q)
+                            writer.execute("UPDATE runs SET status = 'running' WHERE id = %s", (run,))
+                    return result
+
+            proxy = CommitAfterAttempts()
+            before = _get_run(proxy, f.a, run)
+            self.assertTrue(proxy.committed)
+            self.assertEqual(before["status"], "queued")
+            self.assertEqual(before["progress"]["attempts"], 0)
+            self.assertEqual(before["progress"]["accepted_answered"], 0)
+            after = _get_run(reader, f.a, run)
+            self.assertEqual(after["status"], "running")
+            self.assertEqual(after["progress"]["attempts"], 1)
+            self.assertEqual(after["progress"]["accepted_answered"], 1)
 
     def test_roles(self):
         f, roles, own_run, other_run = self.seed()

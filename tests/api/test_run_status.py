@@ -22,9 +22,10 @@ def conn(method_owner, total=4, attempts=5, by_status=(("accepted", 3), ("reject
          by_answer=(("answered", 2), ("abstained", 1)), finalized=None):
     c = MagicMock()
     head = (uuid.uuid4(), "evaluating", "default", finalized, uuid.uuid4(), uuid.uuid4(), method_owner, "bench", 2)
-    results = [MagicMock(fetchone=lambda: head), MagicMock(fetchone=lambda: (total,)),
-               MagicMock(fetchone=lambda: (attempts,)), MagicMock(fetchall=lambda: list(by_status)),
-               MagicMock(fetchall=lambda: list(by_answer))]
+    statuses, answers = dict(by_status), dict(by_answer)
+    snapshot = (*head, total, attempts, answers.get("answered", 0), answers.get("abstained", 0),
+                statuses.get("rejected", 0), statuses.get("late", 0))
+    results = [MagicMock(fetchone=lambda: head), MagicMock(fetchone=lambda: snapshot)]
     c.execute.side_effect = results
     return c
 
