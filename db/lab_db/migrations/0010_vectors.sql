@@ -1,4 +1,4 @@
--- 0009 pgvector store (SPEC 12.4, R15, T53-T57).
+-- 0010 pgvector store (SPEC 12.4, R15, T53-T57).
 -- Embedding spaces are immutable identities; a collection belongs to one
 -- space, one project and one purpose; items are written only while the
 -- collection is building and are published only after a manifest check;
