@@ -159,6 +159,13 @@ scripts/check.sh --scope contracts
 - 在同一版本內，只允許新增選填欄位，或不改變既有合法輸入的修正。
 - 擴充的值放在 `attributes`，不能用來覆寫核心語意。
 
+## Draft selection
+
+The deterministic candidate planner reuses the four-part contracts and
+returns selected IDs and visible quota deficits. See
+[draft benchmark planning](../docs/BENCHMARK_PLANNING.md) for its validation
+boundary and the remaining verifier/publishing gates.
+
 ## Run-bound external JSONL preflight (#11 foundation)
 
 `lab_contracts.submission` validates an external JSONL file against explicit,
