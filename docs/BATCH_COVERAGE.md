@@ -38,6 +38,33 @@ scripts/check.sh --scope "parser governance"
   - Conflicting duplicate submissions for the same `batch_id` (differing page statuses, diagnostics, roles, or `operation_id`) fail closed with `ValueError("conflicting_duplicate_batch_result: ...")`.
   - Unknown `batch_id`, mismatched `batch_index`, pages outside the batch's planned `window_page_indices`, duplicate `page_index` within a single batch report, or a page report whose explicit `role` disagrees with its planned role (`core` vs `overlap_before`/`overlap_after`) fail closed with `ValueError`.
 
+## Failed/Missing-Only Retry Planning and Merge (`batch_retry`)
+
+`services/parser/lab_parser/batch_retry.py` (also re-exported from `batch_coverage`) addresses the gap where whole mixed batches would reprocess previously successful core pages, and enables merging newer retry outcomes:
+
+- **Executable failed/missing-only target derivation (`derive_retry_plan`)**:
+  - Validates `plan` and evaluates `prior_results` (or validates `prior_report`).
+  - Selects **only** core pages with `failed` or `missing` status for retry (`RetryTargetPage`).
+  - Succeeded (`ok`), `partial`, and `needs_review` core pages are never scheduled for retry.
+  - Preserves prior batch offset, original physical `page_index`, owner batch ID, prior diagnostics, prior operation ID, and read-only adjacent overlap reports from existing results for neighbor context without reprocessing them.
+  - Explicit `retry_operation_id` and positive integer `attempt` provenance.
+- **Bounded callback execution (`execute_retry`)**:
+  - Callback receives **only** retry core pages (`RetryTargetPage`). Adjacent context is available as read-only references.
+  - When no retries are required (`target_pages` is empty), exactly **zero** calls to the callback are executed.
+  - Rejects callbacks returning unexpected pages or attempting to return overlap roles (`overlap_cannot_upgrade_core_coverage`).
+- **Merge preserving history and immutable originals (`merge_retry_results`, `execute_and_merge_retry`)**:
+  - Prior results remain immutable; newly constructed `BatchResultInput` objects reflect the updated retry outcomes while retaining original successful pages.
+  - Re-evaluates coverage using the existing `evaluate_coverage` contract.
+  - Tracks full operation attempt history (`OperationAttemptRecord`) across initial and retry operations.
+  - Failed or missing pages that fail again on retry remain visible (`status="incomplete"`).
+  - Honest completion flags: `can_claim_complete` requires all physical pages to reach `ok`; `can_freeze_benchmark` remains `False`.
+- **Fail-closed rules**:
+  - Mismatched document/plan IDs or hashes fail closed (`cross_document_or_plan_mismatch`).
+  - Out-of-bounds or unscheduled page indices fail closed (`unexpected_page`, `unexpected_retry_page`).
+  - Altering previously successful, partial, or needs-review core pages fails closed (`cannot_reprocess_or_alter_successful_core_page`).
+  - Overlap roles attempting to upgrade core coverage fail closed (`overlap_cannot_upgrade_core_coverage`).
+  - Conflicting duplicate outcomes fail closed (`conflicting_duplicate_retry_page_result`).
+
 ## Scope and Remaining Gates
 
-`tests/parser/test_batch_coverage.py` exercises 500, 600, and 2,000 page plans, overlap boundaries, overlap-vs-core isolation, duplicate/conflicting/out-of-plan rejection, and retry batch selection. These are deterministic foundation unit/negative tests (Refs #7; R01, R02, R07, R28; T03, T07, T14, T94, T97 subcases). Upload/API endpoints, real parser execution (#8), full-document context linking (#9), durable PostgreSQL/job/checkpoint persistence (#5, #6), and full end-to-end 500-page recovery (T81) remain open.
+`tests/parser/test_batch_coverage.py` and `tests/parser/test_batch_retry.py` exercise 500, 600, and 2,000 page plans, overlap boundaries, overlap-vs-core isolation, duplicate/conflicting/out-of-plan rejection, retry batch selection, and deterministic failed/missing-only retry execution and merge. These are deterministic foundation unit/negative tests (Refs #7; R01, R02, R07, R28; T03, T07, T14, T94, T97 subcases). Upload/API endpoints, real parser execution (#8), full-document context linking (#9), durable PostgreSQL/job/checkpoint persistence (#5, #6), and full end-to-end 500-page recovery (T81) remain open.

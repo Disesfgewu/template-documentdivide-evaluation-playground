@@ -33,11 +33,19 @@ __all__ = [
     "BatchSpec",
     "CoverageReport",
     "CoverageStatus",
+    "MergedRetryResult",
+    "OperationAttemptRecord",
     "PageCoverageItem",
     "PageRole",
     "PageStatusCode",
     "ReportedPageStatusCode",
+    "RetryPlan",
+    "RetryTargetPage",
+    "derive_retry_plan",
     "evaluate_coverage",
+    "execute_and_merge_retry",
+    "execute_retry",
+    "merge_retry_results",
     "plan_batches",
     "select_retry_batches",
 ]
@@ -214,6 +222,8 @@ class BatchPageReport:
     status: ReportedPageStatusCode
     diagnostics: tuple[str, ...] = ()
     role: PageRole | None = None
+    operation_id: str | None = None
+    attempt: int | None = None
 
     def __post_init__(self) -> None:
         _require_strict_int(self.page_index, "page_index", minimum=0)
@@ -228,6 +238,10 @@ class BatchPageReport:
         if self.role is not None:
             if not isinstance(self.role, str) or self.role not in _VALID_ROLES:
                 raise ValueError(f"invalid_role: {self.role!r}")
+        if self.operation_id is not None:
+            _require_non_empty_id(self.operation_id, "operation_id")
+        if self.attempt is not None:
+            _require_strict_int(self.attempt, "attempt", minimum=0)
 
 
 @dataclass(frozen=True)
@@ -446,6 +460,8 @@ def _batch_result_signature(result: BatchResultInput) -> dict[str, Any]:
                 "status": p.status,
                 "diagnostics": list(p.diagnostics),
                 "role": p.role,
+                "operation_id": p.operation_id,
+                "attempt": p.attempt,
             }
             for p in sorted(result.pages, key=lambda x: x.page_index)
         ],
@@ -1046,3 +1062,16 @@ def select_retry_batches(
 
     retry_set = set(report.retry_batch_ids)
     return tuple(b for b in plan.batches if b.batch_id in retry_set)
+
+
+# Re-export retry API for convenience
+from lab_parser.batch_retry import (  # noqa: E402
+    MergedRetryResult,
+    OperationAttemptRecord,
+    RetryPlan,
+    RetryTargetPage,
+    derive_retry_plan,
+    execute_and_merge_retry,
+    execute_retry,
+    merge_retry_results,
+)
