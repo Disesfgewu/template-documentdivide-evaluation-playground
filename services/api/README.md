@@ -41,3 +41,5 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 - **下載**：授權與 artifact 狀態、大小上限、checksum 都先在資料庫層檢查，才讀取檔案；讀檔受 `max_pdf_bytes` 限制並驗證 sha256。
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
+
+`GET /api/v1/audit-events?project_id=…`：稽核事件查詢，可依 actor_id、resource_id、resource_type、action、outcome、since（含）/until（不含）過濾；新到舊、keyset cursor、limit 1–200。不認得的參數一律 400，避免拼錯的過濾條件悄悄放寬結果。存取暫用 `read_gold_trace_and_lineage`（owner/maintainer/reviewer），與 `GET /jobs/{id}` 相同，待 PM 決定；其他成員 403、非成員 404。
