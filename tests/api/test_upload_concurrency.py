@@ -20,6 +20,7 @@ for _sub in (_REPO_ROOT, _REPO_ROOT / "services" / "api", _REPO_ROOT / "contract
         sys.path.insert(0, str(_sub))
 
 import anyio
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from lab_api import documents
@@ -168,6 +169,88 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         down = documents._take_slot(req, "download", 2, "downloads")
         up.release()
         down.release()
+
+
+class DownloadResponseAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def invoke(self, req, send, *, read_error=False):
+        async def app(scope, receive, send):
+            request = types.SimpleNamespace(app=req.app, scope=scope)
+            doc = types.SimpleNamespace(document_id=uuid.uuid4())
+            result = mock.AsyncMock(side_effect=RuntimeError("read")) if read_error else mock.AsyncMock(return_value=b"pdf")
+            with mock.patch.object(documents, "_run_blocking", new=result):
+                response = await documents._pdf_response(request, None, doc, 1024)
+            await response(scope, receive, send)
+        await documents.DownloadAdmissionMiddleware(app)({"type": "http"}, None, send)
+
+    async def test_slow_send_holds_slot_until_body_finishes(self):
+        req = fake_request(download_concurrency=1)
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                started.set()
+                await finish.wait()
+
+        task = asyncio.create_task(self.invoke(req, send))
+        await started.wait()
+        with self.assertRaises(ApiError) as ctx:
+            await self.invoke(req, mock.AsyncMock())
+        self.assertEqual(ctx.exception.code, "server_busy")
+        finish.set()
+        await task
+        await self.invoke(req, mock.AsyncMock())
+
+    async def test_send_error_disconnect_and_cancellation_release_slot(self):
+        for kind in ("error", "disconnect", "cancel"):
+            with self.subTest(kind=kind):
+                req = fake_request(download_concurrency=1)
+                started = asyncio.Event()
+
+                async def send(message):
+                    if message["type"] == "http.response.body":
+                        started.set()
+                        if kind == "error":
+                            raise RuntimeError("send failure")
+                        if kind == "disconnect":
+                            raise OSError("disconnected")
+                        await asyncio.Event().wait()
+
+                task = asyncio.create_task(self.invoke(req, send))
+                await started.wait()
+                if kind == "cancel":
+                    task.cancel()
+                with self.assertRaises({"error": RuntimeError, "disconnect": OSError, "cancel": asyncio.CancelledError}[kind]):
+                    await task
+                await self.invoke(req, mock.AsyncMock())
+
+    async def test_read_failure_releases_slot(self):
+        req = fake_request(download_concurrency=1)
+        with self.assertRaises(RuntimeError):
+            await self.invoke(req, mock.AsyncMock(), read_error=True)
+        await self.invoke(req, mock.AsyncMock())
+
+
+class DownloadHandoffTests(unittest.TestCase):
+    def test_function_dependency_teardown_failure_releases_slot(self):
+        from fastapi import Depends, FastAPI
+
+        app = FastAPI()
+        app.state.download_concurrency = 1
+        app.add_middleware(documents.DownloadAdmissionMiddleware)
+
+        async def fails_on_exit():
+            yield
+            raise RuntimeError("teardown")
+
+        @app.get("/download")
+        async def download(request: Request, _=Depends(fails_on_exit, scope="function")):
+            doc = types.SimpleNamespace(document_id=uuid.uuid4())
+            return await documents._pdf_response(request, None, doc, 1024)
+
+        with mock.patch.object(documents, "_run_blocking", new=mock.AsyncMock(return_value=b"pdf")):
+            with TestClient(app, raise_server_exceptions=False) as client:
+                self.assertEqual(client.get("/download").status_code, 500)
+                self.assertEqual(client.get("/download").status_code, 500)
 
 
 class UploadEndpointCase(unittest.TestCase):
