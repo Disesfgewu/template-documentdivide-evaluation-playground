@@ -607,5 +607,145 @@ class AuthenticatedBoundedDownloadRegressionTests(unittest.TestCase):
                     self.assertEqual(res.json()["error"]["code"], "storage_corruption")
 
 
+class UploadTransactionActorContextUnitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import os
+        from lab_api.config import load_settings
+        from lab_api.main import create_app
+        from lab_api.auth import get_signing_secret, issue_actor_token
+
+        env = {
+            "LAB_ENV": "test",
+            "LAB_PROVIDER_MODE": "mock",
+            "LAB_DATABASE_URL": "postgresql://lab:s3cret@127.0.0.1:5432/lab",
+            "LAB_ARTIFACT_ROOT": "/tmp/test-artifacts",
+            "LAB_DB_CONNECT_TIMEOUT_S": "2",
+            "LAB_AUTH_SECRET": "secret-signing-key-for-tests-only-32b",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.app = create_app(settings, checks={})
+        self.client = TestClient(self.app)
+        self.proj_id = uuid.uuid4()
+        self.actor_id = uuid.uuid4()
+        self.secret = get_signing_secret(settings)
+        self.token = issue_actor_token(self.actor_id, self.secret)
+
+    def test_upload_executes_set_config_inside_transaction(self) -> None:
+        """Upload endpoint calls set_config('lab.actor_id', ...) inside conn.transaction()."""
+        mock_conn = MagicMock()
+        mock_store = MagicMock()
+        from lab_api.documents import get_db, get_store
+
+        self.app.dependency_overrides[get_db] = lambda: mock_conn
+        self.app.dependency_overrides[get_store] = lambda: mock_store
+
+        executed_statements = []
+        in_transaction = False
+
+        class MockTxContext:
+            def __enter__(self):
+                nonlocal in_transaction
+                in_transaction = True
+                return mock_conn
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                nonlocal in_transaction
+                in_transaction = False
+                return False
+
+        mock_conn.transaction.side_effect = MockTxContext
+
+        def fake_execute(query, params=None):
+            m = MagicMock()
+            executed_statements.append((query, params, in_transaction))
+            if "FROM actors" in str(query):
+                m.fetchone.return_value = (1,)
+            elif "FROM project_members" in str(query):
+                m.fetchone.return_value = ("owner",)
+            elif "FROM idempotency_keys" in str(query):
+                m.fetchone.return_value = None
+            elif "FROM document_versions" in str(query):
+                m.fetchone.return_value = (uuid.uuid4(), uuid.uuid4(), 1)
+            else:
+                m.fetchone.return_value = None
+            return m
+
+        mock_conn.execute.side_effect = fake_execute
+
+        pdf_payload = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        with patch("lab_api.documents.inspect_pdf") as mock_inspect, \
+             patch("lab_api.documents.extract_pages") as mock_extract, \
+             patch("lab_api.documents.ingest_document") as mock_ingest:
+            mock_inspect.return_value = MagicMock(outcome="accept", sha256="abc", size_bytes=len(pdf_payload), page_count=1, warnings=())
+            mock_extract.return_value = [MagicMock(page_index=0, page_label="1", rotation=0, display_width_pt=612.0, display_height_pt=792.0)]
+            mock_ingest.return_value = uuid.uuid4()
+
+            res = self.client.post(
+                f"/api/v1/documents?project_id={self.proj_id}",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/pdf",
+                },
+                content=pdf_payload,
+            )
+
+        self.assertEqual(res.status_code, 201)
+        set_config_calls = [
+            (q, p, in_tx)
+            for q, p, in_tx in executed_statements
+            if "set_config('lab.actor_id'" in str(q)
+        ]
+        self.assertEqual(len(set_config_calls), 1)
+        q, p, in_tx = set_config_calls[0]
+        self.assertTrue(in_tx)
+        self.assertEqual(p, (str(self.actor_id),))
+
+    def test_upload_fails_closed_when_set_config_raises(self) -> None:
+        """If set_config raises psycopg.Error inside transaction, it fails closed (status 500, not suppressed)."""
+        import psycopg
+        mock_conn = MagicMock()
+        mock_store = MagicMock()
+        from lab_api.documents import get_db, get_store
+
+        self.app.dependency_overrides[get_db] = lambda: mock_conn
+        self.app.dependency_overrides[get_store] = lambda: mock_store
+
+        class MockTxContext:
+            def __enter__(self):
+                return mock_conn
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return False
+
+        mock_conn.transaction.side_effect = MockTxContext
+
+        def fake_execute(query, params=None):
+            m = MagicMock()
+            if "FROM actors" in str(query):
+                m.fetchone.return_value = (1,)
+            elif "FROM project_members" in str(query):
+                m.fetchone.return_value = ("owner",)
+            elif "set_config('lab.actor_id'" in str(query):
+                raise psycopg.DatabaseError("simulated set_config failure")
+            else:
+                m.fetchone.return_value = None
+            return m
+
+        mock_conn.execute.side_effect = fake_execute
+
+        client = TestClient(self.app, raise_server_exceptions=False)
+        pdf_payload = b"%PDF-1.7 payload"
+        res = client.post(
+            f"/api/v1/documents?project_id={self.proj_id}",
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/pdf",
+            },
+            content=pdf_payload,
+        )
+        self.assertEqual(res.status_code, 500)
+
+
 if __name__ == "__main__":
     unittest.main()

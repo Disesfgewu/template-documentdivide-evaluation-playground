@@ -194,11 +194,6 @@ def get_authenticated_actor(
             message="unknown or invalid actor",
         )
 
-    try:
-        conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))
-    except psycopg.Error:
-        pass
-
     return actor_id
 
 
@@ -372,6 +367,7 @@ async def upload_document_handler(
             raise ApiError(400, "bad_request", "invalid idempotency key format")
 
     with conn.transaction():
+        conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))
         if idempotency_key:
             # Transaction-scoped advisory lock on (project_id, idempotency_key) held until commit/abort
             conn.execute(

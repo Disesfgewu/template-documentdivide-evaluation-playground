@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 from fastapi.testclient import TestClient
 
@@ -23,10 +25,14 @@ for _sub in (_REPO_ROOT, _REPO_ROOT / "db", _REPO_ROOT / "services" / "api", _RE
     if _sub.exists() and str(_sub) not in sys.path:
         sys.path.insert(0, str(_sub))
 
+import lab_db.ingest
 from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
+from lab_api.documents import get_db
 from lab_api.main import create_app
+from lab_api.readiness import connect
 from lab_db.lineage import walk
+from lab_db.repo import grant_app_privileges
 from lab_db.storage import LocalArtifactStore
 from fixtures.generators import bad_pdfs, synthetic_pdf
 
@@ -799,6 +805,325 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             )
         self.assertEqual(res_ceiling.status_code, 500)
         self.assertEqual(res_ceiling.json()["error"]["code"], "storage_corruption")
+
+    def make_restricted_app_client(self) -> tuple[TestClient, str]:
+        """Create a dedicated restricted application role with least-privilege DML permissions,
+        and instantiate a TestClient whose database connections run under that role."""
+        role = f"lab_app_{uuid.uuid4().hex[:10]}"
+        password = f"pw_{uuid.uuid4().hex}"
+
+        with self.connect(autocommit=True) as c:
+            c.execute(
+                sql.SQL("CREATE ROLE {} WITH LOGIN PASSWORD %s").format(sql.Identifier(role)),
+                (password,),
+            )
+            c.execute(
+                sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                    sql.Identifier(self.dbname), sql.Identifier(role)
+                )
+            )
+            c.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(role))
+            )
+
+        def _cleanup() -> None:
+            with self.connect(autocommit=True) as c:
+                c.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                c.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+
+        self.addCleanup(_cleanup)
+
+        with self.connect() as c:
+            grant_app_privileges(c, role)
+
+        p = urlsplit(self.url)
+        port_part = f":{p.port}" if p.port else ""
+        netloc = f"{role}:{password}@{p.hostname}{port_part}"
+        role_url = urlunsplit((p.scheme, netloc, p.path, p.query, p.fragment))
+
+        try:
+            with psycopg.connect(role_url, connect_timeout=3) as conn:
+                with self.assertRaises(psycopg.Error):
+                    with conn.transaction():
+                        conn.execute("DROP TABLE audit_events")
+            app_env = dict(self.env)
+            app_env["LAB_DATABASE_URL"] = role_url
+            with patch.dict(os.environ, app_env, clear=True):
+                settings = load_settings()
+            app = create_app(settings=settings, checks={})
+            return TestClient(app, raise_server_exceptions=False), role
+        except psycopg.OperationalError:
+            app_env = dict(self.env)
+            with patch.dict(os.environ, app_env, clear=True):
+                settings = load_settings()
+            app = create_app(settings=settings, checks={})
+
+            def restricted_get_db():
+                with connect(settings) as conn:
+                    conn.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
+                    yield conn
+
+            app.dependency_overrides[get_db] = restricted_get_db
+            return TestClient(app, raise_server_exceptions=False), role
+
+    def test_restricted_role_upload_and_actor_context_real_db(self) -> None:
+        """Restricted application-role real PostgreSQL test for upload and transaction-local actor context."""
+        client, role = self.make_restricted_app_client()
+
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        owner_token = issue_actor_token(owner_id, self.secret)
+
+        observed_actor: list[str | None] = []
+        original_insert_pages = lab_db.ingest._insert_pages
+
+        def spy_insert_pages(conn, doc_version_id, pages):
+            row = conn.execute("SELECT current_setting('lab.actor_id', true)").fetchone()
+            observed_actor.append(row[0] if row else None)
+            return original_insert_pages(conn, doc_version_id, pages)
+
+        with patch("lab_db.ingest._insert_pages", side_effect=spy_insert_pages):
+            res = client.post(
+                f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-upload",
+                headers={
+                    "Authorization": f"Bearer {owner_token}",
+                    "Content-Type": "application/pdf",
+                },
+                content=self.f01_1,
+            )
+
+        self.assertEqual(res.status_code, 201, res.text)
+        self.assertEqual(observed_actor, [str(owner_id)])
+
+        doc_id = uuid.UUID(res.json()["id"])
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM document_versions WHERE id = %s", (doc_id,))
+                doc_row = cur.fetchone()
+                self.assertIsNotNone(doc_row)
+                self.assertEqual(doc_row["project_id"], project_id)
+
+                cur.execute(
+                    "SELECT * FROM operations WHERE project_id = %s AND kind = 'document.import'",
+                    (project_id,),
+                )
+                op_row = cur.fetchone()
+                self.assertIsNotNone(op_row)
+                self.assertEqual(op_row["status"], "succeeded")
+                self.assertEqual(op_row["actor_id"], owner_id)
+
+                cur.execute(
+                    "SELECT * FROM audit_events WHERE project_id = %s AND action = 'document.imported'",
+                    (project_id,),
+                )
+                audit_row = cur.fetchone()
+                self.assertIsNotNone(audit_row)
+                self.assertEqual(audit_row["actor_id"], owner_id)
+
+    def test_restricted_role_replay_idempotency_succeeded_and_rejected(self) -> None:
+        """Restricted application-role real PostgreSQL test for replay of succeeded and rejected imports."""
+        client, role = self.make_restricted_app_client()
+
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        owner_token = issue_actor_token(owner_id, self.secret)
+
+        # 1. Succeeded upload replay under restricted role
+        res1 = client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-replay",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "restricted-idem-key-1",
+            },
+            content=self.f01_1,
+        )
+        self.assertEqual(res1.status_code, 201, res1.text)
+        doc_id = res1.json()["id"]
+
+        # Exact replay
+        res2 = client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-replay",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "restricted-idem-key-1",
+            },
+            content=self.f01_1,
+        )
+        self.assertEqual(res2.status_code, 200, res2.text)
+        self.assertTrue(res2.json().get("replayed"))
+        self.assertEqual(res2.json()["id"], doc_id)
+
+        # Conflict on same key with different body
+        res_conflict = client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-replay",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "restricted-idem-key-1",
+            },
+            content=self.f01_21,
+        )
+        self.assertEqual(res_conflict.status_code, 409)
+
+        # 2. Rejected import replay under restricted role
+        empty_pdf = bad_pdfs.build_empty_bytes()
+        res_rej1 = client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-rej",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "restricted-rej-key-1",
+            },
+            content=empty_pdf,
+        )
+        self.assertEqual(res_rej1.status_code, 422)
+        self.assertEqual(res_rej1.json()["error"]["code"], "empty_file")
+
+        # Exact replay of rejection returns same error response without duplicate audit rows
+        res_rej2 = client.post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-rej",
+            headers={
+                "Authorization": f"Bearer {owner_token}",
+                "Content-Type": "application/pdf",
+                "Idempotency-Key": "restricted-rej-key-1",
+            },
+            content=empty_pdf,
+        )
+        self.assertEqual(res_rej2.status_code, 422)
+        self.assertEqual(res_rej2.json(), res_rej1.json())
+
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT count(*) AS cnt FROM audit_events WHERE project_id = %s AND action = 'document.rejected'",
+                    (project_id,),
+                )
+                self.assertEqual(cur.fetchone()["cnt"], 1)
+
+    def test_restricted_role_rejection_and_audit_event(self) -> None:
+        """Restricted application-role real PostgreSQL test for rejection recording and actor context."""
+        client, role = self.make_restricted_app_client()
+
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        owner_token = issue_actor_token(owner_id, self.secret)
+
+        observed_actor: list[str | None] = []
+        original_record_rejection = lab_db.ingest._record_rejection
+
+        def spy_record_rejection(conn, **kwargs):
+            row = conn.execute("SELECT current_setting('lab.actor_id', true)").fetchone()
+            observed_actor.append(row[0] if row else None)
+            return original_record_rejection(conn, **kwargs)
+
+        corrupt_pdf = bad_pdfs.build_header_only()
+        with patch("lab_db.ingest._record_rejection", side_effect=spy_record_rejection):
+            res = client.post(
+                f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-corrupt",
+                headers={
+                    "Authorization": f"Bearer {owner_token}",
+                    "Content-Type": "application/pdf",
+                },
+                content=corrupt_pdf,
+            )
+
+        self.assertEqual(res.status_code, 422)
+        self.assertEqual(res.json()["error"]["code"], "corrupt_pdf")
+        self.assertEqual(observed_actor, [str(owner_id)])
+
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM operations WHERE project_id = %s AND kind = 'document.import'",
+                    (project_id,),
+                )
+                op_row = cur.fetchone()
+                self.assertIsNotNone(op_row)
+                self.assertEqual(op_row["status"], "failed")
+                self.assertEqual(op_row["actor_id"], owner_id)
+
+                cur.execute(
+                    "SELECT * FROM audit_events WHERE project_id = %s AND action = 'document.rejected'",
+                    (project_id,),
+                )
+                audit_row = cur.fetchone()
+                self.assertIsNotNone(audit_row)
+                self.assertEqual(audit_row["actor_id"], owner_id)
+                self.assertEqual(audit_row["outcome"], "failed")
+
+    def test_restricted_role_rollback_on_failure(self) -> None:
+        """Restricted application-role real PostgreSQL test for transaction rollback on failure."""
+        client, role = self.make_restricted_app_client()
+
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        owner_token = issue_actor_token(owner_id, self.secret)
+
+        def failing_insert_pages(*args, **kwargs):
+            raise psycopg.DatabaseError("simulated page insert failure under restricted role")
+
+        with patch("lab_db.ingest._insert_pages", side_effect=failing_insert_pages):
+            res = client.post(
+                f"/api/v1/documents?project_id={project_id}&logical_id=doc-restricted-rollback",
+                headers={
+                    "Authorization": f"Bearer {owner_token}",
+                    "Content-Type": "application/pdf",
+                    "Idempotency-Key": "restricted-rollback-key",
+                },
+                content=self.f01_1,
+            )
+            self.assertIn(res.status_code, (500, 503))
+
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT count(*) AS cnt FROM document_versions WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+                cur.execute("SELECT count(*) AS cnt FROM resource_versions WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+                cur.execute("SELECT count(*) AS cnt FROM operations WHERE project_id = %s AND status = 'intent'", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+                cur.execute("SELECT count(*) AS cnt FROM idempotency_keys WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+
+    def test_actor_context_fails_closed_when_setting_fails(self) -> None:
+        """Verify that failure to establish transaction-local actor setting fails closed and rolls back."""
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        owner_token = issue_actor_token(owner_id, self.secret)
+
+        orig_connect = connect
+
+        def failing_connect(settings):
+            real_conn = orig_connect(settings)
+            orig_execute = real_conn.execute
+
+            def guarded_execute(query, params=None):
+                if isinstance(query, str) and "set_config('lab.actor_id'" in query:
+                    raise psycopg.DatabaseError("simulated set_config failure inside transaction")
+                return orig_execute(query, params)
+
+            real_conn.execute = guarded_execute  # type: ignore[assignment]
+            return real_conn
+
+        with patch("lab_api.documents.connect", side_effect=failing_connect):
+            res = self.client.post(
+                f"/api/v1/documents?project_id={project_id}&logical_id=doc-fail-closed",
+                headers={
+                    "Authorization": f"Bearer {owner_token}",
+                    "Content-Type": "application/pdf",
+                },
+                content=self.f01_1,
+            )
+            self.assertIn(res.status_code, (500, 503))
+
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT count(*) AS cnt FROM document_versions WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+                cur.execute("SELECT count(*) AS cnt FROM operations WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
 
 
 if __name__ == "__main__":
