@@ -57,6 +57,7 @@ run_suite() {
       python3 -m tools.governance.check_repo
       # Provenance is checked against GitHub for passed entries only (needs GH_TOKEN then).
       python3 -m tools.governance.check_traceability --verify-provenance
+      python3 -m tools.governance.check_release_evidence --check
       python3 -m tools.governance.run_tests tests/governance
       ;;
     api)
