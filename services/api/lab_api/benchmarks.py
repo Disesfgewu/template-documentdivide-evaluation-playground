@@ -17,10 +17,12 @@ from typing import Optional
 import psycopg
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+from pydantic import TypeAdapter, ValidationError
 
 # .documents puts db/ and contracts/ on sys.path, so it is imported before lab_db.
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db, resolve_project_id
 from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
+from lab_contracts.benchmark import Question  # noqa: E402
 
 router = APIRouter()
 
@@ -30,6 +32,9 @@ BENCHMARK_RESOURCE_TYPE = "benchmark_revision"
 QUOTA_BUCKETS = ("general", "cross_page", "chart_table", "confusable")
 # The only payload keys copied out (the public part of the Question contract).
 PUBLIC_PAYLOAD_KEYS = ("language", "tags", "modality_requirements", "reasoning_type", "visual_object_refs")
+PUBLIC_FIELD_ADAPTERS = {name: TypeAdapter(Question.model_fields[name].rebuild_annotation())
+                         for name in PUBLIC_PAYLOAD_KEYS}
+MAX_ORDINAL = 2**31 - 1  # questions.ordinal is a PostgreSQL integer
 
 
 def encode_cursor(benchmark_id: uuid.UUID, ordinal: int) -> str:
@@ -48,7 +53,7 @@ def decode_cursor(cursor: str, benchmark_id: uuid.UUID) -> int:
     except (ValueError, binascii.Error):
         raise bad from None
     if (not isinstance(data, dict) or set(data) != {"b", "o"} or data["b"] != str(benchmark_id)
-            or not isinstance(data["o"], int) or isinstance(data["o"], bool) or data["o"] < 0):
+            or not isinstance(data["o"], int) or isinstance(data["o"], bool) or not 0 <= data["o"] <= MAX_ORDINAL):
         raise bad
     return data["o"]
 
@@ -56,9 +61,12 @@ def decode_cursor(cursor: str, benchmark_id: uuid.UUID) -> int:
 def parse_limit(raw: Optional[str]) -> int:
     if raw is None:
         return DEFAULT_LIMIT
-    if not raw.isascii() or not raw.isdigit() or not 1 <= int(raw) <= MAX_LIMIT:
+    if not raw.isascii() or not raw.isdigit():
         raise ApiError(400, "bad_request", f"limit must be an integer 1..{MAX_LIMIT}")
-    return int(raw)
+    normalized = raw.lstrip("0")
+    if len(normalized) > len(str(MAX_LIMIT)) or not normalized or int(normalized) > MAX_LIMIT:
+        raise ApiError(400, "bad_request", f"limit must be an integer 1..{MAX_LIMIT}")
+    return int(normalized)
 
 
 def public_question(row: tuple) -> dict:
@@ -68,7 +76,12 @@ def public_question(row: tuple) -> dict:
     if isinstance(payload, dict):
         for name in PUBLIC_PAYLOAD_KEYS:
             if name in payload:
-                item[name] = payload[name]
+                adapter = PUBLIC_FIELD_ADAPTERS[name]
+                try:
+                    item[name] = adapter.dump_python(adapter.validate_python(payload[name]), mode="json")
+                except ValidationError:
+                    # Never include invalid stored values or validation details in the response.
+                    raise ApiError(500, "invalid_question_payload", "invalid public question payload") from None
     return item
 
 
