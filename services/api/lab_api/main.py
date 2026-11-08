@@ -7,6 +7,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .benchmarks import router as benchmarks_router
 from .config import Settings, load_settings
 from .documents import ApiError, DownloadAdmissionMiddleware, router as documents_router
 from .comparisons import router as comparisons_router
@@ -50,5 +51,6 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
     app.include_router(runs_router)
     app.include_router(results_router)
     app.include_router(comparisons_router)
+    app.include_router(benchmarks_router)
 
     return app
