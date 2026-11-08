@@ -173,3 +173,8 @@ parts plus evidence/validation snapshots with versioned hashes and bounded
 strict import. Its separate participant projection has an explicit three-field
 allowlist. See [benchmark transfer](../docs/BENCHMARK_TRANSFER.md) for format,
 commands, limits and the remaining authorization/freeze/API gates.
+
+
+## Generation control
+
+The deterministic accept / regenerate / needs_review routing with attempt and cost caps, and the quota-deficit scheduling decision, are in `lab_contracts/generation_control.py`. See [generation control](../docs/GENERATION_CONTROL.md) for the rules and their limits.
