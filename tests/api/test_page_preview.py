@@ -34,7 +34,8 @@ from lab_api.documents import (
     get_store,
 )
 from lab_api.main import create_app
-from lab_api.preview import PNG_SIGNATURE, render_preview_in_subprocess
+from lab_api.preview import PNG_SIGNATURE, PreviewError, render_preview_in_subprocess
+from lab_parser.render import render_region
 from lab_db.repo import Decision, NotFound, PermissionDenied
 from fixtures import registry_check as rc
 from fixtures.generators import synthetic_pdf
@@ -135,6 +136,7 @@ class PagePreviewApiUnitTests(unittest.TestCase):
     def test_positive_page_preview_f01_renders_real_png_and_headers(self) -> None:
         """Accept: image/png renders real F01 PDF at 150 DPI with full metadata headers."""
         self.mock_store.open.return_value = self.f01_pdf
+        expected_asset = render_region(self.f01_pdf, 0, dpi=150)
 
         with patch("lab_api.documents.authorize", return_value=Decision(role="member", condition=None)):
             for url in (
@@ -146,6 +148,7 @@ class PagePreviewApiUnitTests(unittest.TestCase):
                     self.assertEqual(res.status_code, 200)
                     self.assertEqual(res.headers["Content-Type"], "image/png")
                     self.assertEqual(res.headers["Cache-Control"], "no-store")
+                    self.assertEqual(res.headers["Vary"], "Accept")
                     self.assertEqual(res.headers["X-Document-Sha256"], self.f01_sha256)
                     self.assertEqual(res.headers["X-Page-Index"], "0")
 
@@ -155,12 +158,13 @@ class PagePreviewApiUnitTests(unittest.TestCase):
                     actual_png_sha = hashlib.sha256(body).hexdigest()
                     self.assertEqual(res.headers["X-Image-Sha256"], actual_png_sha)
                     self.assertEqual(res.headers["ETag"], f'"{actual_png_sha}"')
+                    self.assertEqual(actual_png_sha, expected_asset.sha256)
 
-                    # Verify dimensions in header and PNG IHDR chunk
+                    # Verify dimensions in header and PNG IHDR chunk against oracle
                     width_px = int(res.headers["X-Image-Width"])
                     height_px = int(res.headers["X-Image-Height"])
-                    self.assertEqual(width_px, 1240)
-                    self.assertEqual(height_px, 1755)
+                    self.assertEqual(width_px, expected_asset.width_px)
+                    self.assertEqual(height_px, expected_asset.height_px)
 
                     png_w, png_h = struct.unpack(">II", body[16:24])
                     self.assertEqual(png_w, width_px)
@@ -181,15 +185,9 @@ class PagePreviewApiUnitTests(unittest.TestCase):
         )
         self.mock_store.open.return_value = f02_pdf
 
-        expected_dims = [
-            (0, 1275, 1651),  # Page 0 (portrait, rot 0)
-            (1, 1651, 1275),  # Page 1 (landscape, rot 90)
-            (2, 1275, 1651),  # Page 2 (portrait, rot 180)
-            (3, 1651, 1275),  # Page 3 (landscape, rot 270)
-        ]
-
         with patch("lab_api.documents.authorize", return_value=Decision(role="member", condition=None)):
-            for page_idx, exp_w, exp_h in expected_dims:
+            for page_idx in range(4):
+                oracle_asset = render_region(f02_pdf, page_idx, dpi=150)
                 with self.subTest(page=page_idx):
                     res = self.client.get(
                         f"/api/v1/documents/{self.doc_id}/pages/{page_idx}",
@@ -197,33 +195,65 @@ class PagePreviewApiUnitTests(unittest.TestCase):
                     )
                     self.assertEqual(res.status_code, 200)
                     self.assertEqual(res.headers["Content-Type"], "image/png")
+                    self.assertEqual(res.headers["Cache-Control"], "no-store")
+                    self.assertEqual(res.headers["Vary"], "Accept")
                     self.assertEqual(res.headers["X-Document-Sha256"], f02_sha)
                     self.assertEqual(res.headers["X-Page-Index"], str(page_idx))
-                    self.assertEqual(int(res.headers["X-Image-Width"]), exp_w)
-                    self.assertEqual(int(res.headers["X-Image-Height"]), exp_h)
+                    self.assertEqual(int(res.headers["X-Image-Width"]), oracle_asset.width_px)
+                    self.assertEqual(int(res.headers["X-Image-Height"]), oracle_asset.height_px)
 
                     body = res.content
                     self.assertTrue(body.startswith(PNG_SIGNATURE))
                     png_w, png_h = struct.unpack(">II", body[16:24])
-                    self.assertEqual(png_w, exp_w)
-                    self.assertEqual(png_h, exp_h)
+                    self.assertEqual(png_w, oracle_asset.width_px)
+                    self.assertEqual(png_h, oracle_asset.height_px)
 
-    def test_default_json_geometry_preserved_without_image_png_accept(self) -> None:
-        """Without Accept: image/png, default JSON geometry is preserved and store is not touched."""
+    def test_content_negotiation_quality_and_default_json_preservation(self) -> None:
+        """Parse media-range qualities; preserve default JSON when JSON preferred or PNG disabled."""
+        self.mock_store.open.return_value = self.f01_pdf
+
         with patch("lab_api.documents.authorize", return_value=Decision(role="member", condition=None)):
-            for accept_hdr in ("", "application/json", "*/*"):
-                with self.subTest(accept=accept_hdr):
-                    headers = {"Accept": accept_hdr} if accept_hdr else {}
-                    res = self.client.get(f"/api/v1/documents/{self.doc_id}/pages/0", headers=headers)
+            # 1. No accept or generic accept -> JSON default
+            for accept in ("", "*/*", "application/json", "text/plain"):
+                with self.subTest(accept=accept):
+                    res = self.client.get(f"/api/v1/documents/{self.doc_id}/pages/0", headers={"Accept": accept} if accept else {})
                     self.assertEqual(res.status_code, 200)
                     self.assertEqual(res.headers["Content-Type"], "application/json")
-                    data = res.json()
-                    self.assertEqual(data["document_version_id"], str(self.doc_id))
-                    self.assertEqual(data["page_index"], 0)
-                    self.assertEqual(data["rotation"], 0)
-                    self.assertIn("width_pt", data)
-                    self.assertIn("height_pt", data)
+                    self.assertEqual(res.headers["Vary"], "Accept")
+                    self.assertEqual(res.headers["Cache-Control"], "no-store")
                     self.mock_store.open.assert_not_called()
+
+            # 2. JSON preferred over PNG -> JSON default
+            res_pref_json = self.client.get(
+                f"/api/v1/documents/{self.doc_id}/pages/0",
+                headers={"Accept": "image/png;q=0.7, application/json;q=0.9"},
+            )
+            self.assertEqual(res_pref_json.status_code, 200)
+            self.assertEqual(res_pref_json.headers["Content-Type"], "application/json")
+
+            # 3. PNG preferred over JSON -> PNG served
+            res_pref_png = self.client.get(
+                f"/api/v1/documents/{self.doc_id}/pages/0",
+                headers={"Accept": "application/json;q=0.7, image/png;q=0.9"},
+            )
+            self.assertEqual(res_pref_png.status_code, 200)
+            self.assertEqual(res_pref_png.headers["Content-Type"], "image/png")
+
+            # 4. image/png;q=0 explicitly refused -> JSON default
+            res_q0 = self.client.get(
+                f"/api/v1/documents/{self.doc_id}/pages/0",
+                headers={"Accept": "image/png;q=0"},
+            )
+            self.assertEqual(res_q0.status_code, 200)
+            self.assertEqual(res_q0.headers["Content-Type"], "application/json")
+
+            # 5. Malformed accept type (image/pngjunk) -> JSON default
+            res_junk = self.client.get(
+                f"/api/v1/documents/{self.doc_id}/pages/0",
+                headers={"Accept": "image/pngjunk"},
+            )
+            self.assertEqual(res_junk.status_code, 200)
+            self.assertEqual(res_junk.headers["Content-Type"], "application/json")
 
     def test_authorization_checks_precede_storage_and_render(self) -> None:
         """Unauthorized, non-member, and ungranted observer fail before store/subprocess."""
@@ -260,7 +290,7 @@ class PagePreviewApiUnitTests(unittest.TestCase):
     def test_out_of_range_page_index_returns_404(self) -> None:
         """Page index >= page_count or < 0 returns 404 before storage read."""
         with patch("lab_api.documents.authorize", return_value=Decision(role="member", condition=None)):
-            for bad_page in (1, 99, 999):
+            for bad_page in (-1, 1, 99, 999):
                 with self.subTest(page=bad_page):
                     res = self.client.get(
                         f"/api/v1/documents/{self.doc_id}/pages/{bad_page}",
@@ -341,7 +371,7 @@ class PagePreviewApiUnitTests(unittest.TestCase):
 
         with patch("lab_api.documents.authorize", return_value=Decision(role="member", condition=None)), \
              patch("subprocess.run") as mock_subproc:
-            mock_subproc.return_value = MagicMock(return_code=13, returncode=13, stdout=b"", stderr=b"crash")
+            mock_subproc.return_value = MagicMock(returncode=13)
             res = self.client.get(
                 f"/api/v1/documents/{self.doc_id}/pages/0",
                 headers={"Accept": "image/png"},
@@ -407,6 +437,53 @@ class PagePreviewApiUnitTests(unittest.TestCase):
                 f"/api/v1/documents/{self.doc_id}/pages/0", headers={"Accept": "image/png"}
             )
             self.assertEqual(res_after.status_code, 200)
+
+    def test_direct_cancellation_preserves_slot_retention_until_worker_done(self) -> None:
+        """Cancellation does not prematurely free slot capacity while native work remains."""
+        self.app.state.preview_concurrency = 1
+        self.mock_store.open.return_value = self.f01_pdf
+
+        worker_started = threading.Event()
+        worker_can_finish = threading.Event()
+        worker_finished = threading.Event()
+
+        def mock_preview_worker(*args, **kwargs):
+            worker_started.set()
+            worker_can_finish.wait(timeout=5.0)
+            worker_finished.set()
+            return render_preview_in_subprocess(self.f01_pdf, 0)
+
+        with patch("lab_api.documents.authorize", return_value=Decision(role="member", condition=None)), \
+             patch("lab_api.documents.render_preview_in_subprocess", side_effect=mock_preview_worker):
+
+            # Start request in thread
+            t = threading.Thread(
+                target=lambda: self.client.get(
+                    f"/api/v1/documents/{self.doc_id}/pages/0",
+                    headers={"Accept": "image/png"},
+                )
+            )
+            t.start()
+            worker_started.wait(timeout=2.0)
+
+            # Slot is held; a second request gets 503 server_busy
+            res_busy = self.client.get(
+                f"/api/v1/documents/{self.doc_id}/pages/0",
+                headers={"Accept": "image/png"},
+            )
+            self.assertEqual(res_busy.status_code, 503)
+            self.assertEqual(res_busy.json()["error"]["code"], "server_busy")
+
+            worker_can_finish.set()
+            t.join(timeout=3.0)
+            self.assertTrue(worker_finished.is_set())
+
+            # Now slot is freed
+            res_ok = self.client.get(
+                f"/api/v1/documents/{self.doc_id}/pages/0",
+                headers={"Accept": "image/png"},
+            )
+            self.assertEqual(res_ok.status_code, 200)
 
     def test_event_loop_remains_responsive_during_page_preview(self) -> None:
         """Event loop is never blocked by native rendering; /healthz responds immediately."""

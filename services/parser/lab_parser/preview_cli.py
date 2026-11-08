@@ -4,11 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import resource
 import stat
 import sys
 from pathlib import Path
-
-from .render import MAX_PIXELS, MAX_SIDE_PX, render_region
 
 
 class PreviewCliError(Exception):
@@ -17,6 +16,18 @@ class PreviewCliError(Exception):
         self.exit_code = exit_code
         self.reason = reason
         self.message = message
+
+
+def _apply_fail_closed_limits() -> None:
+    """Apply strict POSIX resource ceilings before importing renderer or PDFium."""
+    # CPU time: 10s soft, 15s hard
+    resource.setrlimit(resource.RLIMIT_CPU, (10, 15))
+    # File size limit: 50MB
+    resource.setrlimit(resource.RLIMIT_FSIZE, (50 * 1024 * 1024, 50 * 1024 * 1024))
+    # Address space: 1.5GB
+    resource.setrlimit(resource.RLIMIT_AS, (1536 * 1024 * 1024, 1536 * 1024 * 1024))
+    # Disable core dumps
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 def render_preview_to_files(
@@ -30,8 +41,8 @@ def render_preview_to_files(
     if dpi != 150:
         raise PreviewCliError(2, "invalid_dpi", f"preview rendering supports fixed 150 DPI only, got {dpi}")
 
-    # Read input file safely using regular file descriptor
-    fd = os.open(str(input_path), os.O_RDONLY | os.O_NONBLOCK)
+    # Read input file safely using regular file descriptor (no symlinks)
+    fd = os.open(str(input_path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -43,6 +54,8 @@ def render_preview_to_files(
 
     if not pdf_bytes:
         raise PreviewCliError(2, "empty_file", "input file is empty")
+
+    from .render import render_region
 
     try:
         asset = render_region(
@@ -82,6 +95,13 @@ def render_preview_to_files(
 
 
 def preview_page_cli(argv: list[str]) -> int:
+    # Fail-closed resource ceilings applied immediately in child bootstrap
+    try:
+        _apply_fail_closed_limits()
+    except Exception as exc:
+        print(f"fatal: failed to set resource limits: {exc}", file=sys.stderr)
+        return 3
+
     parser = argparse.ArgumentParser(description="Render a single PDF page preview")
     parser.add_argument("--input", required=True, help="Input PDF file path")
     parser.add_argument("--output", required=True, help="Output PNG file path")

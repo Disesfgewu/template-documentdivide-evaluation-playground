@@ -5,6 +5,7 @@ import hashlib
 import os
 import struct
 import sys
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -21,6 +22,7 @@ from lab_api.auth import issue_actor_token
 from lab_api.config import load_settings
 from lab_api.main import create_app
 from lab_api.preview import PNG_SIGNATURE
+from lab_parser.render import render_region
 from fixtures.generators import synthetic_pdf
 
 try:
@@ -41,21 +43,17 @@ class RealPdfPagePreviewTests(FreshDatabase):
         cls.f01_sha256 = hashlib.sha256(cls.f01_21).hexdigest()
         cls.f01_size = len(cls.f01_21)
 
-        cls.artifact_dir = cls.enterClassContext(
-            import_module="tempfile"
-        ) if False else None  # Handled in setUp
-
     def setUp(self) -> None:
         super().setUp()
-        import tempfile
         self.temp_dir = tempfile.TemporaryDirectory()
         self.artifact_root = self.temp_dir.name
 
         self.secret = "test-secret-key-at-least-32-bytes-long-for-auth"
+        # Must use self.url from FreshDatabase to connect to the migrated test database
         self.env_patch = {
             "LAB_ENV": "test",
             "LAB_PROVIDER_MODE": "mock",
-            "LAB_DATABASE_URL": self.db_url if hasattr(self, "db_url") else ADMIN_URL,
+            "LAB_DATABASE_URL": self.url,
             "LAB_ARTIFACT_ROOT": self.artifact_root,
             "LAB_DB_CONNECT_TIMEOUT_S": "5",
             "LAB_AUTH_SECRET": self.secret,
@@ -100,20 +98,25 @@ class RealPdfPagePreviewTests(FreshDatabase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.headers["Content-Type"], "image/png")
         self.assertEqual(res.headers["Cache-Control"], "no-store")
+        self.assertEqual(res.headers["Vary"], "Accept")
         self.assertEqual(res.headers["X-Document-Sha256"], self.f01_sha256)
         self.assertEqual(res.headers["X-Page-Index"], "0")
-        self.assertEqual(res.headers["X-Image-Width"], "1240")
-        self.assertEqual(res.headers["X-Image-Height"], "1755")
+
+        # Measure actual dimensions using renderer oracle instead of hardcoded numbers
+        expected_asset = render_region(self.f01_21, 0, dpi=150)
+        self.assertEqual(res.headers["X-Image-Width"], str(expected_asset.width_px))
+        self.assertEqual(res.headers["X-Image-Height"], str(expected_asset.height_px))
 
         body = res.content
         self.assertTrue(body.startswith(PNG_SIGNATURE))
         actual_sha = hashlib.sha256(body).hexdigest()
         self.assertEqual(res.headers["X-Image-Sha256"], actual_sha)
         self.assertEqual(res.headers["ETag"], f'"{actual_sha}"')
+        self.assertEqual(actual_sha, expected_asset.sha256)
 
         png_w, png_h = struct.unpack(">II", body[16:24])
-        self.assertEqual(png_w, 1240)
-        self.assertEqual(png_h, 1755)
+        self.assertEqual(png_w, expected_asset.width_px)
+        self.assertEqual(png_h, expected_asset.height_px)
 
     def test_real_db_default_json_geometry_preserved(self) -> None:
         """Without Accept: image/png, endpoint returns JSON geometry from PostgreSQL pages table."""
@@ -129,6 +132,8 @@ class RealPdfPagePreviewTests(FreshDatabase):
         )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.headers["Content-Type"], "application/json")
+        self.assertEqual(res.headers["Cache-Control"], "no-store")
+        self.assertEqual(res.headers["Vary"], "Accept")
         data = res.json()
         self.assertEqual(data["document_version_id"], str(doc_id))
         self.assertEqual(data["page_index"], 0)
@@ -141,7 +146,7 @@ class RealPdfPagePreviewTests(FreshDatabase):
         with self.connect() as conn:
             proj_a, owner_a = self.make_project(conn, role="owner")
             proj_b, owner_b = self.make_project(conn, role="owner")
-            _, observer_a = self.make_project(conn, role="observer", project_id=proj_a)
+            observer_a = self.add_member(conn, proj_a, "observer")
 
         doc_id = self._upload_f01(proj_a, owner_a)
 

@@ -918,6 +918,47 @@ def _get_page(conn: psycopg.Connection, actor_id: uuid.UUID, document_id: uuid.U
     }
 
 
+def _prefers_png_preview(accept_header: str) -> bool:
+    """Parse HTTP Accept header with bounded media-range and quality weights.
+
+    Preserves default JSON when JSON is preferred or equal quality; returns True
+    only when image/png is explicitly acceptable with higher quality than JSON.
+    """
+    if not accept_header or not isinstance(accept_header, str):
+        return False
+
+    raw = accept_header[:1024].strip()
+    if not raw:
+        return False
+
+    png_q = 0.0
+    json_q = 0.0
+
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = [t.strip() for t in part.split(";")]
+        media_type = tokens[0].lower()
+
+        q_val = 1.0
+        for param in tokens[1:]:
+            if param.lower().startswith("q="):
+                try:
+                    q_val = float(param[2:].strip())
+                    if not (0.0 <= q_val <= 1.0):
+                        q_val = 0.0
+                except (ValueError, TypeError):
+                    q_val = 0.0
+
+        if media_type == "image/png":
+            png_q = max(png_q, q_val)
+        elif media_type in ("application/json", "text/json"):
+            json_q = max(json_q, q_val)
+
+    return png_q > 0.0 and png_q > json_q
+
+
 async def _preview_response(
     request: Request,
     store: LocalArtifactStore,
@@ -959,6 +1000,7 @@ async def _preview_response(
             headers={
                 "Content-Length": str(len(asset.png)),
                 "Cache-Control": "no-store",
+                "Vary": "Accept",
                 "ETag": f'"{asset.sha256}"',
                 "X-Document-Sha256": doc.doc_sha,
                 "X-Page-Index": str(page_index),
@@ -983,14 +1025,18 @@ async def get_page_handler(
     actor_id: uuid.UUID = Depends(get_authenticated_actor),
 ) -> Response:
     """Get per-page normalized geometry (JSON) or rendered page preview (Accept: image/png)."""
-    if "image/png" in request.headers.get("Accept", ""):
+    if _prefers_png_preview(request.headers.get("Accept", "")):
         server_max_bytes = getattr(request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES)
         return await _preview_response(
             request, store, conn, actor_id, document_id, page_index, server_max_bytes
         )
 
     content = await _run_blocking(request, "meta", _get_page, conn, actor_id, document_id, page_index)
-    return JSONResponse(status_code=200, content=content)
+    return JSONResponse(
+        status_code=200,
+        content=content,
+        headers={"Vary": "Accept", "Cache-Control": "no-store"},
+    )
 
 
 PAGE_RESPONSES = {
