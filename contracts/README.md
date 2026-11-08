@@ -158,3 +158,14 @@ scripts/check.sh --scope contracts
   - 刪除欄位。
 - 在同一版本內，只允許新增選填欄位，或不改變既有合法輸入的修正。
 - 擴充的值放在 `attributes`，不能用來覆寫核心語意。
+
+## Draft selection
+
+The deterministic candidate planner reuses the four-part contracts and
+returns selected IDs and visible quota deficits. See
+[draft benchmark planning](../docs/BENCHMARK_PLANNING.md) for its validation
+boundary and the remaining verifier/publishing gates.
+
+## Generation control
+
+The deterministic accept / regenerate / needs_review routing with attempt and cost caps, and the quota-deficit scheduling decision, are in `lab_contracts/generation_control.py`. See [generation control](../docs/GENERATION_CONTROL.md) for the rules and their limits.
