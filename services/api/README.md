@@ -43,3 +43,5 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
 
 `GET /api/v1/runs/{id}`：run 狀態、benchmark revision、budget profile、finalized_at 與進度計數（題數、attempt、已接受作答/棄答、待處理、被拒及逾時提交）。只回計數，不含答案、payload 或分數。owner/maintainer/reviewer 可看專案內任何 run；participant 只能看自己擁有之 method revision 的 run，其餘 404；observer 僅限已發布彙總（尚未實作），故 403；非成員 404。
+
+`GET /api/v1/runs/{id}/results`：某次 evaluation（預設最新，可用 `evaluation_id` 指定）的逐指標摘要（scored / not_applicable / pending / error 計數與已評分列的平均 raw_value）及逐題分數頁（ordinal、metric 排序，keyset cursor）。各指標獨立呈現，不產生加權總分（SPEC 9.1）；N/A 與待處理不以 0 計入平均。可用 `metric_name`、`quota_bucket` 過濾。僅 owner/maintainer/reviewer；participant 的可見分數取決於尚未定義的 feedback profile，自己的 run 為 403、他人的 run 為 404；observer 403。
