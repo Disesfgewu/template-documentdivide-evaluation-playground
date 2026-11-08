@@ -61,12 +61,12 @@ class PublicQuestionTests(unittest.TestCase):
 
     def test_only_allow_listed_payload_keys_are_copied(self):
         payload = {"language": "en", "tags": ["t"], "answer": "SECRET", "facts": [1], "evidence_sets": [2],
-                   "distractors": [3], "gold": {"x": 1}, "question_text": "overridden?"}
+                   "distractors": [3], "gold": {"x": 1}, "visual_object_refs": ["figure_1"], "question_text": "overridden?"}
         item = b.public_question(self.row(payload))
         self.assertEqual(item["language"], "en")
         self.assertEqual(item["tags"], ["t"])
         self.assertEqual(item["question_text"], "What?")  # the column wins
-        for leaked in ("answer", "facts", "evidence_sets", "distractors", "gold"):
+        for leaked in ("answer", "facts", "evidence_sets", "distractors", "gold", "visual_object_refs"):
             self.assertNotIn(leaked, item)
 
     def test_nested_values_in_public_fields_fail_closed(self):
@@ -81,7 +81,7 @@ class PublicQuestionTests(unittest.TestCase):
 
     def test_valid_contract_fields_remain_public(self):
         payload = {"language": "en", "tags": ["tag"], "modality_requirements": ["text"],
-                   "reasoning_type": "value_lookup", "visual_object_refs": ["figure_1"]}
+                   "reasoning_type": "value_lookup"}
         item = b.public_question(self.row(payload))
         for name, value in payload.items():
             self.assertEqual(item[name], value)

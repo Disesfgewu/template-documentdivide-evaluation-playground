@@ -31,7 +31,7 @@ MAX_LIMIT = 200
 BENCHMARK_RESOURCE_TYPE = "benchmark_revision"
 QUOTA_BUCKETS = ("general", "cross_page", "chart_table", "confusable")
 # The only payload keys copied out (the public part of the Question contract).
-PUBLIC_PAYLOAD_KEYS = ("language", "tags", "modality_requirements", "reasoning_type", "visual_object_refs")
+PUBLIC_PAYLOAD_KEYS = ("language", "tags", "modality_requirements", "reasoning_type")
 PUBLIC_FIELD_ADAPTERS = {name: TypeAdapter(Question.model_fields[name].rebuild_annotation())
                          for name in PUBLIC_PAYLOAD_KEYS}
 MAX_ORDINAL = 2**31 - 1  # questions.ordinal is a PostgreSQL integer
