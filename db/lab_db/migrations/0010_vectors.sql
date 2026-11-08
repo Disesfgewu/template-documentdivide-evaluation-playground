@@ -150,11 +150,14 @@ CREATE TABLE vector_item_regions (
 );
 
 CREATE FUNCTION vector_item_regions_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    c   vector_collections%ROWTYPE;
 BEGIN
     IF TG_OP IN ('UPDATE', 'DELETE') THEN
         RAISE EXCEPTION 'vector_item_regions are append-only' USING ERRCODE = 'integrity_constraint_violation';
     END IF;
-    IF (SELECT status FROM vector_collections WHERE id = NEW.collection_id) <> 'building' THEN
+    SELECT * INTO c FROM vector_collections WHERE id = NEW.collection_id FOR SHARE;
+    IF c.status <> 'building' THEN
         RAISE EXCEPTION 'regions are written only while the collection is building'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;

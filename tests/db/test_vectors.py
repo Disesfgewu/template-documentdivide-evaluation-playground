@@ -1,9 +1,12 @@
 """Real PostgreSQL + pgvector tests for the vector store (SPEC 12.4, R15, T53-T57, F07 cases)."""
 import math
 import random
+import threading
+import time
 import unittest
 import uuid
 import psycopg
+from psycopg.types.json import Jsonb
 from lab_db import vectors as V
 from tests.db.base import FreshDatabase, h
 
@@ -221,6 +224,12 @@ class TestVectors(FreshDatabase):
         item_d = V.Item(item_id="d", content_hash=h("content_d"), embedding=[0.0, 0.0, 1.0], document_sha256=D1)
         with self.assertRaises(psycopg.errors.IntegrityConstraintViolation):
             V.upsert(conn, p, col_id, space_hash=space_hash, items=[item_d], operation_id=op_id)
+        conn.rollback()
+
+        # After ready, direct insert of a region also raises IntegrityConstraintViolation
+        with self.assertRaises(psycopg.errors.IntegrityConstraintViolation):
+            conn.execute("INSERT INTO vector_item_regions VALUES (%s, %s, %s, %s)",
+                         (col_id, "a", 0, Jsonb({"page": 1})))
         conn.rollback()
 
         # UPDATE vector_collections SET status='building' raises IntegrityConstraintViolation
@@ -535,6 +544,212 @@ class TestVectors(FreshDatabase):
         with self.assertRaises(psycopg.errors.IntegrityConstraintViolation):
             conn.execute("UPDATE embedding_spaces SET model = 'changed' WHERE id = %s", (again_id,))
         conn.rollback()
+
+    def test_region_insert_and_publish_synchronize_on_collection_lock(self):
+        """SPEC 12.4, R17, T54-T57 / R30, T102: vector_item_regions insert and publish
+        synchronize on the same vector_collections row lock. Covering both interleavings
+        with two real PostgreSQL connections, verifying manifest and ready source mapping."""
+        conn = self.connect(autocommit=False)
+        p, a, op_id, col_id, space_id, space_hash = self.setup_collection(
+            conn, dim=3, metric="cosine", purpose="method", method_revision="m@1", docs=(D1,)
+        )
+        reg0 = {"page": 1, "bbox": [0, 0, 100, 100]}
+        reg1 = {"page": 2, "bbox": [10, 10, 50, 50]}
+        it1 = V.Item(item_id="item_1", content_hash=h("c_1"), embedding=[1.0, 0.0, 0.0], document_sha256=D1, regions=(reg0,))
+        V.upsert(conn, p, col_id, space_hash=space_hash, items=[it1], operation_id=op_id)
+        cnt, mh = V.manifest(conn, col_id)
+        self.assertEqual(cnt, 1)
+        conn.commit()
+
+        # --- Interleaving 1: Publish locks collection first; region write waits on the
+        # row lock, then is rejected once publish commits ready. ---
+        conn_pub = self.connect(autocommit=True)
+        conn_writer = self.connect(autocommit=True)
+
+        pub_locked = threading.Event()
+        pub_release = threading.Event()
+        pub_done = threading.Event()
+        pub_err = []
+
+        def publisher_worker():
+            try:
+                with conn_pub.transaction():
+                    V._collection(conn_pub, col_id, lock=True)
+                    pub_locked.set()
+                    if not pub_release.wait(timeout=10.0):
+                        raise TimeoutError("publisher release timed out")
+                    V.publish(conn_pub, p, col_id, expected_count=cnt, expected_manifest_hash=mh)
+                pub_done.set()
+            except Exception as e:
+                pub_err.append(e)
+
+        writer_started = threading.Event()
+        writer_err = []
+        writer_done = threading.Event()
+
+        def writer_worker():
+            try:
+                with conn_writer.transaction():
+                    writer_started.set()
+                    conn_writer.execute(
+                        "INSERT INTO vector_item_regions VALUES (%s, %s, %s, %s)",
+                        (col_id, "item_1", 1, Jsonb(reg1)),
+                    )
+                writer_done.set()
+            except Exception as e:
+                writer_err.append(e)
+
+        t_pub = threading.Thread(target=publisher_worker, name="interleaving1-publisher")
+        t_writer = threading.Thread(target=writer_worker, name="interleaving1-writer")
+        try:
+            t_pub.start()
+            self.assertTrue(pub_locked.wait(timeout=5.0), "publisher failed to acquire row lock")
+
+            t_writer.start()
+            self.assertTrue(writer_started.wait(timeout=5.0))
+            time.sleep(0.2)
+            self.assertTrue(t_writer.is_alive(), "writer must block on collection row lock")
+            self.assertFalse(writer_done.is_set())
+
+            pub_release.set()
+            t_pub.join(timeout=10.0)
+            self.assertFalse(t_pub.is_alive())
+            self.assertEqual(pub_err, [])
+            self.assertTrue(pub_done.is_set())
+
+            t_writer.join(timeout=10.0)
+            self.assertFalse(t_writer.is_alive())
+            self.assertFalse(writer_done.is_set())
+            self.assertEqual(len(writer_err), 1)
+            self.assertIsInstance(writer_err[0], psycopg.errors.IntegrityConstraintViolation)
+        finally:
+            pub_release.set()
+            t_pub.join(timeout=10.0)
+            t_writer.join(timeout=10.0)
+
+        with self.connect() as verify_conn:
+            st, count_db, mh_db = verify_conn.execute(
+                "SELECT status, item_count, manifest_hash FROM vector_collections WHERE id = %s",
+                (col_id,),
+            ).fetchone()
+            self.assertEqual(st, "ready")
+            self.assertEqual(count_db, 1)
+            self.assertEqual(mh_db, mh)
+
+            # Ready mapping contains only ordinal 0; ordinal 1 was rejected
+            regions = verify_conn.execute(
+                "SELECT item_id, ordinal, region FROM vector_item_regions WHERE collection_id = %s ORDER BY ordinal",
+                (col_id,),
+            ).fetchall()
+            self.assertEqual(len(regions), 1)
+            self.assertEqual(regions[0], ("item_1", 0, reg0))
+
+            cnt_rec, mh_rec = V.manifest(verify_conn, col_id)
+            self.assertEqual(cnt_rec, 1)
+            self.assertEqual(mh_rec, mh)
+
+        # --- Interleaving 2: Region write locks collection first; publish waits on the
+        # row lock, then proceeds only after region write commits. ---
+        p2, a2, op2, col2, space_id2, space_hash2 = self.setup_collection(
+            conn, dim=3, metric="cosine", purpose="method", method_revision="m@1", docs=(D1,)
+        )
+        reg0_2 = {"page": 1, "bbox": [0, 0, 100, 100]}
+        reg1_2 = {"page": 2, "bbox": [10, 10, 50, 50]}
+        it2 = V.Item(item_id="item_2", content_hash=h("c_2"), embedding=[0.0, 1.0, 0.0], document_sha256=D1, regions=(reg0_2,))
+        V.upsert(conn, p2, col2, space_hash=space_hash2, items=[it2], operation_id=op2)
+        cnt2, mh2 = V.manifest(conn, col2)
+        self.assertEqual(cnt2, 1)
+        conn.commit()
+
+        conn_pub2 = self.connect(autocommit=True)
+        conn_writer2 = self.connect(autocommit=True)
+
+        writer2_locked = threading.Event()
+        writer2_release = threading.Event()
+        writer2_done = threading.Event()
+        writer2_err = []
+
+        def writer2_worker():
+            try:
+                with conn_writer2.transaction():
+                    conn_writer2.execute(
+                        "INSERT INTO vector_item_regions VALUES (%s, %s, %s, %s)",
+                        (col2, "item_2", 1, Jsonb(reg1_2)),
+                    )
+                    writer2_locked.set()
+                    if not writer2_release.wait(timeout=10.0):
+                        raise TimeoutError("writer2 release timed out")
+                writer2_done.set()
+            except Exception as e:
+                writer2_err.append(e)
+
+        pub2_started = threading.Event()
+        pub2_done = threading.Event()
+        pub2_err = []
+
+        def pub2_worker():
+            try:
+                pub2_started.set()
+                V.publish(conn_pub2, p2, col2, expected_count=cnt2, expected_manifest_hash=mh2)
+                pub2_done.set()
+            except Exception as e:
+                pub2_err.append(e)
+
+        t_writer2 = threading.Thread(target=writer2_worker, name="interleaving2-writer")
+        t_pub2 = threading.Thread(target=pub2_worker, name="interleaving2-publisher")
+        try:
+            t_writer2.start()
+            self.assertTrue(writer2_locked.wait(timeout=5.0), "writer2 failed to acquire row lock")
+
+            t_pub2.start()
+            self.assertTrue(pub2_started.wait(timeout=5.0))
+            time.sleep(0.2)
+            self.assertTrue(t_pub2.is_alive(), "publisher must block on collection row lock")
+            self.assertFalse(pub2_done.is_set())
+
+            writer2_release.set()
+            t_writer2.join(timeout=10.0)
+            self.assertFalse(t_writer2.is_alive())
+            self.assertEqual(writer2_err, [])
+            self.assertTrue(writer2_done.is_set())
+
+            t_pub2.join(timeout=10.0)
+            self.assertFalse(t_pub2.is_alive())
+            self.assertEqual(pub2_err, [])
+            self.assertTrue(pub2_done.is_set())
+        finally:
+            writer2_release.set()
+            t_writer2.join(timeout=10.0)
+            t_pub2.join(timeout=10.0)
+
+        with self.connect() as verify_conn:
+            st2, count2_db, mh2_db = verify_conn.execute(
+                "SELECT status, item_count, manifest_hash FROM vector_collections WHERE id = %s",
+                (col2,),
+            ).fetchone()
+            self.assertEqual(st2, "ready")
+            self.assertEqual(count2_db, 1)
+            self.assertEqual(mh2_db, mh2)
+
+            # Ready mapping contains both regions committed before ready
+            regions2 = verify_conn.execute(
+                "SELECT item_id, ordinal, region FROM vector_item_regions WHERE collection_id = %s ORDER BY ordinal",
+                (col2,),
+            ).fetchall()
+            self.assertEqual(len(regions2), 2)
+            self.assertEqual(regions2[0], ("item_2", 0, reg0_2))
+            self.assertEqual(regions2[1], ("item_2", 1, reg1_2))
+
+            cnt2_rec, mh2_rec = V.manifest(verify_conn, col2)
+            self.assertEqual(cnt2_rec, 1)
+            self.assertEqual(mh2_rec, mh2)
+
+            # Further writes to ready collection are rejected
+            with self.assertRaises(psycopg.errors.IntegrityConstraintViolation):
+                verify_conn.execute(
+                    "INSERT INTO vector_item_regions VALUES (%s, %s, %s, %s)",
+                    (col2, "item_2", 2, Jsonb({"page": 3})),
+                )
 
 
 if __name__ == "__main__":
