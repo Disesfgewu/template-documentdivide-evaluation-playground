@@ -787,22 +787,43 @@ def _read_artifact(store: LocalArtifactStore, doc: _ReadableDocument, server_max
     return pdf_bytes
 
 
+class DownloadAdmissionMiddleware:
+    """Release download admission even if response handoff or sending fails."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        callbacks = []
+        scope["lab.download_release_callbacks"] = callbacks
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            for release in callbacks:
+                release()
+
+
 async def _pdf_response(
     request: Request, store: LocalArtifactStore, doc: _ReadableDocument, server_max_bytes: int
 ) -> Response:
     slot = _take_slot(request, "download", DEFAULT_DOWNLOAD_CONCURRENCY, "downloads")
     try:
         pdf_bytes = await _run_blocking(request, "download", _read_artifact, store, doc, server_max_bytes)
-    finally:
+        response = Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Length": str(len(pdf_bytes)),
+                "Content-Disposition": f'attachment; filename="{doc.document_id}.pdf"',
+            },
+        )
+        request.scope["lab.download_release_callbacks"].append(slot.release)
+        return response
+    except BaseException:
         slot.release()
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Length": str(len(pdf_bytes)),
-            "Content-Disposition": f'attachment; filename="{doc.document_id}.pdf"',
-        },
-    )
+        raise
 
 
 async def download_document_handler(
