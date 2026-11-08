@@ -23,3 +23,5 @@ npm test && npm run build
 ```
 
 `.npmrc` 設定 `legacy-peer-deps`：npm 10.9 解析 `@vitejs/plugin-react` 的 optional peer 時會出現 `Cannot read properties of null (reading 'edgesOut')`。因此 peer 依賴（`@testing-library/dom`）改為明確列在 devDependencies。
+
+傳輸保護：預設 PDF 上限512 MiB、JSON 回應64 KiB、整個 fetch及body的時限120秒。程式化設定只能降低bytes上限，時限必須為有限正整數；服務端尚無公開limits端點，部署需核對一致。串流不可用則拒絕，不以blob/text/json的整份緩衝作fallback。取消和超限立即解除等待；底層cancel是best-effort，不等待其完成。取消／逾時／網路不明上傳保留原Idempotency-Key。此增量的自動測試為替身HTTP／ReadableStream，真瀏覽器與PG候選證據由既有harness和CI另記；post-merge與request-ID缺口仍屬#83。

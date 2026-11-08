@@ -165,9 +165,8 @@ export function DocumentOperator({
         setUploadError(res.error);
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
       setUploadError({
-        message: `上傳失敗（${msg}）`,
+        message: "上傳失敗，請保留相同請求重試",
         code: "upload_error",
       });
     } finally {
@@ -235,9 +234,8 @@ export function DocumentOperator({
         setDownloadError(res.error);
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
       setDownloadError({
-        message: `下載失敗（${msg}）`,
+        message: "下載失敗，請重試",
         code: "download_error",
       });
     } finally {
@@ -524,7 +522,7 @@ export function DocumentOperator({
         <h4>系統限制與功能說明</h4>
         <ul>
           <li>
-            <strong>檔案容量上限</strong>：依據規範，單一 PDF 檔案上限為 512 MiB；錯誤回應上限為 64 KiB。
+            <strong>檔案容量上限</strong>：單一 PDF 檔案上限為 512 MiB；錯誤回應上限為 64 KiB。
           </li>
           <li>
             <strong>傳輸時限與取消</strong>：上傳與下載具備逾時中斷保護與串流保護，並支援使用者操作取消。
