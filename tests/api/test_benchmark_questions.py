@@ -33,7 +33,7 @@ class CursorTests(unittest.TestCase):
         import base64, json
         enc = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode()
         bad = ["", "!!!", "e30", enc([1]), enc({"b": str(BID)}), enc({"b": str(BID), "o": -1}),
-               enc({"b": str(BID), "o": True}), enc({"b": str(BID), "o": "1"}),
+               enc({"b": str(BID), "o": True}), enc({"b": str(BID), "o": 2**31}), enc({"b": str(BID), "o": "1"}),
                enc({"b": str(BID), "o": 1, "x": 1}), "A" * 300]
         for c in bad:
             with self.subTest(c=c[:20]):
@@ -47,7 +47,8 @@ class LimitTests(unittest.TestCase):
         self.assertEqual(b.parse_limit(None), b.DEFAULT_LIMIT)
         self.assertEqual(b.parse_limit("1"), 1)
         self.assertEqual(b.parse_limit(str(b.MAX_LIMIT)), b.MAX_LIMIT)
-        for bad in ("0", str(b.MAX_LIMIT + 1), "-1", "1.5", "abc", "", " 5", "٣"):
+        self.assertEqual(b.parse_limit("0" * 5000 + "1"), 1)
+        for bad in ("0", str(b.MAX_LIMIT + 1), "-1", "1.5", "abc", "", " 5", "٣", "9" * 5000):
             with self.subTest(bad=bad):
                 with self.assertRaises(ApiError) as ctx:
                     b.parse_limit(bad)
@@ -67,6 +68,23 @@ class PublicQuestionTests(unittest.TestCase):
         self.assertEqual(item["question_text"], "What?")  # the column wins
         for leaked in ("answer", "facts", "evidence_sets", "distractors", "gold"):
             self.assertNotIn(leaked, item)
+
+    def test_nested_values_in_public_fields_fail_closed(self):
+        for name in b.PUBLIC_PAYLOAD_KEYS:
+            with self.subTest(name=name):
+                with self.assertRaises(ApiError) as ctx:
+                    b.public_question(self.row({name: {"answer": "synthetic-secret"}}))
+                self.assertEqual(ctx.exception.status_code, 500)
+                self.assertNotIn("synthetic-secret", str(ctx.exception))
+        with self.assertRaises(ApiError):
+            b.public_question(self.row({"tags": [{"answer": "synthetic-secret"}]}))
+
+    def test_valid_contract_fields_remain_public(self):
+        payload = {"language": "en", "tags": ["tag"], "modality_requirements": ["text"],
+                   "reasoning_type": "value_lookup", "visual_object_refs": ["figure_1"]}
+        item = b.public_question(self.row(payload))
+        for name, value in payload.items():
+            self.assertEqual(item[name], value)
 
     def test_non_object_payload_is_ignored(self):
         for p in (None, [], "x", 3):
