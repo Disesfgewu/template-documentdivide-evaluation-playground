@@ -327,7 +327,11 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             self.assertFalse(walk_res.truncated)
 
     def test_concurrent_idempotency_requests_safely_serialized(self) -> None:
-        """Concurrency test: 8 simultaneous uploads with the same Idempotency-Key create exactly 1 document version."""
+        """Concurrency test: 8 simultaneous uploads with the same Idempotency-Key create exactly 1 document version.
+
+        This proves database serialization, so the admission budget is raised
+        to admit all 8; refusal under the default budget is the next test."""
+        self.app.state.upload_concurrency = 8
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
 
@@ -382,6 +386,63 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 (project_id,),
             ).fetchone()[0]
             self.assertEqual(intent_cnt, 0, "no operations may be left stranded in intent status")
+
+    def test_excess_concurrent_uploads_are_refused_not_queued_or_duplicated(self) -> None:
+        """With the default admission budget, uploads beyond it get a retryable
+        503 before their body is read. Whatever the timing, at most one
+        document version exists and nothing is stranded; a retry then succeeds."""
+        self.assertNotIn("upload_concurrency", vars(self.app.state))
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        token = issue_actor_token(owner_id, self.secret)
+        barrier = threading.Barrier(8)
+        results: list[tuple[int, dict]] = []
+        errors: list[str] = []
+
+        def post():
+            try:
+                barrier.wait()
+                r = TestClient(self.app).post(
+                    f"/api/v1/documents?project_id={project_id}&logical_id=doc-busy",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/pdf",
+                             "Idempotency-Key": "busy-key-1"},
+                    content=self.f01_21,
+                )
+                results.append((r.status_code, r.json()))
+            except Exception as exc:
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=post) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 8)
+        self.assertTrue(all(code in (200, 201, 503) for code, _ in results), [c for c, _ in results])
+        self.assertLessEqual([c for c, _ in results].count(201), 1)
+        for code, body in results:
+            if code == 503:
+                self.assertEqual((body["error"]["code"], body["error"]["retryable"]), ("server_busy", True))
+        with self.connect() as conn:
+            self.assertLessEqual(
+                conn.execute("SELECT count(*) FROM document_versions WHERE project_id = %s", (project_id,)).fetchone()[0], 1)
+            self.assertEqual(
+                conn.execute("SELECT count(*) FROM operations WHERE project_id = %s AND status = 'intent'",
+                             (project_id,)).fetchone()[0], 0)
+
+        # The slots came back: the same request is now admitted and ends with exactly one version.
+        retry = TestClient(self.app).post(
+            f"/api/v1/documents?project_id={project_id}&logical_id=doc-busy",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/pdf",
+                     "Idempotency-Key": "busy-key-1"},
+            content=self.f01_21,
+        )
+        self.assertIn(retry.status_code, (200, 201))
+        with self.connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT count(*) FROM document_versions WHERE project_id = %s", (project_id,)).fetchone()[0], 1)
 
     def test_caller_asserted_actor_id_rejected_with_401(self) -> None:
         """Caller-asserted actor UUID or X-Actor-Id spoofing is rejected with 401."""
