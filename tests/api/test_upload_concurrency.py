@@ -170,9 +170,8 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         down.release()
 
 
-class UploadEndpointAdmissionTests(unittest.TestCase):
-    """End to end: a busy server refuses before reading the body, and the
-    slot is released after both success and failure."""
+class UploadEndpointCase(unittest.TestCase):
+    """Shared app wiring for the endpoint tests below (no tests of its own)."""
 
     def setUp(self) -> None:
         from lab_api.config import load_settings
@@ -197,6 +196,11 @@ class UploadEndpointAdmissionTests(unittest.TestCase):
         self.app.dependency_overrides[get_authenticated_actor] = lambda: uuid.uuid4()
         self.pdf = b"%PDF-1.7 tiny"
         self.url = f"/api/v1/projects/{self.project}/documents"
+
+
+class UploadEndpointAdmissionTests(UploadEndpointCase):
+    """End to end: a busy server refuses before reading the body, and the
+    slot is released after both success and failure."""
 
     def test_busy_server_refuses_before_reading_the_body_then_recovers(self) -> None:
         entered, release = threading.Event(), threading.Event()
@@ -274,6 +278,112 @@ class UploadEndpointAdmissionTests(unittest.TestCase):
                 r = TestClient(self.app).post(self.url, content=self.pdf, headers={"Content-Type": "application/pdf"})
                 self.assertEqual(r.status_code, 403)
         self.assertEqual(read_calls, [])
+
+
+def asgi_request(body: bytes, content_type: str, *, state=None, chunk: int = 7):
+    """A real starlette Request over a canned ASGI body."""
+    from starlette.requests import Request
+
+    pending = [body[i : i + chunk] for i in range(0, len(body), chunk)] or [b""]
+
+    async def receive():
+        part = pending.pop(0)
+        return {"type": "http.request", "body": part, "more_body": bool(pending)}
+
+    scope = {
+        "type": "http", "method": "POST", "path": "/x", "query_string": b"",
+        "headers": [(b"content-type", content_type.encode())],
+        "app": types.SimpleNamespace(state=types.SimpleNamespace(**(state or {}))),
+    }
+    return Request(scope, receive)
+
+
+class BodyReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_kinds_accumulate_in_a_bytearray_and_parse_to_bytes(self) -> None:
+        pdf = b"%PDF-1.7 abcdefghij"
+        raw = await documents.read_upload_body(asgi_request(pdf, "application/pdf"), 1000)
+        self.assertEqual((raw.kind, type(raw.body)), ("pdf", bytearray))
+        self.assertEqual(documents.parse_upload(raw, 1000), (pdf, None))
+        self.assertIs(type(documents.parse_upload(raw, 1000)[0]), bytes)
+
+        multipart = (b"--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.pdf\"\r\n"
+                     b"Content-Type: application/pdf\r\n\r\n" + pdf + b"\r\n--B--\r\n")
+        raw = await documents.read_upload_body(asgi_request(multipart, "multipart/form-data; boundary=B"), 1000)
+        self.assertEqual((raw.kind, type(raw.body)), ("multipart", bytearray))
+        self.assertEqual(documents.parse_upload(raw, 1000), (pdf, None))
+
+    async def test_a_body_that_never_finishes_loses_its_slot_with_408(self) -> None:
+        async def never(*args, **kwargs):
+            await asyncio.sleep(30)
+
+        req = asgi_request(b"x", "application/pdf", state={"upload_read_timeout_s": 0.05})
+        with mock.patch.object(documents, "read_upload_body", never):
+            started = asyncio.get_running_loop().time()
+            with self.assertRaises(ApiError) as ctx:
+                await documents._read_upload_within_deadline(req, 1000)
+            self.assertLess(asyncio.get_running_loop().time() - started, 2)
+        self.assertEqual((ctx.exception.status_code, ctx.exception.code, ctx.exception.retryable),
+                         (408, "request_timeout", True))
+
+    async def test_invalid_timeouts_fall_back_to_the_default(self) -> None:
+        for bad in (0, -1, True, "5", None):
+            with self.subTest(bad=bad):
+                req = asgi_request(b"%PDF", "application/pdf", state={"upload_read_timeout_s": bad})
+                raw = await documents._read_upload_within_deadline(req, 100)
+                self.assertEqual(bytes(raw.body), b"%PDF")
+
+
+class UploadEndpointDeadlineAndReauthTests(UploadEndpointCase):
+    def test_slow_body_gets_408_and_the_slot_is_released(self) -> None:
+        self.app.state.upload_read_timeout_s = 0.1
+
+        async def never(request, max_bytes):
+            await asyncio.sleep(30)
+
+        with mock.patch.object(documents, "_authorize_upload", lambda *a: None):
+            with mock.patch.object(documents, "read_upload_body", never):
+                for _ in range(3):  # a leaked slot would turn the 2nd into a 503
+                    r = TestClient(self.app).post(self.url, content=self.pdf, headers={"Content-Type": "application/pdf"})
+                    self.assertEqual((r.status_code, r.json()["error"]["code"]), (408, "request_timeout"))
+            with mock.patch.object(documents, "_upload_core", lambda *a: (201, {"ok": True})):
+                ok = TestClient(self.app).post(self.url, content=self.pdf, headers={"Content-Type": "application/pdf"})
+        self.assertEqual(ok.status_code, 201)
+
+    def test_authorization_is_checked_again_inside_the_write_transaction(self) -> None:
+        """A role revoked while a slow client was still sending must stop the write."""
+        from lab_api.documents import get_db
+
+        conn = MagicMock()
+        in_tx = {"now": False}
+
+        class Tx:
+            def __enter__(self):
+                in_tx["now"] = True
+                return conn
+
+            def __exit__(self, *exc):
+                in_tx["now"] = False
+                return False
+
+        conn.transaction.side_effect = Tx
+        conn.execute.return_value.fetchone.return_value = None
+        self.app.dependency_overrides[get_db] = lambda: conn
+
+        calls: list[bool] = []
+
+        def authorize_then_revoke(c, project_id, actor_id):
+            calls.append(in_tx["now"])
+            if len(calls) == 2:
+                raise ApiError(403, "permission_denied", "role revoked")
+
+        with mock.patch.object(documents, "_authorize_upload", authorize_then_revoke), \
+                mock.patch.object(documents, "ingest_document") as ingest, \
+                mock.patch.object(documents, "inspect_pdf") as inspect:
+            r = TestClient(self.app).post(self.url, content=self.pdf, headers={"Content-Type": "application/pdf"})
+        self.assertEqual((r.status_code, r.json()["error"]["code"]), (403, "permission_denied"))
+        self.assertEqual(calls, [False, True], "once before the body, once inside the transaction")
+        ingest.assert_not_called()
+        inspect.assert_not_called()
 
 
 if __name__ == "__main__":

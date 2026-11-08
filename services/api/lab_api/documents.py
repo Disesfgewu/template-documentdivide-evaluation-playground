@@ -281,6 +281,9 @@ DEFAULT_UPLOAD_CONCURRENCY = 2
 DEFAULT_DOWNLOAD_CONCURRENCY = 2
 DEFAULT_METADATA_CONCURRENCY = 8
 MULTIPART_OVERHEAD_BYTES = 65536
+# An admitted upload must deliver its body within this many seconds, or it
+# loses its slot (408). Without it two slow clients could hold every slot.
+DEFAULT_UPLOAD_READ_TIMEOUT_S = 600.0
 
 
 def _state_object(request: Request, name: str, factory):
@@ -357,7 +360,7 @@ async def read_upload_body(request: Request, max_bytes: int) -> RawUpload:
 
     if ct_lower.startswith("application/pdf"):
         try:
-            body = await read_pdf_request_body(request, max_bytes=max_bytes)
+            body = await read_pdf_request_body(request, max_bytes=max_bytes, as_bytearray=True)
         except PdfRequestBodyError as exc:
             raise ApiError(status_code=exc.status_code, code=exc.code, message=exc.message) from exc
         return RawUpload("pdf", raw_ct, body)
@@ -376,6 +379,19 @@ async def read_upload_body(request: Request, max_bytes: int) -> RawUpload:
         return RawUpload("multipart", raw_ct, body)
 
     raise ApiError(415, "unsupported_media_type", "Content-Type must be application/pdf or multipart/form-data")
+
+
+async def _read_upload_within_deadline(request: Request, max_bytes: int) -> RawUpload:
+    timeout = getattr(request.app.state, "upload_read_timeout_s", DEFAULT_UPLOAD_READ_TIMEOUT_S)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        timeout = DEFAULT_UPLOAD_READ_TIMEOUT_S
+    try:
+        with anyio.fail_after(timeout):
+            return await read_upload_body(request, max_bytes)
+    except TimeoutError:
+        raise ApiError(
+            408, "request_timeout", "the request body was not received in time", retryable=True
+        ) from None
 
 
 def parse_upload(raw: RawUpload, max_bytes: int) -> tuple[bytes, Optional[str]]:
@@ -476,6 +492,9 @@ def _upload_core(
 
     with conn.transaction():
         conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))
+        # The first check ran before the body was read, possibly long ago for
+        # a slow client: authorize again at the moment of writing.
+        _authorize_upload(conn, proj_id, actor_id)
         if idempotency_key:
             # Transaction-scoped advisory lock on (project_id, idempotency_key) held until commit/abort
             conn.execute(
@@ -657,12 +676,13 @@ async def upload_document_handler(
         logical_hint=request.query_params.get("logical_id") or request.headers.get("X-Logical-Id"),
     )
 
-    # Authorize before a single body byte is read or a slot is taken.
+    # Authorize before a single body byte is read or a slot is taken (and again
+    # inside the write transaction, see _upload_core).
     await _run_blocking(request, "meta", _authorize_upload, conn, proj_id, actor_id)
 
     slot = _take_slot(request, "upload", DEFAULT_UPLOAD_CONCURRENCY, "uploads")
     try:
-        raw = await read_upload_body(request, max_bytes)
+        raw = await _read_upload_within_deadline(request, max_bytes)
         status, content = await _run_blocking(request, "upload", _upload_core, conn, store, ctx, raw)
     finally:
         slot.release()

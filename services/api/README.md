@@ -33,6 +33,8 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 
 - **先授權、再讀 body**：授權（`import_and_configure_parse`）通過後才取得 admission slot 並讀取請求內容；未授權的請求不佔 slot、不讀任何 body 位元組。
 - **有界記憶體**：同時上傳數由 slot 控制（`app.state.upload_concurrency`，預設 2；下載 `download_concurrency`，預設 2），沒有 slot 時立刻回 503 `server_busy`（`retryable: true`），不排隊。最壞記憶體約為 `上傳並行數 × 2 × (max_pdf_bytes + 64 KiB)`：multipart body 保存一份，PDF part 再切出一份。`max_pdf_bytes` 預設 512 MiB。
+- **讀 body 有期限**：已取得 slot 的上傳必須在 `upload_read_timeout_s`（預設 600 秒）內送完 body，否則回 408 `request_timeout`（`retryable: true`）並釋放 slot，避免少數慢速連線佔住全部 slot。
+- **授權兩次**：讀 body 之前檢查一次；寫入交易內再檢查一次（慢速上傳期間若角色被撤銷，不會寫入）。
 - **不阻塞 event loop、取消安全**：multipart 解析、sha256、PDF 檢查、SQL、artifact 讀寫都在 worker thread 執行（各用有上限的 `CapacityLimiter`）。請求被取消（斷線、逾時、關機）時，取消會等 worker 結束才繼續，因此 request 專用的連線與 store 不會在 worker 還在用時被關閉。不使用 `run_in_executor`（取消時它會立即返回、thread 仍在執行）。
 - **嚴格 multipart**（`lab_api/multipart_strict.py`）：只接受固定格式（不接受 preamble、折行或重複 header、`base64`／`quoted-printable` 編碼）、最多 4 個 part、只允許一個 PDF part 與最多一個 `logical_id` 文字欄位；其他 part 一律拒絕而非忽略。PDF part 超過上限回 413，非 PDF 媒體型別回 415。
 - **冪等重播**：帶 `Idempotency-Key` 時，同 key 同內容重送會重播原結果；成功回傳 200 `replayed: true`。被拒絕的請求（例如加密 PDF、頁面幾何錯誤）的**原始回應**與 operation 在同一交易中存入 `operation_results`（0009，append-only），重送時原樣回傳，只換上新請求的 `request_id`，不會重新執行 parser、也不受當下限制或程式版本影響。0009 之前就已失敗、沒有保存回應的 operation 回 409，並說明原回應未保留。同 key 不同內容回 409。
