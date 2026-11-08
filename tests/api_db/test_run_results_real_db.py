@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-import time
 import unittest
 import uuid
 from pathlib import Path
@@ -61,10 +60,14 @@ class RunResultsRealDbTests(FreshDatabase):
                           "VALUES (%s, %s, %s, %s, 'small')", (other_run, f.p, f.bench, pm))
             a1 = f.attempt(run, f.q)
             s1 = f.submission(run, a1, f.q)
-            old = f.evaluation(run)
+            # created_at is explicit: now() is the same for everything inside one outer transaction
+            old, ev = uuid.uuid4(), uuid.uuid4()
+            with c.transaction():
+                c.execute("INSERT INTO evaluations VALUES (%s, %s, %s, 'grader@1', 'published', '2026-01-01T00:00:00Z')",
+                          (old, run, f.bench))
+                c.execute("INSERT INTO evaluations VALUES (%s, %s, %s, 'grader@2', 'provisional', '2026-01-02T00:00:00Z')",
+                          (ev, run, f.bench))
             f.score(old, run, f.q, s1, raw=10.0, num=0.2, den=2.0)
-            time.sleep(0.05)
-            ev = f.evaluation(run)
             f.score(ev, run, f.q, s1, raw=75.0, num=1.5, den=2.0)
             f.score(ev, run, f.q2, None, raw=25.0, num=0.5, den=2.0)
             for metric, q, status, vals, why in (
