@@ -10,7 +10,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from lab_db.storage import LocalArtifactStore, StorageCorruption, StoredObject, _bounded_file_hash
+from lab_db.storage import (
+    LocalArtifactStore, StorageCorruption, StoredObject, StreamTooLarge, _bounded_file_hash,
+)
 
 
 class LocalArtifactStoreTests(unittest.TestCase):
@@ -560,6 +562,211 @@ class LocalArtifactStoreTests(unittest.TestCase):
             "committed", key, stored.sha256, self.store, expected_size=size
         )
         self.assertIn("artifact_corrupt", reasons_corrupt)
+
+
+class PutStreamTests(unittest.TestCase):
+    """``put_stream``: bounded streaming publication through the one store."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.store = LocalArtifactStore(self.root)
+        self.src_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.src_dir.cleanup)
+
+    def source(self, data: bytes) -> int:
+        path = Path(self.src_dir.name) / f"src-{len(list(Path(self.src_dir.name).iterdir()))}"
+        path.write_bytes(data)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        self.addCleanup(lambda: self._close(fd))
+        return fd
+
+    @staticmethod
+    def _close(fd: int) -> None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def stages(self) -> list[str]:
+        return [n for n in os.listdir(self.root / "sha256") if n.startswith(".stage-")]
+
+    def objects(self) -> list[str]:
+        return sorted(str(p.relative_to(self.root)) for p in (self.root / "sha256").rglob("*") if p.is_file())
+
+    def fd_count(self) -> int:
+        return len(os.listdir("/proc/self/fd"))
+
+    def test_streamed_object_equals_put_and_second_stream_is_reused(self) -> None:
+        data = b"%PDF-1.7 streamed bytes" * 1000
+        stored = self.store.put_stream(self.source(data), max_bytes=len(data))
+        digest = hashlib.sha256(data).hexdigest()
+        self.assertEqual(stored, StoredObject(f"sha256/{digest[:2]}/{digest}", "1", digest, len(data)))
+        self.assertFalse(stored.reused_existing)
+        self.assertEqual(self.store.open(stored.object_key), data)
+        self.assertEqual(self.stages(), [])
+        again = self.store.put_stream(self.source(data), max_bytes=len(data))
+        self.assertTrue(again.reused_existing)
+        self.assertEqual(again, stored)
+        self.assertEqual(self.store.put(data), stored)  # one layout, one object
+        self.assertEqual(self.objects(), [stored.object_key])
+
+    def test_limit_boundary_exact_and_one_over(self) -> None:
+        data = b"a" * 100
+        self.assertEqual(self.store.put_stream(self.source(data), max_bytes=100).size_bytes, 100)
+        with self.assertRaises(StreamTooLarge):
+            self.store.put_stream(self.source(b"b" * 101), max_bytes=100)
+        self.assertEqual(self.stages(), [])
+        self.assertEqual(len(self.objects()), 1)  # the over-limit source was not published
+        self.assertEqual(self.store.put_stream(self.source(b""), max_bytes=0).size_bytes, 0)
+        with self.assertRaises(StreamTooLarge):
+            self.store.put_stream(self.source(b"x"), max_bytes=0)
+
+    def test_reads_at_most_limit_plus_one_bytes(self) -> None:
+        fd = self.source(b"c" * 5000)
+        with self.assertRaises(StreamTooLarge):
+            self.store.put_stream(fd, max_bytes=10)
+        self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), 11)
+
+    def test_inspect_sees_staged_bytes_and_can_reject(self) -> None:
+        data = b"inspect me"
+        seen = []
+
+        def inspect(stage_fd: int, digest: str, size: int) -> None:
+            os.lseek(stage_fd, 0, os.SEEK_SET)
+            seen.append((os.read(stage_fd, 100), digest, size))
+            raise RuntimeError("rejected by caller")
+
+        with self.assertRaisesRegex(RuntimeError, "rejected by caller"):
+            self.store.put_stream(self.source(data), max_bytes=100, inspect=inspect)
+        self.assertEqual(seen, [(data, hashlib.sha256(data).hexdigest(), len(data))])
+        self.assertEqual(self.stages(), [])
+        self.assertEqual(self.objects(), [])
+
+    def test_accepting_inspect_publishes(self) -> None:
+        stored = self.store.put_stream(self.source(b"ok"), max_bytes=10, inspect=lambda *_: None)
+        self.assertEqual(self.objects(), [stored.object_key])
+
+    def test_stage_rewritten_in_place_is_detected_before_publication(self) -> None:
+        def inspect(stage_fd: int, digest: str, size: int) -> None:
+            os.pwrite(stage_fd, b"Z", 0)  # same size, different content
+
+        with self.assertRaises(StorageCorruption):
+            self.store.put_stream(self.source(b"original bytes"), max_bytes=100, inspect=inspect)
+        self.assertEqual(self.stages(), [])
+        self.assertEqual(self.objects(), [])
+
+    def test_stage_replaced_by_another_inode_is_detected(self) -> None:
+        data = b"original bytes"
+
+        def inspect(stage_fd: int, digest: str, size: int) -> None:
+            (name,) = self.stages()
+            path = self.root / "sha256" / name
+            path.unlink()
+            path.write_bytes(data)  # identical bytes, different inode
+            os.chmod(path, 0o600)
+
+        with self.assertRaises(StorageCorruption):
+            self.store.put_stream(self.source(data), max_bytes=100, inspect=inspect)
+        self.assertEqual(self.stages(), [])
+        self.assertEqual(self.objects(), [])
+
+    def test_stage_with_extra_link_or_wrong_mode_is_detected(self) -> None:
+        for tamper in (lambda p: os.link(p, str(p) + ".alias"), lambda p: os.chmod(p, 0o644)):
+            with self.subTest(tamper=tamper):
+                def inspect(stage_fd: int, digest: str, size: int, tamper=tamper) -> None:
+                    (name,) = [n for n in self.stages()]
+                    tamper(self.root / "sha256" / name)
+
+                with self.assertRaises(StorageCorruption):
+                    self.store.put_stream(self.source(b"bytes " + os.urandom(4)), max_bytes=100, inspect=inspect)
+                for leftover in (self.root / "sha256").glob(".stage-*"):
+                    leftover.unlink()
+                self.assertEqual(self.objects(), [])
+
+    def test_corrupted_existing_destination_is_never_clobbered(self) -> None:
+        data = b"genuine bytes"
+        stored = self.store.put(data)
+        target = self.root / stored.object_key
+        target.write_bytes(b"corrupt bytes!")
+        with self.assertRaises(StorageCorruption):
+            self.store.put_stream(self.source(data), max_bytes=100)
+        self.assertEqual(target.read_bytes(), b"corrupt bytes!")
+        self.assertEqual(self.stages(), [])
+
+    def test_symlinked_sha256_directory_is_refused(self) -> None:
+        elsewhere = Path(self._tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        os.symlink(elsewhere, self.root / "sha256")
+        with self.assertRaises(Exception) as ctx:
+            self.store.put_stream(self.source(b"x"), max_bytes=10)
+        self.assertNotIsInstance(ctx.exception, StreamTooLarge)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_stage_removal_failure_is_reported_and_closes_descriptors(self) -> None:
+        real_unlink = os.unlink
+
+        def failing_unlink(path, *args, **kwargs):
+            if str(path).startswith(".stage-"):
+                raise OSError(13, "denied")
+            return real_unlink(path, *args, **kwargs)
+
+        before = self.fd_count()
+        for _ in range(10):
+            with patch("lab_db.storage.os.unlink", side_effect=failing_unlink):
+                with self.assertRaisesRegex(StorageCorruption, "failed to remove staging file"):
+                    self.store.put_stream(self.source(b"y" * 10 + os.urandom(4)), max_bytes=100)
+            for leftover in (self.root / "sha256").glob(".stage-*"):
+                leftover.unlink()
+        self.assertLessEqual(self.fd_count(), before + 10)  # only the test's own source descriptors
+
+    def test_descriptors_do_not_grow_across_repeated_failures(self) -> None:
+        def reject(*_args) -> None:
+            raise RuntimeError("no")
+
+        self.store.put_stream(self.source(b"warm"), max_bytes=10)
+        sources = [self.source(b"z" * 8) for _ in range(30)]
+        before = self.fd_count()
+        for fd in sources:
+            with self.assertRaises(RuntimeError):
+                self.store.put_stream(fd, max_bytes=100, inspect=reject)
+        self.assertEqual(self.fd_count(), before)
+
+    def test_concurrent_duplicate_streams_publish_one_object(self) -> None:
+        import threading
+
+        data = b"concurrent bytes " * 4096
+        results, errors = [], []
+        barrier = threading.Barrier(8)
+        sources = [self.source(data) for _ in range(8)]
+
+        def work(fd: int) -> None:
+            try:
+                barrier.wait()
+                results.append(self.store.put_stream(fd, max_bytes=len(data)))
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=work, args=(fd,)) for fd in sources]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len({r.object_key for r in results}), 1)
+        self.assertEqual(sum(not r.reused_existing for r in results), 1)
+        self.assertEqual(self.stages(), [])
+        self.assertEqual(len(self.objects()), 1)
+
+    def test_invalid_arguments(self) -> None:
+        for fd in (-1, True, "3", None):
+            with self.subTest(fd=fd), self.assertRaises(ValueError):
+                self.store.put_stream(fd, max_bytes=10)
+        fd = self.source(b"x")
+        for bad in (-1, True, 1.5, None):
+            with self.subTest(max_bytes=bad), self.assertRaises(ValueError):
+                self.store.put_stream(fd, max_bytes=bad)
 
 
 if __name__ == "__main__":
