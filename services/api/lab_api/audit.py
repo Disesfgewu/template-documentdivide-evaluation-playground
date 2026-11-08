@@ -5,8 +5,9 @@ a keyset cursor on the event id. The role matrix has no audit action, so
 access reuses ``read_gold_trace_and_lineage`` (owner, maintainer, reviewer),
 the same default as ``GET /jobs/{id}``; other members get 403 and non-members
 404. Every query is scoped to one ``project_id`` and every value is bound as
-a parameter. ``reason`` is free text written by actors and is returned as
-recorded.
+a parameter. ``reason`` is free text written by actors; sensitive credentials
+are redacted on retrieval according to the redaction policy while the append-only
+database audit remains unchanged.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from fastapi.responses import JSONResponse
 
 # .documents puts db/ and contracts/ on sys.path, so it is imported before lab_db.
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db, resolve_project_id
+from lab_db.logs import redact  # noqa: E402
 from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
 
 router = APIRouter()
@@ -38,21 +40,68 @@ def bad(message: str) -> ApiError:
     return ApiError(400, "bad_request", message)
 
 
-def encode_cursor(project_id: uuid.UUID, last_id: int) -> str:
-    raw = json.dumps({"p": str(project_id), "i": last_id}, separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+def normalize_filters(filters: Optional[dict]) -> dict[str, str]:
+    if not filters:
+        return {}
+    out: dict[str, str] = {}
+    for k in sorted(filters):
+        v = filters[k]
+        if v is None:
+            continue
+        if isinstance(v, uuid.UUID):
+            out[k] = str(v)
+        elif isinstance(v, datetime.datetime):
+            out[k] = v.isoformat()
+        elif isinstance(v, str):
+            out[k] = v
+        else:
+            out[k] = str(v)
+    return out
 
 
-def decode_cursor(cursor: str, project_id: uuid.UUID) -> int:
+def encode_cursor(project_id: uuid.UUID, last_id: int, endpoint: str = "audit-events",
+                  filters: Optional[dict] = None, ordering: str = "id_desc") -> str:
+    raw = json.dumps({
+        "e": endpoint,
+        "f": normalize_filters(filters),
+        "i": last_id,
+        "o": ordering,
+        "p": str(project_id),
+    }, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_cursor(cursor: str, project_id: uuid.UUID, endpoint: str = "audit-events",
+                  filters: Optional[dict] = None, ordering: str = "id_desc") -> int:
     err = ApiError(400, "invalid_cursor", "invalid cursor")
+    if not isinstance(cursor, str) or not cursor or len(cursor) > 1024:
+        raise err
+    if len(cursor) % 4 == 1:
+        raise err
+    pad = "=" * (-len(cursor) % 4)
     try:
-        if len(cursor) > 200:
-            raise err
-        data = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        raw = base64.urlsafe_b64decode(cursor + pad)
     except (ValueError, binascii.Error):
         raise err from None
-    if (not isinstance(data, dict) or set(data) != {"p", "i"} or data["p"] != str(project_id)
-            or not isinstance(data["i"], int) or isinstance(data["i"], bool) or data["i"] < 1):
+    try:
+        canonical_b64 = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    except Exception:
+        raise err from None
+    if cursor != canonical_b64:
+        raise err
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise err from None
+    if (not isinstance(data, dict)
+            or set(data) != {"e", "f", "i", "o", "p"}
+            or data.get("p") != str(project_id)
+            or data.get("e") != endpoint
+            or data.get("o") != ordering
+            or data.get("f") != normalize_filters(filters)
+            or not isinstance(data.get("i"), int)
+            or isinstance(data.get("i"), bool)
+            or data["i"] < 1):
         raise err
     return data["i"]
 
@@ -60,7 +109,7 @@ def decode_cursor(cursor: str, project_id: uuid.UUID) -> int:
 def parse_limit(raw: Optional[str]) -> int:
     if raw is None:
         return DEFAULT_LIMIT
-    if not raw.isascii() or not raw.isdigit() or not 1 <= int(raw) <= MAX_LIMIT:
+    if not isinstance(raw, str) or not raw.isascii() or not raw.isdigit() or len(raw) > 5 or not 1 <= int(raw) <= MAX_LIMIT:
         raise bad(f"limit must be an integer 1..{MAX_LIMIT}")
     return int(raw)
 
@@ -129,9 +178,9 @@ def _list_events(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid
         if key in filters:
             where.append(f"{col} {op} %s")
             args.append(filters[key])
-    if cursor:
+    if cursor is not None:
         where.append("id < %s")
-        args.append(decode_cursor(cursor, project_id))
+        args.append(decode_cursor(cursor, project_id, endpoint="audit-events", filters=filters))
     rows = conn.execute(
         "SELECT id, event_id, actor_id, action, resource_type, resource_id, before_revision, after_revision, "
         "reason, outcome, operation_id, trace_id, occurred_at FROM audit_events WHERE " + " AND ".join(where) +
@@ -140,9 +189,10 @@ def _list_events(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid
     return {
         "items": [{"id": r[0], "event_id": str(r[1]), "actor_id": str(r[2]), "action": r[3], "resource_type": r[4],
                    "resource_id": str(r[5]) if r[5] else None, "before_revision": r[6], "after_revision": r[7],
-                   "reason": r[8], "outcome": r[9], "operation_id": str(r[10]), "trace_id": r[11],
+                   "reason": redact(r[8]) if isinstance(r[8], str) else r[8], "outcome": r[9],
+                   "operation_id": str(r[10]), "trace_id": r[11],
                    "occurred_at": r[12].isoformat()} for r in page],
-        "next_cursor": encode_cursor(project_id, page[-1][0]) if len(rows) > limit else None,
+        "next_cursor": encode_cursor(project_id, page[-1][0], endpoint="audit-events", filters=filters) if len(rows) > limit else None,
     }
 
 
