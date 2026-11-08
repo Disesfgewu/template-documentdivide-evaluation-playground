@@ -106,7 +106,7 @@ def _list_public_questions(conn: psycopg.Connection, actor_id: uuid.UUID, projec
     if row is None or (row[1] != "frozen" and not sees_unfrozen):
         raise ApiError(404, "not_found", "benchmark revision not found")
     benchmark_id, status = row
-    after = decode_cursor(cursor, benchmark_id) if cursor else -1
+    after = decode_cursor(cursor, benchmark_id) if cursor is not None else -1
 
     rows = conn.execute(
         "SELECT id, question_key, ordinal, question_text, question_hash, quota_bucket, payload FROM questions "
