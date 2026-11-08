@@ -16,6 +16,8 @@ class Fixture(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         for rel in check_repo.REQUIRED_FILES + [
             ".github/workflows/ci.yml",
+            "docs/PDF_FIXTURE_ACCEPTANCE.md",
+            "docs/RELEASE_EVIDENCE.md",
             "tools/governance/verified_identities.txt",
         ]:
             dst = self.tmp / rel
