@@ -814,8 +814,9 @@ class RealPdfUploadDownloadTests(FreshDatabase):
 
         with self.connect(autocommit=True) as c:
             c.execute(
-                sql.SQL("CREATE ROLE {} WITH LOGIN PASSWORD %s").format(sql.Identifier(role)),
-                (password,),
+                sql.SQL("CREATE ROLE {} WITH LOGIN PASSWORD {}").format(
+                    sql.Identifier(role), sql.Literal(password)
+                ),
             )
             c.execute(
                 sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
