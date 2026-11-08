@@ -156,6 +156,26 @@ def _fetch_boundary_frontier(
     return frontier, has_more
 
 
+def _has_edges_from(
+    conn: psycopg.Connection,
+    project_id: uuid.UUID,
+    node_ids: list[uuid.UUID],
+    direction: Direction,
+) -> bool:
+    """Whether any edge leaves ``node_ids`` in the traversal direction, whatever its
+    other endpoint. Used for nodes the walk reached but did not expand, so edges to
+    already-visited nodes (cycles, diamonds) are not missed. ``LIMIT 1`` bounds the
+    returned rows; PostgreSQL may still probe the index for every listed node."""
+    if not node_ids:
+        return False
+    column = "downstream_id" if direction == "upstream" else "upstream_id"
+    row = conn.execute(
+        f"SELECT 1 FROM lineage_edges WHERE project_id = %s AND {column} = ANY(%s) LIMIT 1",
+        (project_id, node_ids),
+    ).fetchone()
+    return row is not None
+
+
 def walk(
     conn: psycopg.Connection,
     project_id: uuid.UUID,
@@ -173,6 +193,12 @@ def walk(
     Traversal output, retained nodes/edges and frontier memory are bounded.
     SQL scans/aggregation work are not bounded by the returned-row LIMIT;
     query latency remains subject to database statement timeout and profiling.
+
+    ``truncated`` is True only when data was actually omitted: an unvisited
+    neighbour exists beyond a bound (reported in ``frontier``), more edges exist
+    than ``max_edges`` allows, or a reached-but-unexpanded node still has an
+    edge that was not returned (including one to an already visited node).
+    Using a bound exactly, with nothing left over, is complete.
     """
     _validate_args(direction, max_depth, max_nodes, max_edges, max_frontier)
 
@@ -236,7 +262,8 @@ def walk(
 
         current_level = next_level
         if len(edges) >= max_edges:
-            truncated = True
+            # Budget used up. Whether anything is actually omitted is decided below
+            # from evidence; using exactly max_edges is not itself truncation.
             break
 
     if current_level and len(frontier) < max_frontier:
@@ -251,6 +278,13 @@ def walk(
         if has_more:
             truncated = True
     elif current_level and len(frontier) >= max_frontier:
+        truncated = True
+
+    if current_level and not truncated and not frontier and _has_edges_from(
+        conn, project_id, current_level, direction
+    ):
+        # Nodes that were reached but never expanded still have edges that were not
+        # returned: to unvisited nodes (already seen as frontier) or to visited ones.
         truncated = True
 
     node_ids = list(depths.keys())
