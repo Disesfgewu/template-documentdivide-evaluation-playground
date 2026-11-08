@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import uuid
 from pathlib import Path
@@ -26,8 +27,10 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from lab_api import documents
 from lab_api.config import load_settings
 from lab_api.documents import (
+    ApiError,
     DEFAULT_PREVIEW_CONCURRENCY,
     get_authenticated_actor,
     get_db,
@@ -556,3 +559,145 @@ class PagePreviewApiUnitTests(unittest.TestCase):
                 render_preview_in_subprocess(self.f01_pdf, 0)
         self.assertEqual(raised.exception.status_code, 503)
         self.assertNotIn("private-path-canary", str(raised.exception))
+
+
+class PreviewRuntimeSafetyTests(unittest.IsolatedAsyncioTestCase):
+    """Preview must not block the event loop, must keep its admission slot until the native
+    worker has ended (also when the request task is cancelled), and must release it when the
+    response cannot be sent. The workers here are fakes that block on events, so the tests
+    fail when the protection is removed."""
+
+    def setUp(self) -> None:
+        env = {
+            "LAB_ENV": "test", "LAB_PROVIDER_MODE": "mock",
+            "LAB_DATABASE_URL": "postgresql://lab:s3cret@127.0.0.1:5432/lab",
+            "LAB_ARTIFACT_ROOT": "/tmp/test-artifacts", "LAB_DB_CONNECT_TIMEOUT_S": "2",
+            "LAB_AUTH_SECRET": "secret-signing-key-for-tests-only-32b",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.app = create_app(settings, checks={})
+        self.app.state.preview_concurrency = 1
+        self.doc_id, self.actor_id = uuid.uuid4(), uuid.uuid4()
+        self.app.dependency_overrides[get_db] = lambda: MagicMock()
+        self.app.dependency_overrides[get_authenticated_actor] = lambda: self.actor_id
+        self.started, self.release, self.finished = threading.Event(), threading.Event(), threading.Event()
+        self.render_calls = 0
+
+        doc = types.SimpleNamespace(page_count=1, doc_sha="d" * 64, document_id=self.doc_id,
+                                    size_bytes=3, object_key="sha256/aa/" + "a" * 64)
+        asset = types.SimpleNamespace(png=PNG_SIGNATURE + b"x", sha256="s" * 64, width_px=1, height_px=1)
+
+        def blocking_render(*_args, **_kwargs):
+            self.render_calls += 1
+            self.started.set()
+            self.release.wait(timeout=5.0)  # a real native render is not interruptible either
+            self.finished.set()
+            return asset
+
+        for patcher in (
+            patch("lab_api.documents._readable_document", return_value=doc),
+            patch("lab_api.documents.get_store", return_value=MagicMock()),
+            patch("lab_api.documents._read_artifact", return_value=b"pdf"),
+            patch("lab_api.documents.render_preview_in_subprocess", side_effect=blocking_render),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.release.set)
+
+    def request(self) -> Request:
+        return Request({"type": "http", "method": "GET", "path": "/x", "query_string": b"", "headers": [],
+                        "app": self.app, "lab.download_release_callbacks": []})
+
+    async def preview(self, page: int = 0):
+        return await documents._preview_response(self.request(), MagicMock(), self.actor_id, self.doc_id, page, 1024)
+
+    async def worker_started(self) -> None:
+        await asyncio.get_running_loop().run_in_executor(None, self.started.wait, 3.0)
+        self.assertTrue(self.started.is_set(), "the render worker never started")
+
+    def free_slots(self) -> int:
+        return self.app.state.preview_slots.value
+
+    async def test_health_answers_on_the_same_event_loop_before_the_worker_is_released(self) -> None:
+        import httpx
+
+        transport = httpx.ASGITransport(app=self.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://lab") as client:
+            preview = asyncio.create_task(client.get(f"/api/v1/documents/{self.doc_id}/pages/0",
+                                                     headers={"Accept": "image/png"}))
+            await self.worker_started()
+            health = await asyncio.wait_for(client.get("/healthz"), timeout=1.0)
+            self.assertEqual((health.status_code, health.json()), (200, {"status": "ok"}))
+            self.assertFalse(self.finished.is_set(), "health was only answered after the native render ended")
+            self.release.set()
+            response = await asyncio.wait_for(preview, timeout=3.0)
+            self.assertEqual(response.status_code, 200)
+
+    async def test_cancelling_the_request_task_keeps_the_slot_until_the_worker_ends(self) -> None:
+        task = asyncio.create_task(self.preview())
+        await self.worker_started()
+        self.assertEqual(self.free_slots(), 0)
+        task.cancel()
+        await asyncio.sleep(0.2)
+        self.assertFalse(task.done(), "the request ended while native work was still running")
+        self.assertEqual(self.free_slots(), 0, "the slot was released before the worker ended")
+        # a new request is refused, not admitted next to the still-running worker
+        with self.assertRaises(ApiError) as busy:
+            await self.preview()
+        self.assertEqual(busy.exception.code, "server_busy")
+        self.assertEqual(self.render_calls, 1)
+        self.release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=3.0)
+        self.assertTrue(self.finished.is_set())
+        self.assertEqual(self.free_slots(), 1, "the slot must be released exactly once, after the worker")
+        # and the freed slot admits the next request
+        again = await self.preview()
+        self.assertEqual(again.status_code, 200)
+
+    async def _through_middleware(self, send):
+        async def app(scope, receive, send):
+            request = Request(scope)
+            request.scope["app"] = self.app
+            response = await documents._preview_response(request, MagicMock(), self.actor_id, self.doc_id, 0, 1024)
+            await response(scope, receive, send)
+
+        await documents.DownloadAdmissionMiddleware(app)(
+            {"type": "http", "method": "GET", "path": "/x", "query_string": b"", "headers": [], "app": self.app},
+            None, send)
+
+    async def test_response_send_failure_releases_the_slot_exactly_once(self) -> None:
+        self.release.set()
+        for kind, error in (("error", RuntimeError), ("disconnect", OSError)):
+            with self.subTest(kind=kind):
+                async def send(message, kind=kind):
+                    if message["type"] == "http.response.body":
+                        raise RuntimeError("send failure") if kind == "error" else OSError("disconnected")
+
+                with self.assertRaises(error):
+                    await self._through_middleware(send)
+                self.assertEqual(self.free_slots(), 1)
+
+    async def test_a_slow_send_keeps_the_slot_until_the_body_is_sent(self) -> None:
+        self.release.set()
+        body_started, finish = asyncio.Event(), asyncio.Event()
+
+        async def slow_send(message):
+            if message["type"] == "http.response.body":
+                body_started.set()
+                await finish.wait()
+
+        task = asyncio.create_task(self._through_middleware(slow_send))
+        await body_started.wait()
+        self.assertEqual(self.free_slots(), 0, "the slot was freed while the response was still being sent")
+        finish.set()
+        await task
+        self.assertEqual(self.free_slots(), 1)
+
+    async def test_a_page_out_of_range_never_takes_a_slot_or_starts_a_worker(self) -> None:
+        with self.assertRaises(ApiError) as out:
+            await self.preview(page=5)
+        self.assertEqual(out.exception.status_code, 404)
+        self.assertEqual(self.render_calls, 0)
+        self.assertIsNone(getattr(self.app.state, "preview_slots", None))
