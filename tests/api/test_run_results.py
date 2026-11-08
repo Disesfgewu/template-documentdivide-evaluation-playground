@@ -117,6 +117,8 @@ class ResultsShapeTests(unittest.TestCase):
         out = self.results(self.conn(summary=[("correctness", 2, 0, 1, 0, 50.0), ("faithfulness", 0, 3, 0, 0, None)]))
         self.assertEqual(out["metrics"][0], {"metric_name": "correctness", "scored": 2, "not_applicable": 0, "pending": 1,
                                               "error": 0, "mean": 50.0})
+        self.assertTrue(out["provisional"])
+        self.assertEqual(out["summary_scope"], "scored_rows_only")
         self.assertIsNone(out["metrics"][1]["mean"])
         self.assertEqual(out["metrics"][1]["not_applicable"], 3)
         self.assertNotIn("total", json.dumps(out).lower().replace("not_applicable", ""))

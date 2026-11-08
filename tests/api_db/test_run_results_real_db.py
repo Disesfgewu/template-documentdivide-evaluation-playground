@@ -161,7 +161,7 @@ class RunResultsRealDbTests(FreshDatabase):
 
                 def execute(proxy, sql, *args):
                     result = reader.execute(sql, *args)
-                    if "filtered_scores" in sql and not proxy.committed:
+                    if ("filtered_scores" in sql or "avg(s.raw_value)" in sql) and not proxy.committed:
                         proxy.committed = True
                         with writer.transaction():
                             writer.execute(

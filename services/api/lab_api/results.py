@@ -148,8 +148,8 @@ def _get_results(conn: psycopg.Connection, actor_id: uuid.UUID, run_id: uuid.UUI
     target_eval_id = q.get("evaluation_id")
 
     if q.get("cursor") is not None:
-        if not q["cursor"]:
-            raise ApiError(400, "invalid_cursor", "cursor must not be empty")
+        if not isinstance(q["cursor"], str) or not q["cursor"] or len(q["cursor"]) > 512:
+            raise ApiError(400, "invalid_cursor", "invalid cursor")
         try:
             pad = "=" * (-len(q["cursor"]) % 4)
             raw = base64.b64decode(q["cursor"].replace("-", "+").replace("_", "/") + pad, validate=True)
@@ -317,6 +317,11 @@ FROM target_eval te
             "status": ev_status,
             "created_at": created_at_str,
         },
+        # Score-row coverage does not yet prove a full applicable-question
+        # denominator. Even a completed evaluation is only a provisional
+        # scored-subset statistic through this partial endpoint.
+        "summary_scope": "scored_rows_only",
+        "provisional": True,
         "filters": query_filters,
         "metrics": metrics_list,
         "items": items_list,
