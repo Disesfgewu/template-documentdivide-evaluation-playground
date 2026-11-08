@@ -43,7 +43,7 @@ class PreviewAsset:
     page_index: int
 
 
-def render_preview_in_subprocess(
+def _render_preview_in_subprocess(
     pdf_bytes: bytes,
     page_index: int,
     timeout_s: float = DEFAULT_PREVIEW_TIMEOUT_S,
@@ -282,3 +282,15 @@ def _validate_png(data: bytes, width: int, height: int) -> None:
             invalid()
     except zlib.error:
         invalid()
+
+
+def render_preview_in_subprocess(
+    pdf_bytes: bytes,
+    page_index: int,
+    timeout_s: float = DEFAULT_PREVIEW_TIMEOUT_S,
+) -> PreviewAsset:
+    """Normalize private workspace setup, writes and cleanup failures too."""
+    try:
+        return _render_preview_in_subprocess(pdf_bytes, page_index, timeout_s)
+    except OSError as exc:
+        raise PreviewError(503, "service_unavailable", "preview workspace unavailable", retryable=True) from exc

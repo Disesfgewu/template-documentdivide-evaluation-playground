@@ -548,3 +548,11 @@ class PagePreviewApiUnitTests(unittest.TestCase):
         response = self.app.openapi()["paths"]["/api/v1/documents/{document_id}/pages/{page_index}"]["get"]["responses"]["200"]
         self.assertIn("X-Image-Sha256", response["headers"])
         self.assertNotIn("headers", response["content"]["image/png"])
+
+
+    def test_preview_workspace_failure_is_sanitized(self):
+        with patch("lab_api.preview.tempfile.TemporaryDirectory", side_effect=OSError("private-path-canary")):
+            with self.assertRaises(PreviewError) as raised:
+                render_preview_in_subprocess(self.f01_pdf, 0)
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertNotIn("private-path-canary", str(raised.exception))
