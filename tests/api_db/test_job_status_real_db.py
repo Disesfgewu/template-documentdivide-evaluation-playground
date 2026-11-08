@@ -68,7 +68,7 @@ class JobStatusRealDbTests(FreshDatabase):
         self.assertIn("worker-secret-name", body["transitions"][0]["reason"])  # reasons are returned as recorded; they name the worker, never the token
         for banned in ("lease_token", "lease_owner", "lease_expires_at"):
             self.assertNotIn(banned, body)
-        self.assertNotIn(str(lease.token), res.text)
+        self.assertNotIn("token", res.text)
 
     def test_transitions_newest_first_after_finish(self):
         p, owner, roles, job, lease = self.seed()
