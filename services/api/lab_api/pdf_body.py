@@ -123,8 +123,15 @@ async def read_pdf_request_body(
     receive: Callable[[], Awaitable[Mapping[str, Any]]] | None = None,
     *,
     max_bytes: int = DEFAULT_MAX_PDF_BYTES,
-) -> bytes:
+    media_type: bytes = _CONTENT_TYPE_PDF,
+    as_bytearray: bool = False,
+) -> "bytes | bytearray":
     """Read and validate raw application/pdf request bytes from ASGI messages.
+
+    ``media_type`` selects the one accepted Content-Type (default
+    application/pdf; the multipart upload path passes multipart/form-data and
+    its own larger limit). ``as_bytearray`` returns the accumulated buffer
+    itself instead of joining chunks into a second copy of up to ``max_bytes``.
 
     Parameters
     ----------
@@ -217,8 +224,8 @@ async def read_pdf_request_body(
             message=_MSG_INVALID_CONTENT_TYPE,
         )
 
-    media_type = content_types[0].split(b";")[0].strip().lower()
-    if media_type != _CONTENT_TYPE_PDF:
+    declared_type = content_types[0].split(b";")[0].strip().lower()
+    if declared_type != media_type:
         raise PdfRequestBodyError(
             status_code=415,
             code="invalid_content_type",
@@ -261,6 +268,7 @@ async def read_pdf_request_body(
 
     # 2. Stream ASGI request body messages
     chunks: list[bytes] = []
+    buffer = bytearray()
     total_bytes = 0
 
     while True:
@@ -318,7 +326,10 @@ async def read_pdf_request_body(
                     code="invalid_content_length",
                     message=_MSG_CONTENT_LENGTH_MISMATCH,
                 )
-            chunks.append(chunk)
+            if as_bytearray:
+                buffer += chunk
+            else:
+                chunks.append(chunk)
 
         if not more_body:
             break
@@ -331,7 +342,7 @@ async def read_pdf_request_body(
             message=_MSG_CONTENT_LENGTH_MISMATCH,
         )
 
-    return b"".join(chunks)
+    return buffer if as_bytearray else b"".join(chunks)
 
 
 read_pdf_body = read_pdf_request_body

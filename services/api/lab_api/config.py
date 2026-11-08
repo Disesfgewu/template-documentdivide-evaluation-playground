@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     provider_mode: ProviderMode
     database_url: SecretStr
     artifact_root: Path
+    auth_secret: SecretStr | None = None
     db_connect_timeout_s: float = Field(default=3.0, gt=0, le=30)
 
     @field_validator("database_url")
