@@ -19,6 +19,7 @@ for _sub in (_REPO_ROOT, _REPO_ROOT / "db", _REPO_ROOT / "services" / "api", _RE
 from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
 from lab_api.main import create_app
+from lab_api.results import _get_results
 from lab_db.repo import Change, record_change
 
 try:
@@ -122,6 +123,62 @@ class RunResultsRealDbTests(FreshDatabase):
         self.assertEqual(len(seen), 5)
         self.assertEqual(len(set(seen)), 5)
         self.assertEqual(seen, sorted(seen))
+
+        # Real HTTP defects and cursor invariant checks
+        # 5000 digits limit causes HTTP 400
+        self.assertEqual(self.get(f.a, run, limit="9" * 5000).status_code, 400)
+        # Empty cursor causes HTTP 400
+        self.assertEqual(self.get(f.a, run, cursor="").status_code, 400)
+        # Suffix !!!! causes HTTP 400
+        p1 = self.get(f.a, run, limit="2").json()
+        self.assertIsNotNone(p1.get("next_cursor"))
+        self.assertEqual(self.get(f.a, run, cursor=p1["next_cursor"] + "!!!!").status_code, 400)
+        # Changed filters with cursor causes HTTP 400
+        c_filtered = self.get(f.a, run, metric_name="correctness", limit="1").json()["next_cursor"]
+        self.assertIsNotNone(c_filtered)
+        self.assertEqual(self.get(f.a, run, metric_name="faithfulness", cursor=c_filtered).status_code, 400)
+        self.assertEqual(self.get(f.a, run, cursor=c_filtered).status_code, 400)
+        self.assertEqual(self.get(f.a, run, metric_name="correctness", quota_bucket="cross_page", cursor=c_filtered).status_code, 400)
+
+    def test_results_uses_one_snapshot_when_a_writer_commits(self):
+        # Interleave a second connection commit that updates scores.
+        # In multi-statement reads, summary saw the old value while items saw the new value.
+        with self.connect() as writer, self.connect() as reader:
+            f = RunFixture(self, writer)
+            run = f.run()
+            a1 = f.attempt(run, f.q)
+            s1 = f.submission(run, a1, f.q)
+            ev = uuid.uuid4()
+            with writer.transaction():
+                writer.execute("INSERT INTO evaluations VALUES (%s, %s, %s, 'grader@1', 'provisional', '2026-01-01T00:00:00Z')",
+                               (ev, run, f.bench))
+            f.score(ev, run, f.q, s1, raw=50.0, num=1.0, den=2.0)
+            writer.commit()  # ensure fixtures commit before second conn reads
+
+            class CommitAfterSnapshot:
+                def __init__(self):
+                    self.committed = False
+
+                def execute(proxy, sql, *args):
+                    result = reader.execute(sql, *args)
+                    if "filtered_scores" in sql and not proxy.committed:
+                        proxy.committed = True
+                        with writer.transaction():
+                            writer.execute(
+                                "UPDATE question_scores SET raw_value = 100.0, numerator = 2.0 WHERE evaluation_id = %s AND question_id = %s",
+                                (ev, f.q),
+                            )
+                    return result
+
+            proxy = CommitAfterSnapshot()
+            before = _get_results(proxy, f.a, run, {"limit": 50})
+            self.assertTrue(proxy.committed)
+            self.assertEqual(before["metrics"][0]["mean"], 50.0)
+            self.assertEqual(before["items"][0]["raw_value"], 50.0)
+
+            after = _get_results(reader, f.a, run, {"limit": 50})
+            self.assertEqual(after["metrics"][0]["mean"], 100.0)
+            self.assertEqual(after["items"][0]["raw_value"], 100.0)
 
     def test_access(self):
         f, roles, run, other_run, ev, old = self.seed()

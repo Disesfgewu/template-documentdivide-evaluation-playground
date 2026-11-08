@@ -17,7 +17,7 @@ from lab_api import results as r
 from lab_api.documents import ApiError
 from lab_db.repo import Decision, NotFound, PermissionDenied
 
-EV, ACTOR, OTHER, RUN = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+EV, ACTOR, OTHER, RUN, PROJ = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 T = datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)
 
 
@@ -29,7 +29,8 @@ class QueryParamTests(unittest.TestCase):
 
     def test_invalid(self):
         for params in ({"evaluation_id": "x"}, {"metric_name": "total"}, {"metric_name": "weighted_total"},
-                       {"quota_bucket": "other"}, {"limit": "0"}, {"limit": "201"}, {"limit": "x"}, {"run": "1"}):
+                       {"quota_bucket": "other"}, {"limit": "0"}, {"limit": "201"}, {"limit": "x"}, {"run": "1"},
+                       {"limit": "9" * 5000}, {"cursor": ""}):
             with self.subTest(params=params):
                 with self.assertRaises(ApiError) as ctx:
                     r.parse_query(params)
@@ -39,9 +40,23 @@ class QueryParamTests(unittest.TestCase):
         self.assertEqual(r.decode_cursor(r.encode_cursor(EV, 3, "correctness"), EV), (3, "correctness"))
         with self.assertRaises(ApiError):
             r.decode_cursor(r.encode_cursor(uuid.uuid4(), 3, "correctness"), EV)
+        c_with_filters = r.encode_cursor(EV, 3, "correctness", {"metric_name": "correctness"})
+        self.assertEqual(r.decode_cursor(c_with_filters, EV, {"metric_name": "correctness"}), (3, "correctness"))
+        with self.assertRaises(ApiError) as ctx:
+            r.decode_cursor(c_with_filters, EV, {"metric_name": "faithfulness"})
+        self.assertEqual(ctx.exception.code, "invalid_cursor")
+        with self.assertRaises(ApiError) as ctx:
+            r.decode_cursor(c_with_filters, EV, {})
+        self.assertEqual(ctx.exception.code, "invalid_cursor")
+        with self.assertRaises(ApiError) as ctx:
+            r.decode_cursor(c_with_filters + "!!!!", EV, {"metric_name": "correctness"})
+        self.assertEqual(ctx.exception.code, "invalid_cursor")
         enc = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode()
-        for c in ("", "!!", enc({"e": str(EV), "o": 1, "m": "bogus"}), enc({"e": str(EV), "o": -1, "m": "correctness"}),
-                  enc({"e": str(EV), "o": True, "m": "correctness"}), enc({"e": str(EV), "o": 1}), "A" * 400):
+        for c in ("", "!!", enc({"e": str(EV), "f": {}, "o": 1, "m": "bogus"}),
+                  enc({"e": str(EV), "f": {}, "o": -1, "m": "correctness"}),
+                  enc({"e": str(EV), "f": {}, "o": 10**80, "m": "correctness"}),
+                  enc({"e": str(EV), "f": {}, "o": True, "m": "correctness"}),
+                  enc({"e": str(EV), "f": {}, "o": 1}), "A" * 600):
             with self.subTest(c=c[:10]):
                 with self.assertRaises(ApiError) as ctx:
                     r.decode_cursor(c, EV)
@@ -85,15 +100,17 @@ class AuthorizationTests(unittest.TestCase):
 
 
 class ResultsShapeTests(unittest.TestCase):
-    def conn(self, ev=(EV, "grader@1", "published", T), summary=(), rows=()):
+    def conn(self, ev=(EV, "grader@1", "provisional", T), summary=(), rows=()):
         c = MagicMock()
-        c.execute.side_effect = [MagicMock(fetchone=lambda: ev), MagicMock(fetchall=lambda: list(summary)),
-                                 MagicMock(fetchall=lambda: list(rows))]
+        pid = PROJ
+        m_owner = ACTOR
+        snapshot = None if ev is None else (ev[0], ev[1], ev[2], ev[3], pid, m_owner, list(summary), list(rows))
+        c.execute.return_value.fetchone.return_value = snapshot
         return c
 
     def results(self, c, **q):
         q = {"limit": 2, "cursor": None, **q}
-        with patch.object(r, "_authorize_results", return_value=(uuid.uuid4(), uuid.uuid4())):
+        with patch.object(r, "_authorize_results", return_value=(PROJ, uuid.uuid4())):
             return r._get_results(c, ACTOR, RUN, q)
 
     def test_metrics_are_reported_separately_with_counts_and_no_total(self):
@@ -119,15 +136,20 @@ class ResultsShapeTests(unittest.TestCase):
 
     def test_filters_are_bound_and_cursor_adds_keyset(self):
         c = self.conn()
-        self.results(c, metric_name="correctness", quota_bucket="general", cursor=r.encode_cursor(EV, 4, "faithfulness"))
-        summary_sql, summary_args = c.execute.call_args_list[1].args
-        page_sql, page_args = c.execute.call_args_list[2].args
-        self.assertIn("s.metric_name = %s", summary_sql)
-        self.assertIn("qu.quota_bucket = %s", summary_sql)
-        self.assertNotIn("correctness", summary_sql)
-        self.assertIn("(qu.ordinal, s.metric_name) > (%s, %s)", page_sql)
-        self.assertNotIn("(qu.ordinal, s.metric_name) >", summary_sql)  # the summary ignores the page position
-        self.assertEqual(page_args[-3:], (4, "faithfulness", 3))
+        self.results(c, metric_name="correctness", quota_bucket="general",
+                     cursor=r.encode_cursor(EV, 4, "faithfulness", {"metric_name": "correctness", "quota_bucket": "general"}))
+        sql, args = c.execute.call_args.args
+        self.assertIn("s.metric_name = %s", sql)
+        self.assertIn("qu.quota_bucket = %s", sql)
+        self.assertIn("(s.ordinal, s.metric_name) > (%s, %s)", sql)
+        self.assertEqual(args[-3:], (4, "faithfulness", 3))
+
+    def test_changed_filter_with_cursor_is_rejected(self):
+        c = self.conn()
+        cursor = r.encode_cursor(EV, 4, "faithfulness", {"metric_name": "correctness"})
+        with self.assertRaises(ApiError) as ctx:
+            self.results(c, metric_name="faithfulness", cursor=cursor)
+        self.assertEqual(ctx.exception.code, "invalid_cursor")
 
 
 if __name__ == "__main__":
