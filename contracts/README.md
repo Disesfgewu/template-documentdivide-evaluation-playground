@@ -173,3 +173,8 @@ provenance boundary for question generation cache keys (SPEC 6, 10.2, 16,
 19.6). See [generation cache identity](../docs/GENERATION_CACHE.md) for the
 canonicalization rules, invalidation invariants and remaining durable/workflow
 gates.
+
+
+## Generation control
+
+The deterministic accept / regenerate / needs_review routing with attempt and cost caps, and the quota-deficit scheduling decision, are in `lab_contracts/generation_control.py`. See [generation control](../docs/GENERATION_CONTROL.md) for the rules and their limits.

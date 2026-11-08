@@ -35,7 +35,7 @@ import uuid
 
 import psycopg
 
-from .artifacts import ArtifactError, InvalidState, commit
+from .artifacts import ArtifactError, ChecksumMismatch, InvalidState, commit
 
 _OBJECT_KEY_RE = re.compile(r"\Asha256/([0-9a-f]{2})/([0-9a-f]{64})\Z")
 
@@ -192,7 +192,22 @@ class LocalArtifactStore:
         target = self.root / "sha256" / prefix / digest
         return target, digest
 
-    def _read_bytes(self, object_key: str, prefix: str, digest: str) -> bytes:
+    def _read_bytes(
+        self,
+        object_key: str,
+        prefix: str,
+        digest: str,
+        expected_size: int | None = None,
+        max_bytes: int | None = None,
+    ) -> bytes:
+        if expected_size is not None and (not isinstance(expected_size, int) or expected_size < 0):
+            raise ValueError("expected_size must be a non-negative integer")
+        if max_bytes is not None and (not isinstance(max_bytes, int) or max_bytes < 0):
+            raise ValueError("max_bytes must be a non-negative integer")
+        if expected_size is not None and max_bytes is not None and expected_size > max_bytes:
+            raise StorageCorruption(
+                f"object {object_key} expected_size {expected_size} exceeds limit {max_bytes}"
+            )
         try:
             root_fd = _open_root_no_follow(self.root)
         except ValueError as e:
@@ -243,6 +258,34 @@ class LocalArtifactStore:
                         raise StorageCorruption(
                             f"object {object_key} is not a regular file"
                         )
+                    if expected_size is not None:
+                        if fst.st_size != expected_size:
+                            raise StorageCorruption(
+                                f"object {object_key} size mismatch: "
+                                f"expected {expected_size}, got {fst.st_size}"
+                            )
+                        raw = f.read(expected_size)
+                        if len(raw) != expected_size:
+                            raise StorageCorruption(
+                                f"object {object_key} truncated: "
+                                f"expected {expected_size}, got {len(raw)}"
+                            )
+                        if f.read(1):
+                            raise StorageCorruption(
+                                f"object {object_key} grew concurrently beyond expected size {expected_size}"
+                            )
+                        return raw
+                    if max_bytes is not None:
+                        if fst.st_size > max_bytes:
+                            raise StorageCorruption(
+                                f"object {object_key} size {fst.st_size} exceeds limit {max_bytes}"
+                            )
+                        raw = f.read(max_bytes)
+                        if f.read(1):
+                            raise StorageCorruption(
+                                f"object {object_key} grew concurrently beyond limit {max_bytes}"
+                            )
+                        return raw
                     return f.read()
             except BaseException:
                 try:
@@ -556,22 +599,49 @@ class LocalArtifactStore:
         finally:
             os.close(prefix_fd)
 
-    def open(self, object_key: str) -> bytes:
+    def open(
+        self,
+        object_key: str,
+        expected_size: int | None = None,
+        max_bytes: int | None = None,
+    ) -> bytes:
         target, expected_sha256 = self._resolve_key(object_key)
         prefix = expected_sha256[:2]
-        raw = self._read_bytes(object_key, prefix, expected_sha256)
+        raw = self._read_bytes(
+            object_key,
+            prefix,
+            expected_sha256,
+            expected_size=expected_size,
+            max_bytes=max_bytes,
+        )
         actual_sha256 = hashlib.sha256(raw).hexdigest()
         if actual_sha256 != expected_sha256:
             raise StorageCorruption(
                 f"checksum mismatch for {object_key}: "
                 f"expected {expected_sha256}, got {actual_sha256}"
             )
+        if expected_size is not None and len(raw) != expected_size:
+            raise StorageCorruption(
+                f"size mismatch for {object_key}: "
+                f"expected {expected_size}, got {len(raw)}"
+            )
         return raw
 
-    def verify(self, object_key: str) -> tuple[str, int]:
+    def verify(
+        self,
+        object_key: str,
+        expected_size: int | None = None,
+        max_bytes: int | None = None,
+    ) -> tuple[str, int]:
         target, expected_sha256 = self._resolve_key(object_key)
         prefix = expected_sha256[:2]
-        raw = self._read_bytes(object_key, prefix, expected_sha256)
+        raw = self._read_bytes(
+            object_key,
+            prefix,
+            expected_sha256,
+            expected_size=expected_size,
+            max_bytes=max_bytes,
+        )
         actual_sha256 = hashlib.sha256(raw).hexdigest()
         return actual_sha256, len(raw)
 
@@ -630,7 +700,12 @@ def store_and_register(
             raise ValueError(f"artifact {art_id} is {state}; register new bytes instead")
     # Verify outside the lock-holding transaction's error path: a mismatch
     # must not roll back the staged registration above.
-    observed_sha256, observed_size = store.verify(stored.object_key)
+    try:
+        observed_sha256, observed_size = store.verify(
+            stored.object_key, expected_size=stored.size_bytes
+        )
+    except StorageCorruption as exc:
+        raise ChecksumMismatch(f"Artifact {stored.object_key} verification failed: {exc}") from exc
     try:
         commit(conn, art_id, observed_sha256, observed_size)
     except InvalidState:
