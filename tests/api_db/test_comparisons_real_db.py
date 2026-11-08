@@ -53,9 +53,11 @@ class ComparisonsRealDbTests(FreshDatabase):
         with self.connect() as c:
             f = RunFixture(self, c)
             roles = {r: self.add_member(c, f.p, r) for r in ("participant", "reviewer", "observer")}
-            a, b, big, other_grader, bare = (f.run() for _ in range(5))
+            a, b, other_grader, bare = (f.run() for _ in range(4))
+            big = uuid.uuid4()  # budget_profile is immutable, so it is set on insert
             with c.transaction():
-                c.execute("UPDATE runs SET budget_profile = 'large' WHERE id = %s", (big,))
+                c.execute("INSERT INTO runs (id, project_id, benchmark_id, method_revision_id, budget_profile) "
+                          "VALUES (%s, %s, %s, %s, 'large')", (big, f.p, f.bench, f.method))
             # run a: an older evaluation must not be the one compared
             old = self.evaluation(c, f, a, "g@0", "2026-01-01T00:00:00Z")
             f.score(old, a, f.q, None, raw=10.0, num=0.2, den=2.0)
