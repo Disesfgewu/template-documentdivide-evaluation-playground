@@ -41,3 +41,12 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 - **下載**：授權與 artifact 狀態、大小上限、checksum 都先在資料庫層檢查，才讀取檔案；讀檔受 `max_pdf_bytes` 限制並驗證 sha256。
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
+
+## 血緣查詢（#5 增量，疊在 #73 之上）
+
+`GET /api/v1/resources/{resource_id}/lineage`（亦有 `/resources/{id}/lineage`）回傳某個資源版本的上游或下游血緣，實際走訪由 `lab_db.lineage.walk` 完成。
+
+- 參數（全部嚴格驗證，錯誤一律 400 `bad_request`，重複或未知的參數也拒絕）：`direction`（`upstream` 預設／`downstream`）、`depth`（1–10，預設 3）、`max_nodes`（1–1000，預設 1000）、`limit`（每頁節點數 1–200，預設 100）、`cursor`。
+- 權限：`read_gold_trace_and_lineage`，只有 owner、maintainer、reviewer 可讀；participant 與 observer 回 403（血緣可能暴露由 gold 衍生的資源）。資源不存在、或屬於呼叫者不是成員的 project，兩者都回完全相同的 404 `resource not found`，不洩漏存在與否。
+- 回應：`nodes`（`id`、`resource_type`、`logical_id`、`revision`、`content_hash`、`depth`）、`edges`（`upstream_id`、`downstream_id`、`relation`、`operation_id`）、`next_cursor`、`truncated`（深度或節點上限之外還有未走訪的鄰居）、`frontier_count`。
+- 分頁順序固定：節點依（depth, id）排序；每條 edge 只列在其「較遠端」節點所在的那一頁，所以逐頁收集剛好得到每個節點與每條 edge 各一次。`cursor` 是不透明字串並綁定該次查詢（資源、方向、depth、max_nodes），換條件或竄改一律 400；`limit` 可在翻頁之間改變。每一頁都重新走訪，翻頁期間若有新血緣寫入，結果可能不同。

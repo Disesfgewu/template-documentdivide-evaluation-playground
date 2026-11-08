@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings, load_settings
 from .documents import ApiError, router as documents_router
+from .lineage import router as lineage_router
 from .readiness import Check, default_checks, run_checks
 
 API_VERSION = "0.1.0"
@@ -43,5 +44,6 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
         return JSONResponse(body, status_code=200 if ready else 503)
 
     app.include_router(documents_router)
+    app.include_router(lineage_router)
 
     return app
