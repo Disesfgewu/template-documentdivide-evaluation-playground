@@ -32,7 +32,7 @@ class CursorTests(unittest.TestCase):
     def test_malformed_cursors_are_refused(self):
         import base64, json
         enc = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode()
-        bad = ["", "!!!", "e30", enc([1]), enc({"b": str(BID)}), enc({"b": str(BID), "o": -1}),
+        bad = ["", "!!!", b.encode_cursor(BID, 7) + "!!!!", b.encode_cursor(BID, 7) + "=", "e30", enc([1]), enc({"b": str(BID)}), enc({"b": str(BID), "o": -1}),
                enc({"b": str(BID), "o": True}), enc({"b": str(BID), "o": 2**31}), enc({"b": str(BID), "o": "1"}),
                enc({"b": str(BID), "o": 1, "x": 1}), "A" * 300]
         for c in bad:

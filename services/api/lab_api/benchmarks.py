@@ -48,7 +48,10 @@ def decode_cursor(cursor: str, benchmark_id: uuid.UUID) -> int:
     try:
         if len(cursor) > 200:
             raise bad
-        data = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        if base64.urlsafe_b64encode(raw).decode().rstrip("=") != cursor:
+            raise bad
+        data = json.loads(raw)
     except (ValueError, binascii.Error):
         raise bad from None
     if (not isinstance(data, dict) or set(data) != {"b", "o"} or data["b"] != str(benchmark_id)

@@ -115,6 +115,9 @@ class PublicQuestionsRealDbTests(FreshDatabase):
         f, roles = self.seed()
         self.assertEqual(self.get(f.a, f.p, cursor="garbage").status_code, 400)
         self.assertEqual(self.get(f.a, f.p, cursor="").status_code, 400)
+        cursor = self.get(f.a, f.p, limit="2").json()["next_cursor"]
+        self.assertTrue(cursor)
+        self.assertEqual(self.get(f.a, f.p, cursor=cursor + "!!!!").status_code, 400)
         self.assertEqual(self.get(f.a, f.p, limit="0").status_code, 400)
         self.assertEqual(self.get(f.a, f.p, limit="9999").status_code, 400)
 
