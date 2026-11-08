@@ -173,3 +173,93 @@ class ConcurrentMigratorTests(FreshDatabase):
         with self.connect() as c:
             self.assertEqual(c.execute("SELECT count(*), count(DISTINCT version) FROM schema_migrations").fetchone(),
                              (len(discover()), len(discover())))
+
+
+class InconsistentStateAbsentSchemaMigrationsTests(FreshDatabase):
+    migrate_to_head = False
+
+    def test_alembic_version_stamped_ahead_of_absent_schema_migrations_is_refused(self):
+        with psycopg.connect(self.url) as c:
+            c.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+            c.execute("INSERT INTO alembic_version (version_num) VALUES ('0003')")
+            c.commit()
+        with self.assertRaisesRegex(MigrationError, "schema_migrations does not exist"):
+            migrate(self.url, deployment="test")
+        with self.connect() as c:
+            self.assertIsNone(c.execute("SELECT to_regclass('schema_migrations')").fetchone()[0])
+
+
+class InconsistentStateIncompleteSchemaMigrationsTests(FreshDatabase):
+    migrate_to_head = False
+
+    def test_alembic_version_stamped_ahead_of_incomplete_schema_migrations_is_refused(self):
+        legacy = discover()[:2]
+        with psycopg.connect(self.url) as c:
+            c.execute(BOOKKEEPING)
+            for mig in legacy:
+                c.execute(mig.sql)
+                c.execute("INSERT INTO schema_migrations (version, name, checksum, deployment) VALUES (%s, %s, %s, 'init')",
+                          (mig.version, mig.name, mig.checksum))
+            c.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+            c.execute("INSERT INTO alembic_version (version_num) VALUES ('0004')")
+            c.commit()
+        with self.assertRaisesRegex(MigrationError, "stamped at 0004, but schema_migrations is at 0002"):
+            migrate(self.url, deployment="test")
+
+
+class InconsistentStateGappedSchemaMigrationsTests(FreshDatabase):
+    migrate_to_head = False
+
+    def test_gapped_schema_migrations_with_stamped_alembic_version_is_refused(self):
+        migs = discover()
+        with psycopg.connect(self.url) as c:
+            c.execute(BOOKKEEPING)
+            for mig in [migs[0], migs[2]]:
+                c.execute(mig.sql)
+                c.execute("INSERT INTO schema_migrations (version, name, checksum, deployment) VALUES (%s, %s, %s, 'init')",
+                          (mig.version, mig.name, mig.checksum))
+            c.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+            c.execute("INSERT INTO alembic_version (version_num) VALUES ('0003')")
+            c.commit()
+        with self.assertRaisesRegex(MigrationError, "recorded migrations are not 1..n"):
+            migrate(self.url, deployment="test")
+
+
+class InconsistentStateMismatchedTests(FreshDatabase):
+    migrate_to_head = False
+
+    def test_mismatched_alembic_version_behind_schema_migrations_is_refused(self):
+        migs = discover()[:3]
+        with psycopg.connect(self.url) as c:
+            c.execute(BOOKKEEPING)
+            for mig in migs:
+                c.execute(mig.sql)
+                c.execute("INSERT INTO schema_migrations (version, name, checksum, deployment) VALUES (%s, %s, %s, 'init')",
+                          (mig.version, mig.name, mig.checksum))
+            c.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+            c.execute("INSERT INTO alembic_version (version_num) VALUES ('0002')")
+            c.commit()
+        with self.assertRaisesRegex(MigrationError, "stamped at 0002, but schema_migrations is at 0003"):
+            migrate(self.url, deployment="test")
+
+
+class IntermediateHeadTests(FreshDatabase):
+    migrate_to_head = False
+
+    def test_intermediate_head_is_preserved_and_upgraded_to_head(self):
+        intermediate = discover()[:3]
+        applied = migrate(self.url, deployment="first", migrations=intermediate)
+        self.assertEqual(applied, [1, 2, 3])
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT version_num FROM alembic_version").fetchall(), [("0003",)])
+            rows = c.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            self.assertEqual([r[0] for r in rows], [1, 2, 3])
+
+        remaining = migrate(self.url, deployment="second")
+        self.assertEqual(remaining, [m.version for m in discover()[3:]])
+        with self.connect() as c:
+            head = f"{len(discover()):04d}"
+            self.assertEqual(c.execute("SELECT version_num FROM alembic_version").fetchall(), [(head,)])
+            rows = c.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            self.assertEqual([r[0] for r in rows], [m.version for m in discover()])
+        self.assertEqual(migrate(self.url, deployment="idempotent"), [])

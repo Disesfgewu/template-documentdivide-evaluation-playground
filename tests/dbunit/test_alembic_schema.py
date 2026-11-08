@@ -127,11 +127,22 @@ class FakeRaw:
                 if "schema_migrations')" in sql:
                     return (None if outer.recorded is None else "schema_migrations",)
                 if "alembic_version')" in sql:
-                    return ("alembic_version" if outer.stamped else None,)
+                    has_table = outer.stamped is not False and outer.stamped is not None
+                    return ("alembic_version" if has_table else None,)
                 raise AssertionError(sql)
 
             def fetchall(self_inner):
-                return list(outer.recorded)
+                if "alembic_version" in sql:
+                    if outer.stamped is True:
+                        return [(f"{outer.recorded[-1][0]:04d}",)] if outer.recorded else []
+                    if isinstance(outer.stamped, list):
+                        return [(v,) if isinstance(v, str) else v for v in outer.stamped]
+                    if isinstance(outer.stamped, str):
+                        return [(outer.stamped,)]
+                    return []
+                if "schema_migrations" in sql:
+                    return list(outer.recorded) if outer.recorded is not None else []
+                raise AssertionError(sql)
 
         return Result()
 
@@ -186,6 +197,47 @@ class VerifyAndAdoptTests(unittest.TestCase):
         with self.assertRaisesRegex(m.MigrationError, "not 1..n"):
             env.verify_and_adopt(raw, self.migs)
         self.assertEqual(raw.wrote("CREATE"), [])
+
+    def test_alembic_version_stamped_ahead_of_absent_schema_migrations_is_refused(self):
+        raw = FakeRaw(recorded=None, stamped=["0003"])
+        with self.assertRaisesRegex(m.MigrationError, "stamped.*schema_migrations does not exist"):
+            env.verify_and_adopt(raw, self.migs)
+
+    def test_alembic_version_stamped_ahead_of_empty_schema_migrations_is_refused(self):
+        raw = FakeRaw(recorded=[], stamped=["0003"])
+        with self.assertRaisesRegex(m.MigrationError, "stamped.*schema_migrations is empty"):
+            env.verify_and_adopt(raw, self.migs)
+
+    def test_alembic_version_stamped_ahead_of_incomplete_schema_migrations_is_refused(self):
+        raw = FakeRaw(recorded=self.rows(2), stamped=["0004"])
+        with self.assertRaisesRegex(m.MigrationError, "stamped at 0004, but schema_migrations is at 0002"):
+            env.verify_and_adopt(raw, self.migs)
+
+    def test_alembic_version_mismatched_behind_schema_migrations_is_refused(self):
+        raw = FakeRaw(recorded=self.rows(3), stamped=["0002"])
+        with self.assertRaisesRegex(m.MigrationError, "stamped at 0002, but schema_migrations is at 0003"):
+            env.verify_and_adopt(raw, self.migs)
+
+    def test_gapped_schema_migrations_is_refused_even_when_stamped(self):
+        raw = FakeRaw(recorded=[self.rows(5)[0], self.rows(5)[2]], stamped=["0003"])
+        with self.assertRaisesRegex(m.MigrationError, "not 1..n"):
+            env.verify_and_adopt(raw, self.migs)
+
+    def test_empty_alembic_version_with_recorded_migrations_is_refused(self):
+        raw = FakeRaw(recorded=self.rows(3), stamped=[])
+        with self.assertRaisesRegex(m.MigrationError, "alembic_version is empty"):
+            env.verify_and_adopt(raw, self.migs)
+
+    def test_multiple_stamped_versions_in_alembic_version_is_refused(self):
+        raw = FakeRaw(recorded=self.rows(3), stamped=["0002", "0003"])
+        with self.assertRaisesRegex(m.MigrationError, "several Alembic versions stamped"):
+            env.verify_and_adopt(raw, self.migs)
+
+    def test_intermediate_head_matches_schema_migrations_and_is_accepted(self):
+        raw = FakeRaw(recorded=self.rows(3), stamped=["0003"])
+        env.verify_and_adopt(raw, self.migs)
+        self.assertEqual(raw.wrote("CREATE"), [])
+        self.assertEqual(raw.wrote("INSERT"), [])
 
 
 class EnvironmentGuardTests(unittest.TestCase):

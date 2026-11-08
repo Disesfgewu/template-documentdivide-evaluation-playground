@@ -57,23 +57,55 @@ def verify_and_adopt(raw, migrations: list[Migration]) -> None:
     """Refuse a database that does not match this code, and stamp one that was
     migrated by the earlier runner. ``raw`` is the psycopg connection."""
     known = {m.version: m for m in migrations}
-    if raw.execute("SELECT to_regclass('schema_migrations')").fetchone()[0] is None:
+    has_sm = raw.execute("SELECT to_regclass('schema_migrations')").fetchone()[0] is not None
+    has_av = raw.execute(f"SELECT to_regclass('{VERSION_TABLE}')").fetchone()[0] is not None
+
+    stamped: list[str] = []
+    if has_av:
+        stamped = [r[0] for r in raw.execute(f"SELECT version_num FROM {VERSION_TABLE}").fetchall()]
+
+    if not has_sm:
+        if stamped:
+            raise MigrationError(
+                f"{VERSION_TABLE} is stamped ({stamped[0] if len(stamped) == 1 else stamped}), "
+                f"but schema_migrations does not exist"
+            )
         return
+
     rows = raw.execute("SELECT version, checksum FROM schema_migrations ORDER BY version").fetchall()
+    if not rows:
+        if stamped:
+            raise MigrationError(
+                f"{VERSION_TABLE} is stamped ({stamped[0] if len(stamped) == 1 else stamped}), "
+                f"but schema_migrations is empty"
+            )
+        return
+
     for version, checksum in rows:
         mig = known.get(version)
         if mig is None:
             raise MigrationError(f"the database has migration {version}, which this code does not contain")
         if mig.checksum != checksum:
             raise MigrationError(f"{mig.name} was changed after being applied (checksum mismatch)")
-    stamped = raw.execute(f"SELECT to_regclass('{VERSION_TABLE}')").fetchone()[0] is not None
-    if rows and not stamped:
-        versions = [v for v, _ in rows]
-        if versions != list(range(1, len(versions) + 1)):
-            raise MigrationError(f"recorded migrations are not 1..n: {versions}")
+
+    versions = [v for v, _ in rows]
+    if versions != list(range(1, len(versions) + 1)):
+        raise MigrationError(f"recorded migrations are not 1..n: {versions}")
+
+    if not has_av:
         raw.execute(f"CREATE TABLE {VERSION_TABLE} (version_num VARCHAR(32) NOT NULL, "
                     f"CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))")
         raw.execute(f"INSERT INTO {VERSION_TABLE} (version_num) VALUES (%s)", (f"{versions[-1]:04d}",))
+    else:
+        if not stamped:
+            raise MigrationError(f"{VERSION_TABLE} is empty, but schema_migrations has recorded migrations")
+        if len(stamped) > 1:
+            raise MigrationError(f"several Alembic versions stamped in {VERSION_TABLE}: {sorted(stamped)}")
+        expected = f"{versions[-1]:04d}"
+        if stamped[0] != expected:
+            raise MigrationError(
+                f"{VERSION_TABLE} is stamped at {stamped[0]}, but schema_migrations is at {expected}"
+            )
 
 
 def run() -> None:
