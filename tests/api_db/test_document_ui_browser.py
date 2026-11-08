@@ -77,29 +77,40 @@ def find_browser_executable() -> str | None:
     return None
 
 
-def ensure_web_dist_fresh(repo_root: Path) -> Path:
-    web_dir = repo_root / "web"
-    dist_index = web_dir / "dist" / "index.html"
-    if not dist_index.exists():
-        subprocess.run(["npm", "run", "build"], cwd=web_dir, check=True)
-        return web_dir / "dist"
+def calculate_web_sources_hash(web_dir: Path) -> str:
+    """Content hash of web sources to guarantee distribution matches candidate code."""
+    hasher = hashlib.sha256()
+    source_files = sorted([p for p in (web_dir / "src").rglob("*") if p.is_file()])
+    for extra in ("index.html", "vite.config.ts", "package.json"):
+        f = web_dir / extra
+        if f.is_file():
+            source_files.append(f)
 
-    dist_mtime = dist_index.stat().st_mtime
-    needs_build = False
-    for p in (web_dir / "src").rglob("*"):
-        if p.is_file() and p.stat().st_mtime > dist_mtime:
-            needs_build = True
-            break
-    if not needs_build:
-        for extra in ("index.html", "vite.config.ts", "package.json"):
-            f = web_dir / extra
-            if f.exists() and f.stat().st_mtime > dist_mtime:
-                needs_build = True
-                break
+    for sf in source_files:
+        hasher.update(sf.relative_to(web_dir).as_posix().encode())
+        hasher.update(sf.read_bytes())
+    return hasher.hexdigest()
+
+
+def ensure_web_dist_fresh(repo_root: Path) -> Path:
+    """Ensure web distribution is built and matches current source content."""
+    web_dir = repo_root / "web"
+    dist_dir = web_dir / "dist"
+    dist_index = dist_dir / "index.html"
+    hash_file = dist_dir / ".dist_source_hash"
+
+    current_src_hash = calculate_web_sources_hash(web_dir)
+    needs_build = True
+
+    if dist_index.exists() and hash_file.exists():
+        if hash_file.read_text(encoding="utf-8").strip() == current_src_hash:
+            needs_build = False
 
     if needs_build:
         subprocess.run(["npm", "run", "build"], cwd=web_dir, check=True)
-    return web_dir / "dist"
+        hash_file.write_text(current_src_hash, encoding="utf-8")
+
+    return dist_dir
 
 
 @unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
@@ -255,15 +266,39 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
         self.assertEqual(hashlib.sha256(stored_bytes).hexdigest(), self.f01_sha256)
         self.assertEqual(stored_bytes, self.f01_21)
 
-        # Read machine-readable evidence, attach DB verification metrics, and save to target report paths
+        # Read machine-readable evidence, verify strictly observed metrics, and save
         if evidence_tmp.exists():
             evidence = json.loads(evidence_tmp.read_text(encoding="utf-8"))
         else:
-            # Fallback parse from stdout
             out = res.stdout
             start = out.find("JSON_EVIDENCE_START") + len("JSON_EVIDENCE_START")
             end = out.find("JSON_EVIDENCE_END")
             evidence = json.loads(out[start:end].strip())
+
+        # Assert no metric was unobserved or missing before marking passed
+        actual = evidence.get("actual", {})
+        first_attempt = actual.get("first_attempt", {})
+        retry_attempt = actual.get("retry", {})
+        download_attempt = actual.get("download", {})
+        cross_project = actual.get("cross_project_denial", {})
+
+        self.assertIn(first_attempt.get("backend_status"), (200, 201))
+        self.assertEqual(first_attempt.get("client_outcome"), "lost_response_ConnectionReset")
+        self.assertTrue(first_attempt.get("ui_error_displayed"))
+        self.assertFalse(first_attempt.get("ui_success_displayed"))
+
+        # Retry measured backend status must be 200 or 201 (replayed response)
+        self.assertIn(retry_attempt.get("backend_status"), (200, 201))
+        self.assertTrue(retry_attempt.get("replayed"))
+        self.assertTrue(retry_attempt.get("same_idempotency_key_preserved"))
+        self.assertEqual(retry_attempt.get("ui_pages_displayed"), 21)
+
+        self.assertEqual(download_attempt.get("downloaded_sha256"), self.f01_sha256)
+        self.assertTrue(download_attempt.get("matches_fixture"))
+
+        self.assertIn(cross_project.get("backend_status"), (403, 404))
+        self.assertTrue(cross_project.get("ui_error_displayed"))
+        self.assertFalse(cross_project.get("ui_success_displayed"))
 
         evidence["actual"]["database"] = {
             "document_versions_count": len(versions),

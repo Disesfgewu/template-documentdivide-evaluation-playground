@@ -194,7 +194,8 @@ async function run() {
   let firstRecordedIdempotencyKey = null;
   let secondRecordedIdempotencyKey = null;
   let firstBackendStatus = null;
-  let realRequestId = null;
+  let secondBackendStatus = null;
+  let uploadXRequestId = null;
 
   eventListeners.add(async (method, params) => {
     if (method === "Fetch.requestPaused") {
@@ -203,12 +204,11 @@ async function run() {
       const headers = request.headers || {};
       const idempotencyKey = Object.entries(headers).find(([k]) => k.toLowerCase() === "idempotency-key")?.[1];
 
-      if (responseHeaders) {
+      if (isUpload && responseHeaders) {
         const reqHeader = responseHeaders.find((h) => h.name.toLowerCase() === "x-request-id");
-        if (reqHeader) realRequestId = reqHeader.value;
-      }
-      if (!realRequestId && requestId) {
-        realRequestId = requestId;
+        if (reqHeader) {
+          uploadXRequestId = reqHeader.value;
+        }
       }
 
       if (isUpload && interceptFirstUploadResponse) {
@@ -218,6 +218,7 @@ async function run() {
         await cdp("Fetch.failRequest", { requestId, errorReason: "ConnectionReset" });
       } else if (isUpload && !interceptFirstUploadResponse) {
         secondRecordedIdempotencyKey = idempotencyKey;
+        secondBackendStatus = responseStatusCode;
         await cdp("Fetch.continueRequest", { requestId });
       } else {
         await cdp("Fetch.continueRequest", { requestId });
@@ -299,6 +300,13 @@ async function run() {
   await waitForSelector("[data-testid='upload-success']");
   const retrySuccessText = await evaluate(`document.querySelector("[data-testid='upload-success']").innerText`);
 
+  if (!secondBackendStatus) {
+    throw new Error("Retry backend response status was not measured!");
+  }
+  if (secondBackendStatus !== 200 && secondBackendStatus !== 201) {
+    throw new Error(`Expected retry backend response status 200 or 201, got measured ${secondBackendStatus}`);
+  }
+
   if (firstRecordedIdempotencyKey !== secondRecordedIdempotencyKey) {
     throw new Error(
       `Idempotency key changed on retry! First: ${firstRecordedIdempotencyKey}, Second: ${secondRecordedIdempotencyKey}`
@@ -370,8 +378,6 @@ async function run() {
       if (method === "Network.responseReceived") {
         if (params.response.url.includes(`/documents/${docVersionId}/download`)) {
           unauthorizedStatusCode = params.response.status;
-          const reqHeader = params.response.headers["x-request-id"] || params.response.headers["X-Request-Id"];
-          if (reqHeader) realRequestId = reqHeader;
         }
       }
     });
@@ -403,11 +409,11 @@ async function run() {
     }
   }
 
-  // Build sanitized machine-readable evidence (no tokens, no secrets, no raw payload)
+  // Build sanitized machine-readable evidence (no tokens, no secrets, no raw payload, no fabricated IDs)
   const evidence = {
     schema: "document-ui-browser-acceptance-v1",
     profile: "synthetic-f01-21-pages",
-    status: "passed",
+    status: "provisional",
     timestamp: new Date().toISOString(),
     browser: {
       product: browserVersion.product || "Chrome",
@@ -428,7 +434,7 @@ async function run() {
         ui_success_displayed: false,
       },
       retry: {
-        backend_status: 201,
+        backend_status: secondBackendStatus,
         replayed: true,
         ui_replayed_notice_displayed: true,
         ui_pages_displayed: expectedPages,
@@ -448,7 +454,9 @@ async function run() {
         file_downloaded: false,
       },
       trace: {
-        request_id: realRequestId || `req-${Date.now()}`,
+        upload_x_request_id: uploadXRequestId,
+        request_id_available: uploadXRequestId !== null,
+        request_id_status: uploadXRequestId ? "captured_from_upload_response_header" : "unavailable_in_api_response",
       },
     },
   };
