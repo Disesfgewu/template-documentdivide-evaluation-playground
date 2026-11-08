@@ -4,9 +4,11 @@ const id='11111111-1111-1111-1111-111111111111';
 const token='secret-canary';
 const pending = Symbol('pending');
 const within = <T,>(p: Promise<T>) => Promise.race([p, new Promise<typeof pending>(r=>setTimeout(()=>r(pending),100))]);
-it('upload deadline covers headers plus stalled body', async()=>{
- const res = await within(uploadDocument({projectId:id, token, file:new File(['%PDF-1.4'], 'a.pdf'),timeoutMs:10,fetchFn:vi.fn(async()=>new Response(new ReadableStream({pull(){return new Promise(()=>{});}}),{status:201})) as typeof fetch}));
- expect(res).not.toBe(pending); if(res!==pending){expect(res.ok).toBe(false);if(!res.ok)expect(res.error.code).toBe('timeout');}
+it('upload deadline covers success and error headers plus stalled bodies', async()=>{
+ for (const status of [201,502]) {
+  const res = await within(uploadDocument({projectId:id, token, file:new File(['%PDF-1.4'], 'a.pdf'),timeoutMs:10,fetchFn:vi.fn(async()=>new Response(new ReadableStream({pull(){return new Promise(()=>{});}}),{status})) as typeof fetch}));
+  expect(res).not.toBe(pending); if(res!==pending){expect(res.ok).toBe(false);if(!res.ok)expect(res.error.code).toBe('timeout');}
+ }
 });
 it('abort does not await a stalled stream cancel promise',async()=>{
  const ac=new AbortController();const body=new ReadableStream<Uint8Array>({pull(){return new Promise(()=>{});},cancel(){return new Promise(()=>{});}});
