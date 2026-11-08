@@ -37,7 +37,7 @@
 - parse_runs/observations 的 revision 與 hash 補強。
 - 真 embedding model 的呼叫、method-service 與 benchmark 建題流程對 collection 的實際接線（#11／#10／#6）。
 
-## pgvector 向量儲存（#11 增量，migration 0010、`lab_db.vectors`）
+## pgvector 向量儲存（#11 增量，migration 0009、`lab_db.vectors`）
 
 - `embedding_spaces`：不可變的 embedding 身分（`UNIQUE(project_id, config_hash)`）；不同 space 的向量不能互相比較。
 - `vector_collections`：屬於一個 project、一個 space 與一種用途（`method` 或 `benchmark_generation`，兩者互相隔離）；`method` 才需要 `method_revision`。狀態 `building → ready → frozen`（或 `failed`）；`ready` 必須有 `manifest_hash`、`item_count` 與 `ready_at`，發佈前以 `manifest` 重算核對，未 ready 的 collection 不能查詢。
