@@ -100,8 +100,8 @@ class AuditEventsRealDbTests(FreshDatabase):
         self.assertEqual(count(actor_id=str(other)), 2)
         self.assertEqual(count(resource_id=str(res)), 1)
         self.assertEqual(count(resource_type="benchmark_revision"), 2)
-        self.assertEqual(count(since="2026-01-03T00:00:00+00:00"), 3)
-        self.assertEqual(count(until="2026-01-03T00:00:00+00:00"), 2)  # exclusive upper bound
+        self.assertEqual(count(since="2026-01-03T00:00:00+00:00"), 4)  # events are on Jan 2..6; lower bound inclusive
+        self.assertEqual(count(until="2026-01-03T00:00:00+00:00"), 1)  # upper bound exclusive: only Jan 2
         self.assertEqual(count(since="2026-01-02T00:00:00+00:00", until="2026-01-04T00:00:00+00:00"), 2)
         self.assertEqual(count(action="no.such"), 0)
 
