@@ -17,6 +17,7 @@ for _sub in (_REPO_ROOT, _REPO_ROOT / "db", _REPO_ROOT / "services" / "api", _RE
     if _sub.exists() and str(_sub) not in sys.path:
         sys.path.insert(0, str(_sub))
 
+from lab_api.audit import encode_cursor
 from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
 from lab_api.main import create_app
@@ -114,6 +115,79 @@ class LogQueryRealDbTests(FreshDatabase):
         self.assertEqual(self.get(owner, p, attributes="x").status_code, 400)
         self.assertEqual(self.get(owner, p, cursor="junk").status_code, 400)
         self.assertEqual(self.client.get("/api/v1/logs", params={"project_id": str(p)}).status_code, 401)
+
+    def test_message_credential_redaction_preserves_raw_database(self):
+        p, owner, *_ = self.seed()
+        raw_message = "Sync failed: Bearer test-bearer-canary-secret key=sk-fake-canary-api-key https://alice:pass-canary-123@db.internal:5432/app"
+        evt_id = uuid.uuid4()
+        with self.connect() as c:
+            with c.transaction():
+                c.execute(
+                    "INSERT INTO log_events (event_id, schema_version, occurred_at, level, event_name, message, "
+                    "service, component, operation_name, project_id, telemetry_origin, redaction_policy) "
+                    "VALUES (%s, 1, now(), 'ERROR', 'job.failed', %s, 'api', 'c', 'op', %s, 'lab_observed', 'v1')",
+                    (evt_id, raw_message, p),
+                )
+
+        # 1. HTTP response must have sensitive credentials redacted
+        res = self.get(owner, p, level="ERROR", event_name="job.failed")
+        self.assertEqual(res.status_code, 200)
+        items = [i for i in res.json()["items"] if i["event_id"] == str(evt_id)]
+        self.assertEqual(len(items), 1)
+        redacted_msg = items[0]["message"]
+        self.assertNotIn("test-bearer-canary-secret", redacted_msg)
+        self.assertNotIn("sk-fake-canary-api-key", redacted_msg)
+        self.assertNotIn("pass-canary-123", redacted_msg)
+        self.assertIn("[REDACTED]", redacted_msg)
+
+        # 2. Append-only raw database log event must retain verbatim raw text unchanged
+        with self.connect() as c:
+            row = c.execute("SELECT message FROM log_events WHERE event_id = %s", (evt_id,)).fetchone()
+            self.assertEqual(row[0], raw_message)
+
+    def test_cursor_and_limit_regressions_real_db(self):
+        p, owner, *_ = self.seed()
+
+        # Bounded invalid decimal input rejected with 400 before int conversion
+        r_lim = self.get(owner, p, limit="9" * 5000)
+        self.assertEqual(r_lim.status_code, 400)
+        self.assertEqual(r_lim.json()["error"]["code"], "bad_request")
+
+        # Explicit empty cursor rejected
+        r_empty = self.get(owner, p, cursor="")
+        self.assertEqual(r_empty.status_code, 400)
+        self.assertEqual(r_empty.json()["error"]["code"], "invalid_cursor")
+
+        # Keyset pagination cursor regressions
+        r_page = self.get(owner, p, limit="2")
+        self.assertEqual(r_page.status_code, 200)
+        cursor = r_page.json()["next_cursor"]
+        self.assertIsNotNone(cursor)
+
+        # Noncanonical base64 suffixes rejected
+        self.assertEqual(self.get(owner, p, cursor=cursor + "=").status_code, 400)
+        self.assertEqual(self.get(owner, p, cursor=cursor + "==").status_code, 400)
+        self.assertEqual(self.get(owner, p, cursor=cursor + "A").status_code, 400)
+
+        # Changed filter rejected
+        r_changed_filt = self.get(owner, p, cursor=cursor, level="WARN")
+        self.assertEqual(r_changed_filt.status_code, 400)
+        self.assertEqual(r_changed_filt.json()["error"]["code"], "invalid_cursor")
+
+        # Audit cursor rejected by logs
+        audit_cursor = encode_cursor(p, 999, endpoint="audit-events")
+        r_audit_cursor = self.get(owner, p, cursor=audit_cursor)
+        self.assertEqual(r_audit_cursor.status_code, 400)
+        self.assertEqual(r_audit_cursor.json()["error"]["code"], "invalid_cursor")
+
+        # Log cursor rejected by audit-events
+        r_logs_at_audit = self.client.get(
+            "/api/v1/audit-events",
+            params={"project_id": str(p), "cursor": cursor},
+            headers={"Authorization": f"Bearer {issue_actor_token(owner, self.secret)}"},
+        )
+        self.assertEqual(r_logs_at_audit.status_code, 400)
+        self.assertEqual(r_logs_at_audit.json()["error"]["code"], "invalid_cursor")
 
 
 if __name__ == "__main__":

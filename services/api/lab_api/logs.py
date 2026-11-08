@@ -6,7 +6,9 @@ cursor bound to the project. Only events of the requested project are
 returned (events without a project are never reachable here). ``attributes``
 and ``error_message`` are not returned: they can carry participant-reported
 text, and the redaction applied at write time is not a reason to expose them
-through a list endpoint. There is no attempt filter because attempts are not
+through a list endpoint. ``message`` is free text; sensitive credentials
+are redacted on retrieval according to the redaction policy while the append-only
+database logs remain unchanged. There is no attempt filter because attempts are not
 a column of ``log_events``.
 
 Access reuses ``read_gold_trace_and_lineage`` like ``/jobs`` and
@@ -25,6 +27,7 @@ from fastapi.responses import JSONResponse
 from .audit import bad, decode_cursor, encode_cursor, parse_limit, parse_time, parse_uuid
 # .documents puts db/ and contracts/ on sys.path, so it is imported before lab_db.
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db, resolve_project_id
+from lab_db.logs import redact  # noqa: E402
 from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
 
 router = APIRouter()
@@ -77,6 +80,8 @@ def _item(row: tuple) -> dict:
             value = value.isoformat()
         elif name in UUID_COLUMNS and value is not None:
             value = str(value)
+        elif name == "message" and isinstance(value, str):
+            value = redact(value)
         item[name] = value
     return item
 
@@ -97,14 +102,14 @@ def _list_logs(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.U
         if key in filters:
             where.append(f"{col} {op} %s")
             args.append(filters[key])
-    if cursor:
+    if cursor is not None:
         where.append("id < %s")
-        args.append(decode_cursor(cursor, project_id))
+        args.append(decode_cursor(cursor, project_id, endpoint="logs", filters=filters, ordering="id_desc"))
     rows = conn.execute(f"SELECT {', '.join(COLUMNS)} FROM log_events WHERE " + " AND ".join(where) +
                         " ORDER BY id DESC LIMIT %s", (*args, limit + 1)).fetchall()
     page = rows[:limit]
     return {"items": [_item(r) for r in page],
-            "next_cursor": encode_cursor(project_id, page[-1][0]) if len(rows) > limit else None}
+            "next_cursor": encode_cursor(project_id, page[-1][0], endpoint="logs", filters=filters, ordering="id_desc") if len(rows) > limit else None}
 
 
 async def list_logs_handler(request: Request, conn: psycopg.Connection = Depends(get_db),
