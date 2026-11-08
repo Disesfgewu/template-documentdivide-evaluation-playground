@@ -101,7 +101,7 @@ class RunStatusRealDbTests(FreshDatabase):
                         with writer.transaction():
                             attempt = f.attempt(run, f.q)
                             f.submission(run, attempt, f.q)
-                            writer.execute("UPDATE runs SET status = 'running' WHERE id = %s", (run,))
+                            writer.execute("UPDATE runs SET status = 'preparing' WHERE id = %s", (run,))
                     return result
 
             proxy = CommitAfterAttempts()
@@ -111,7 +111,7 @@ class RunStatusRealDbTests(FreshDatabase):
             self.assertEqual(before["progress"]["attempts"], 0)
             self.assertEqual(before["progress"]["accepted_answered"], 0)
             after = _get_run(reader, f.a, run)
-            self.assertEqual(after["status"], "running")
+            self.assertEqual(after["status"], "preparing")
             self.assertEqual(after["progress"]["attempts"], 1)
             self.assertEqual(after["progress"]["accepted_answered"], 1)
 
