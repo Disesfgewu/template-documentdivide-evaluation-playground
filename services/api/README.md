@@ -41,3 +41,5 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 - **下載**：授權與 artifact 狀態、大小上限、checksum 都先在資料庫層檢查，才讀取檔案；讀檔受 `max_pdf_bytes` 限制並驗證 sha256。
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
+
+`GET /api/v1/jobs/{id}`：工作的 kind、stage、status、attempt/max_attempts、retryable、row_version 及最近 50 筆 transition（新到舊，超過時 `transitions_truncated`）。不回傳 lease owner、token 或到期時間。角色矩陣尚無 job 動作，暫用 `read_gold_trace_and_lineage`（owner/maintainer/reviewer）；其他成員 403、非成員 404。
