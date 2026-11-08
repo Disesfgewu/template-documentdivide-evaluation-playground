@@ -5,10 +5,10 @@ transitions. Lease owner, lease token and expiry are never returned, since a
 token would let a caller act as the worker. Transition reasons are redacted
 of credential-shaped text via ``lab_db.logs.redact`` while preserving benign context
 (original audit records in the database remain unchanged).
-The role matrix has no job action yet, so access reuses
-``read_gold_trace_and_lineage`` (owner, maintainer, reviewer); a participant
-or observer who is a member gets 403 and a non-member gets 404. PM is asked
-on Issue #6 whether that is the intent.
+The role matrix has no job action yet, so access is scoped to staff roles
+via ``read_gold_trace_and_lineage`` (owner, maintainer, reviewer), confirmed
+by PM on Issue #6 as conservative scope pending participant run-binding;
+a participant or observer who is a member gets 403 and a non-member gets 404.
 """
 from __future__ import annotations
 

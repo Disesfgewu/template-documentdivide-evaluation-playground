@@ -101,9 +101,10 @@ class JobStatusRealDbTests(FreshDatabase):
             def execute_hook(query, *args, **kwargs):
                 nonlocal finish_committed
                 res = orig_execute(query, *args, **kwargs)
-                # When c1 completes the initial authorization project lookup,
-                # c2 finishes the job before c1 starts the status/transitions snapshot query.
-                if not finish_committed and "SELECT project_id FROM jobs" in str(query):
+                q = str(query)
+                # Matches first jobs read (both new project_id gate and old SELECT project_id,kind... read)
+                # before transitions are queried, so old code produces mixed snapshots.
+                if not finish_committed and "FROM jobs" in q and "LEFT JOIN" not in q:
                     jobs.finish(c2, p, lease, "succeeded", "concurrent finish done")
                     finish_committed = True
                 return res
@@ -128,10 +129,10 @@ class JobStatusRealDbTests(FreshDatabase):
         """
         p, owner, roles, job, lease = self.seed()
         raw_reason = (
-            "failure detail: Authorization: Bearer synthetic-secret-token-12345; "
-            "url: https://user:secretpass123@llm.example.com/v1; "
-            "api_key=sk-synthetic9876543210abcdef; "
-            "Cookie: session=synth-session-456; "
+            "failure detail: Authorization: Bearer synthetic-secret-token-12345\n"
+            "url: https://user:secretpass123@llm.example.com/v1\n"
+            "api_key=sk-synthetic9876543210abcdef\n"
+            "Cookie: session=synth-session-456\n"
             "benign worker diagnostic note"
         )
         with self.connect() as c:
