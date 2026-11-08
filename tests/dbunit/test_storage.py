@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 import hashlib
+import io
 import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from lab_db.storage import LocalArtifactStore, StorageCorruption, StoredObject
+from lab_db.storage import LocalArtifactStore, StorageCorruption, StoredObject, _bounded_file_hash
 
 
 class LocalArtifactStoreTests(unittest.TestCase):
@@ -87,6 +88,54 @@ class LocalArtifactStoreTests(unittest.TestCase):
 
         with self.assertRaises(StorageCorruption):
             self.store.put(data)
+
+    def test_oversized_existing_object_is_read_only_to_expected_size_plus_one(self) -> None:
+        data = b"x"
+        stored = self.store.put(data)
+        with (self.root / stored.object_key).open("wb") as f:
+            f.truncate(32 * 1024 * 1024)
+        import lab_db.storage as storage
+        original = storage._bounded_file_hash
+        observed = []
+
+        def capture(f, expected_size):
+            result = original(f, expected_size)
+            observed.append(result[1])
+            return result
+
+        with patch("lab_db.storage._bounded_file_hash", side_effect=capture):
+            with self.assertRaises(StorageCorruption):
+                self.store.put(data)
+        self.assertEqual(observed, [2])
+
+    def test_verifier_bounds_reads_when_file_grows(self) -> None:
+        class GrowingFile(io.BytesIO):
+            def read(self, size=-1):
+                result = super().read(size)
+                pos = self.tell()
+                self.seek(0, io.SEEK_END)
+                self.write(b"extra")
+                self.seek(pos)
+                return result
+
+        _, read_size = _bounded_file_hash(GrowingFile(b"a"), 1)
+        self.assertEqual(read_size, 2)
+
+    def test_canonical_recheck_bounds_object_growth(self) -> None:
+        data = b"x"
+        stored = self.store.put(data)
+        original = self.store._verify_existing_in_prefix
+
+        def grow_after_first_check(*args):
+            original(*args)
+            with (self.root / stored.object_key).open("ab") as f:
+                f.truncate(32 * 1024 * 1024)
+
+        with patch.object(self.store, "_verify_existing_in_prefix", side_effect=grow_after_first_check):
+            with patch("lab_db.storage._bounded_file_hash", wraps=_bounded_file_hash) as bounded:
+                with self.assertRaises(StorageCorruption):
+                    self.store.put(data)
+        self.assertEqual(bounded.call_count, 2)
 
     def test_path_traversal_and_malformed_keys_raise_value_error(self) -> None:
         digest = "a" * 64

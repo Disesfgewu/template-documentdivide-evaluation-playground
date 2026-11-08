@@ -57,6 +57,19 @@ def _dir_id(fd: int) -> tuple[int, int]:
     return (st.st_dev, st.st_ino)
 
 
+def _bounded_file_hash(f, expected_size: int) -> tuple[str, int]:
+    """Hash at most the expected length plus one byte, even if the file grows."""
+    digest = hashlib.sha256()
+    size = 0
+    while size <= expected_size:
+        chunk = f.read(min(65536, expected_size + 1 - size))
+        if not chunk:
+            break
+        digest.update(chunk)
+        size += len(chunk)
+    return digest.hexdigest(), size
+
+
 def _fsync_dir(directory: Path) -> None:
     dir_fd = os.open(
         directory,
@@ -270,7 +283,7 @@ class LocalArtifactStore:
                     raise StorageCorruption(
                         f"existing path for {object_key} is not a regular file"
                     )
-                raw = f.read()
+                actual_sha256, actual_size = _bounded_file_hash(f, expected_size)
         except BaseException:
             try:
                 os.close(file_fd)
@@ -278,8 +291,6 @@ class LocalArtifactStore:
                 pass
             raise
 
-        actual_sha256 = hashlib.sha256(raw).hexdigest()
-        actual_size = len(raw)
         if actual_sha256 != digest or actual_size != expected_size:
             raise StorageCorruption(
                 f"existing object {object_key} is corrupted: "
@@ -371,7 +382,7 @@ class LocalArtifactStore:
                         raise StorageCorruption(
                             f"canonical path for {object_key} is not a regular file"
                         )
-                    raw = f.read()
+                    actual_sha256, actual_size = _bounded_file_hash(f, expected_size)
             except BaseException:
                 try:
                     os.close(file_fd)
@@ -381,8 +392,6 @@ class LocalArtifactStore:
         finally:
             os.close(canonical_prefix_fd)
 
-        actual_sha256 = hashlib.sha256(raw).hexdigest()
-        actual_size = len(raw)
         if actual_sha256 != digest or actual_size != expected_size:
             raise StorageCorruption(
                 f"canonical content verification failed for {object_key}: "
