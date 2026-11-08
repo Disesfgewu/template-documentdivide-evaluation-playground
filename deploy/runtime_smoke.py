@@ -393,6 +393,9 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
 
         # 12. Artifact survival across container restart (restart -> ready -> download byte-identical)
         _run_docker(["restart", "-t", "5", api_container_name], timeout_s=TIMEOUT_CMD_S)
+        # Docker may allocate a new host port on restart for an ephemeral binding.
+        api_url = published_url(api_container_name, 8000)
+        download_url = f"{api_url}/api/v1/documents/{doc_id}/original"
         api_ready_after_restart = _wait_for_ready(api_url + "/readyz", timeout_s=30.0)
         if api_ready_after_restart.get("status") != "ready":
             raise AssertionError("API failed to become ready after container restart")
