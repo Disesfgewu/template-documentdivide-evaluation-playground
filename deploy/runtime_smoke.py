@@ -3,14 +3,14 @@
 Validates deploy/api.Dockerfile and deploy/parser.Dockerfile against real PostgreSQL:
 1. Builds both Docker runtime images with locked dependencies and non-root users.
 2. Starts containers with CPU, memory, and pids limits, read-only root, and tmpfs.
-3. Enforces --cap-drop=ALL, --security-opt=no-new-privileges, and non-world-writable 0770 mount.
+3. Enforces --cap-drop=ALL, --security-opt=no-new-privileges, and image-owned named volume.
 4. Asserts /healthz, /readyz (all boolean checks true), and /v1/capabilities endpoints.
 5. Verifies live inspect projections (UID 10001, ReadonlyRootfs, memory limit, pids limit).
 6. Exercises authenticated synthetic PDF upload and byte-identical download.
 7. Executes real PDFium rendering via docker exec inside BOTH containers using lab_parser.render.
 8. Proves cross-project authorization denial (404).
 9. Proves artifact persistence across container restart (restart -> ready -> byte-identical download).
-10. Validates PostgreSQL transactions and host volume artifact file match.
+10. Validates PostgreSQL transactions and named-volume artifact bytes.
 11. Safe failure reporting: always saves measured report in finally without leaking credentials.
 12. Failure-safe cleanup with bounded subprocess calls and timeout protection.
 
@@ -25,7 +25,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -68,8 +67,13 @@ def _http_get(url: str, headers: dict[str, str] | None = None, timeout_s: float 
             return resp.status, body, resp_headers
     except urllib.error.HTTPError as exc:
         resp_headers = {k.lower(): v for k, v in exc.headers.items()}
-        body = exc.read(MAX_HTTP_BYTES + 1)
-        return exc.code, body, resp_headers
+        try:
+            body = exc.read(MAX_HTTP_BYTES + 1)
+            if len(body) > MAX_HTTP_BYTES:
+                raise ValueError("HTTP response body exceeded 1MiB limit")
+            return exc.code, body, resp_headers
+        finally:
+            exc.close()
 
 
 def _http_post(url: str, data: bytes, headers: dict[str, str] | None = None, timeout_s: float = 10.0) -> tuple[int, bytes, dict[str, str]]:
@@ -83,8 +87,13 @@ def _http_post(url: str, data: bytes, headers: dict[str, str] | None = None, tim
             return resp.status, body, resp_headers
     except urllib.error.HTTPError as exc:
         resp_headers = {k.lower(): v for k, v in exc.headers.items()}
-        body = exc.read(MAX_HTTP_BYTES + 1)
-        return exc.code, body, resp_headers
+        try:
+            body = exc.read(MAX_HTTP_BYTES + 1)
+            if len(body) > MAX_HTTP_BYTES:
+                raise ValueError("HTTP response body exceeded 1MiB limit")
+            return exc.code, body, resp_headers
+        finally:
+            exc.close()
 
 
 def _wait_for_ready(url: str, timeout_s: float = 30.0) -> dict:
@@ -139,15 +148,20 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
     parser_container_name = f"lab-parser-smoke-{smoke_id}"
     auth_secret = f"ci-smoke-secret-{smoke_id}"
 
-    # Mode 0770 owned by host runner; container receives supplemental group via --group-add
-    artifact_dir = tempfile.mkdtemp(prefix=f"lab-smoke-artifacts-{smoke_id}-")
-    os.chmod(artifact_dir, 0o770)
-    host_gid = os.getgid()
+    volume_name = f"lab-artifacts-smoke-{smoke_id}"
+    parts = urlsplit(smoke_db_url)
+    userinfo = parts.netloc.rsplit("@", 1)[0] + "@" if "@" in parts.netloc else ""
+    container_db_url = urlunsplit((parts.scheme, userinfo + "db:5432", parts.path, parts.query, parts.fragment))
 
     t0 = time.monotonic()
     start_time_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     measured: dict[str, object] = {
+        "schema_version": "runtime-container-smoke-1",
+        "requirement_ids": ["R24", "R25"],
+        "test_scope": "T83 dev/test container subset; not complete A42",
+        "profile": "linux-docker-python312-pdfium-synthetic-3pages",
+        "lockfile_sha256": {name: hashlib.sha256((_REPO_ROOT / name).read_bytes()).hexdigest() for name in ("services/api/requirements.lock", "services/parser/requirements.lock", "contracts/requirements.lock")},
         "smoke_id": smoke_id,
         "commit_sha": _get_git_commit(),
         "base_image_digest": BASE_IMAGE_DIGEST,
@@ -209,23 +223,25 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
         _run_docker(["build", "-f", "deploy/parser.Dockerfile", "-t", f"lab-parser:smoke-{smoke_id}", "."], timeout_s=TIMEOUT_BUILD_S)
         measured["completed_assertions"].append("images_built")
 
+        _run_docker(["volume", "create", volume_name])
+
         # 4. Start containers with CPU/memory/pids limits + read-only root + tmpfs + supplemental group + dropped caps
         api_run = _run_docker([
             "run", "-d",
             "--name", api_container_name,
-            "--network", "host",
+            "-p", "127.0.0.1::8000",
+            "--network", "lab-dev_default",
             "--cpus=1.0",
             "--memory=512m",
             "--pids-limit=100",
             "--read-only",
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
-            f"--group-add={host_gid}",
             "--tmpfs", "/tmp:rw,nosuid,size=64m",
-            "-v", f"{artifact_dir}:/var/lib/lab/artifacts",
+            "-v", f"{volume_name}:/var/lib/lab/artifacts",
             "-e", "LAB_ENV=test",
             "-e", "LAB_PROVIDER_MODE=mock",
-            "-e", f"LAB_DATABASE_URL={smoke_db_url}",
+            "-e", f"LAB_DATABASE_URL={container_db_url}",
             "-e", "LAB_ARTIFACT_ROOT=/var/lib/lab/artifacts",
             "-e", f"LAB_AUTH_SECRET={auth_secret}",
             f"lab-api:smoke-{smoke_id}",
@@ -234,21 +250,31 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
         parser_run = _run_docker([
             "run", "-d",
             "--name", parser_container_name,
-            "--network", "host",
+            "-p", "127.0.0.1::8100",
+            "--network", "lab-dev_default",
             "--cpus=1.0",
             "--memory=512m",
             "--pids-limit=100",
             "--read-only",
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
-            f"--group-add={host_gid}",
             "--tmpfs", "/tmp:rw,nosuid,size=64m",
-            "-v", f"{artifact_dir}:/var/lib/lab/artifacts",
+            "-v", f"{volume_name}:/var/lib/lab/artifacts",
             "-e", "LAB_PARSER_ENV=test",
             "-e", "LAB_PARSER_ARTIFACT_ROOT=/var/lib/lab/artifacts",
             f"lab-parser:smoke-{smoke_id}",
         ], timeout_s=TIMEOUT_CMD_S)
         measured["completed_assertions"].append("containers_started")
+
+        def published_url(name: str, port: int) -> str:
+            result = _run_docker(["port", name, f"{port}/tcp"]).stdout.decode().strip()
+            host, published_port = result.rsplit(":", 1)
+            if host != "127.0.0.1" or not published_port.isdigit():
+                raise AssertionError("unexpected published container port")
+            return f"http://127.0.0.1:{int(published_port)}"
+
+        api_url = published_url(api_container_name, 8000)
+        parser_url = published_url(parser_container_name, 8100)
 
         # 5. Live inspect selective projection (verifying actual runtime limits, user, and readonly root)
         inspect_api_proc = _run_docker(["inspect", "--format", "{{json .Config.User}}|||{{json .HostConfig.ReadonlyRootfs}}|||{{json .HostConfig.Memory}}|||{{json .HostConfig.PidsLimit}}", api_container_name])
@@ -268,27 +294,30 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
         }
 
         # 6. Wait for health and readiness, assert all boolean check flags are True
-        api_ready = _wait_for_ready("http://127.0.0.1:8000/readyz", timeout_s=30.0)
-        parser_ready = _wait_for_ready("http://127.0.0.1:8100/readyz", timeout_s=30.0)
+        api_ready = _wait_for_ready(api_url + "/readyz", timeout_s=30.0)
+        parser_ready = _wait_for_ready(parser_url + "/readyz", timeout_s=30.0)
 
         if api_ready.get("status") != "ready" or api_ready.get("checks", {}).get("database", {}).get("ok") is not True or api_ready.get("checks", {}).get("artifact_storage", {}).get("ok") is not True:
             raise AssertionError(f"API readiness failed: {api_ready}")
         if parser_ready.get("status") != "ready" or parser_ready.get("checks", {}).get("artifact_storage", {}).get("ok") is not True:
             raise AssertionError(f"Parser readiness failed: {parser_ready}")
 
-        health_api_status, _, _ = _http_get("http://127.0.0.1:8000/healthz")
-        health_parser_status, _, _ = _http_get("http://127.0.0.1:8100/healthz")
+        health_api_status, _, _ = _http_get(api_url + "/healthz")
+        health_parser_status, _, _ = _http_get(parser_url + "/healthz")
         if health_api_status != 200 or health_parser_status != 200:
             raise AssertionError(f"Health checks failed: API={health_api_status}, Parser={health_parser_status}")
 
         measured["completed_assertions"].append("health_and_readiness_true")
 
         # 7. Assert parser capabilities endpoint
-        caps_status, caps_body, _ = _http_get("http://127.0.0.1:8100/v1/capabilities")
+        caps_status, caps_body, _ = _http_get(parser_url + "/v1/capabilities")
         if caps_status != 200:
             raise AssertionError(f"Parser /v1/capabilities status {caps_status}")
         caps_data = json.loads(caps_body.decode("utf-8"))
-        if caps_data.get("service_version") != "0.1.0" or caps_data.get("parsers") != []:
+        if caps_data.get("service_version") != "0.1.0" or caps_data.get("parsers") != [
+            {"name": "unstructured", "installed": False, "version": None, "adapter": "not_implemented"},
+            {"name": "mineru", "installed": False, "version": None, "adapter": "not_implemented"},
+        ]:
             raise AssertionError(f"Unexpected capabilities payload: {caps_data}")
         measured["completed_assertions"].append("parser_capabilities_verified")
 
@@ -297,7 +326,7 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
         pdf_sha256 = hashlib.sha256(raw_pdf).hexdigest()
         pdf_size = len(raw_pdf)
 
-        upload_url = f"http://127.0.0.1:8000/api/v1/documents?project_id={proj_a}&logical_id=smoke-pdf-3p"
+        upload_url = f"{api_url}/api/v1/documents?project_id={proj_a}&logical_id=smoke-pdf-3p"
         upload_status, upload_body, _ = _http_post(
             upload_url,
             data=raw_pdf,
@@ -319,7 +348,7 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
         measured["measured_data"]["fixture_size_bytes"] = pdf_size
 
         # 9. Exercise byte-identical download
-        download_url = f"http://127.0.0.1:8000/api/v1/documents/{doc_id}/original"
+        download_url = f"{api_url}/api/v1/documents/{doc_id}/original"
         download_status, downloaded_bytes, _ = _http_get(
             download_url,
             headers={"Authorization": f"Bearer {token_a}"},
@@ -330,12 +359,12 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
 
         # 10. Native PDFium execution proof in BOTH containers via lab_parser.render.render_region
         render_code = (
-            "import sys, json;"
+            "import sys, json, importlib.metadata;"
             "from lab_parser.render import render_region;"
             "raw = sys.stdin.buffer.read();"
             "asset = render_region(data=raw, page_index=0, dpi=150);"
             "assert asset.png.startswith(b'\\x89PNG\\r\\n\\x1a\\n');"
-            "print(json.dumps({'png_valid': True, 'width': asset.width_px, 'height': asset.height_px, 'sha256': asset.sha256}))"
+            "print(json.dumps({'png_valid': True, 'width': asset.width_px, 'height': asset.height_px, 'sha256': asset.sha256, 'python': sys.version.split()[0], 'pypdfium2': importlib.metadata.version('pypdfium2')}))"
         )
         api_render = _run_docker(["exec", "-i", api_container_name, "python3", "-c", render_code], input_bytes=raw_pdf, timeout_s=TIMEOUT_CMD_S)
         api_render_data = json.loads(api_render.stdout.decode("utf-8").strip())
@@ -364,7 +393,7 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
 
         # 12. Artifact survival across container restart (restart -> ready -> download byte-identical)
         _run_docker(["restart", "-t", "5", api_container_name], timeout_s=TIMEOUT_CMD_S)
-        api_ready_after_restart = _wait_for_ready("http://127.0.0.1:8000/readyz", timeout_s=30.0)
+        api_ready_after_restart = _wait_for_ready(api_url + "/readyz", timeout_s=30.0)
         if api_ready_after_restart.get("status") != "ready":
             raise AssertionError("API failed to become ready after container restart")
 
@@ -389,9 +418,12 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
                 if not art_row or art_row["sha256"] != pdf_sha256 or art_row["state"] != "committed":
                     raise AssertionError("PostgreSQL artifact row invalid")
 
-        artifact_path = Path(artifact_dir) / "sha256" / pdf_sha256[:2] / pdf_sha256
-        if not artifact_path.is_file() or artifact_path.read_bytes() != raw_pdf:
-            raise AssertionError("Host artifact file does not match uploaded synthetic PDF bytes")
+        verify_code = (
+            "from pathlib import Path; import hashlib,sys;"
+            "p=Path('/var/lib/lab/artifacts/sha256')/sys.argv[1][:2]/sys.argv[1];"
+            "assert hashlib.sha256(p.read_bytes()).hexdigest()==sys.argv[1]"
+        )
+        _run_docker(["exec", api_container_name, "python3", "-c", verify_code, pdf_sha256])
 
         measured["completed_assertions"].append("db_and_volume_persistence_verified")
         measured["status"] = "PASSED"
@@ -409,15 +441,19 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
         cleanup_failures = []
         for cname in registered_containers:
             try:
-                _run_docker(["stop", "-t", "5", cname], timeout_s=TIMEOUT_CLEANUP_S, check=False)
                 _run_docker(["rm", "-f", cname], timeout_s=TIMEOUT_CLEANUP_S, check=False)
+                left = _run_docker(["ps", "-a", "--filter", f"name=^/{cname}$", "--format", "{{.Names}}"])
+                if left.stdout.strip():
+                    raise RuntimeError("container remains")
             except Exception as exc:
-                cleanup_failures.append(f"container_{cname}:{type(exc).__name__}")
-
+                cleanup_failures.append(f"container:{type(exc).__name__}")
         try:
-            shutil.rmtree(artifact_dir, ignore_errors=True)
+            _run_docker(["volume", "rm", volume_name], timeout_s=TIMEOUT_CLEANUP_S, check=False)
+            left = _run_docker(["volume", "ls", "--filter", f"name={volume_name}", "--format", "{{.Name}}"])
+            if volume_name in left.stdout.decode().splitlines():
+                raise RuntimeError("volume remains")
         except Exception as exc:
-            cleanup_failures.append(f"artifact_dir:{type(exc).__name__}")
+            cleanup_failures.append(f"volume:{type(exc).__name__}")
 
         if created_db:
             try:
@@ -426,6 +462,8 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
             except Exception as exc:
                 cleanup_failures.append(f"db:{type(exc).__name__}")
 
+        if cleanup_failures:
+            measured["status"] = "FAILED"
         measured["cleanup_status"] = {
             "succeeded": len(cleanup_failures) == 0,
             "failures": cleanup_failures,
@@ -458,6 +496,7 @@ def run_smoke(admin_database_url: str, report_dir: Path) -> dict:
             (report_dir / "runtime_smoke_report.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
         except Exception as report_exc:
             print(f"[smoke] Failed to write report: {type(report_exc).__name__}", file=sys.stderr)
+            raise RuntimeError("smoke report unavailable") from None
 
         if cleanup_failures:
             print(f"[smoke] Resource cleanup failures: {', '.join(cleanup_failures)}", file=sys.stderr)

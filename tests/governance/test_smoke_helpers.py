@@ -27,55 +27,34 @@ class SmokeHelperTests(unittest.TestCase):
             self.assertIn("exceeded 1MiB limit", str(ctx.exception))
 
     def test_failure_report_written_with_safe_redacted_fields(self) -> None:
-        """When an assertion fails, report is written in finally with accurate status and no credentials."""
+        """Exercise real failure/finally path, not a hand-built expected report."""
+        from contextlib import redirect_stderr
+        from types import SimpleNamespace
+        canary = "synthetic-password-canary"
         with tempfile.TemporaryDirectory() as tmp:
-            report_dir = Path(tmp)
-            measured = {
-                "smoke_id": "test1234",
-                "commit_sha": "abc1234",
-                "base_image_digest": runtime_smoke.BASE_IMAGE_DIGEST,
-                "python_version": "3.12.0",
-                "timestamp_start": "2026-11-09T00:00:00Z",
-                "timestamp_end": "2026-11-09T00:00:05Z",
-                "duration_s": 5.0,
-                "status": "FAILED",
-                "error_step": "pdf_upload_succeeded",
-                "error_class": "AssertionError",
-                "completed_assertions": ["database_migrated", "images_built", "containers_started"],
-                "measured_data": {"migrations_applied_count": 9},
-                "cleanup_status": {"succeeded": True, "failures": []},
-            }
-
-            json_path = report_dir / "runtime_smoke_report.json"
-            md_path = report_dir / "runtime_smoke_report.md"
-
-            json_path.write_text(json.dumps(measured, indent=2), encoding="utf-8")
-            md_lines = [
-                "# Runtime Container Smoke Report",
-                f"- **Status**: {measured['status']}",
-                f"- **Duration**: {measured['duration_s']}s",
-                "## Completed Assertions",
-            ]
-            for a in measured["completed_assertions"]:
-                md_lines.append(f"- [x] {a}")
-            md_lines.append(f"\n> [!CAUTION]\n> Smoke failed at step `{measured['error_step']}` with `{measured['error_class']}`.")
-            md_path.write_text("\n".join(md_lines), encoding="utf-8")
-
-            # Verify report readability and contents
-            self.assertTrue(json_path.is_file())
-            self.assertTrue(md_path.is_file())
-            data = json.loads(json_path.read_text(encoding="utf-8"))
+            stderr = io.StringIO()
+            with patch.dict("os.environ", {"LAB_TEST_DATABASE_URL": "postgresql://u:" + canary + "@localhost/db"}), \
+                 patch.object(runtime_smoke.shutil, "which", return_value="/usr/bin/docker"), \
+                 patch.object(runtime_smoke.psycopg, "connect", side_effect=RuntimeError(canary)), \
+                 patch.object(runtime_smoke, "_run_docker", return_value=SimpleNamespace(stdout=b"", returncode=0)), \
+                 redirect_stderr(stderr):
+                code = runtime_smoke.main(["--report-dir", tmp])
+            self.assertEqual(code, 1)
+            report = Path(tmp) / "runtime_smoke_report.json"
+            data = json.loads(report.read_text())
             self.assertEqual(data["status"], "FAILED")
-            self.assertEqual(data["error_class"], "AssertionError")
-            self.assertEqual(len(data["completed_assertions"]), 3)
+            self.assertEqual(data["completed_assertions"], [])
+            self.assertEqual(data["error_class"], "RuntimeError")
+            self.assertTrue(data["cleanup_status"]["succeeded"])
+            self.assertNotIn(canary, report.read_text() + stderr.getvalue())
+            self.assertTrue((Path(tmp) / "runtime_smoke_report.md").is_file())
 
-            md_text = md_path.read_text(encoding="utf-8")
-            self.assertIn("Status**: FAILED", md_text)
-            self.assertIn("database_migrated", md_text)
-            self.assertIn("pdf_upload_succeeded", md_text)
-            # Ensure no credentials or URLs leaked
-            self.assertNotIn("postgresql://", md_text)
-            self.assertNotIn("Bearer", md_text)
+    def test_docker_timeout_is_bounded_and_value_free(self) -> None:
+        with patch.object(runtime_smoke.subprocess, "run", side_effect=runtime_smoke.subprocess.TimeoutExpired(["docker", "secret-canary"], 7)) as run:
+            with self.assertRaises(TimeoutError) as error:
+                runtime_smoke._run_docker(["run", "secret-canary"], timeout_s=7)
+            self.assertEqual(run.call_args.kwargs["timeout"], 7)
+            self.assertNotIn("secret-canary", str(error.exception))
 
     def test_run_docker_error_masks_command_arguments(self) -> None:
         """_run_docker raises RuntimeError without printing raw command arguments or credentials."""

@@ -28,7 +28,7 @@ The root `.dockerignore` denies all files by default, selectively allowing only 
 
 - **Artifact Volume**: `/var/lib/lab/artifacts`
   - Writable volume owned by `10001:10001`.
-  - For persistent storage, use a Docker named volume (e.g. `docker volume create lab-artifacts` mounted to `/var/lib/lab/artifacts`), or an explicitly owned host bind mount directory with permissions `0750` (owned by UID/GID 10001:10001) or `0770` with a shared group via `--group-add <gid>`. World-writable permissions (`chmod 777`) violate `LocalArtifactStore` security preconditions and are rejected.
+  - For persistent storage, use a Docker named volume (e.g. `docker volume create lab-artifacts` mounted to `/var/lib/lab/artifacts`), or an explicitly owned host bind mount directory with permissions `0750` (owned by UID/GID 10001:10001) or `0770` with a shared group via `--group-add <gid>`. World-writable permissions (`chmod 777`) violate `LocalArtifactStore` security preconditions and must not be used.
 - **Required Environment Variables**:
   - API:
     - `LAB_ENV`: `dev` or `test`
@@ -51,7 +51,8 @@ docker volume create lab-artifacts
 
 # 3. Start API container
 docker run -d --name lab-api \
-  --network host \
+  --network lab-dev_default \
+  -p 127.0.0.1:8000:8000 \
   --cpus="1.0" --memory="512m" --pids-limit=100 \
   --read-only \
   --cap-drop=ALL --security-opt=no-new-privileges \
@@ -59,14 +60,15 @@ docker run -d --name lab-api \
   -v lab-artifacts:/var/lib/lab/artifacts \
   -e LAB_ENV=dev \
   -e LAB_PROVIDER_MODE=mock \
-  -e LAB_DATABASE_URL=postgresql://lab:lab-dev-only@127.0.0.1:55432/lab \
+  -e LAB_DATABASE_URL=postgresql://lab:lab-dev-only@db:5432/lab \
   -e LAB_ARTIFACT_ROOT=/var/lib/lab/artifacts \
   -e LAB_AUTH_SECRET=dev-secret-only \
   lab-api:dev
 
 # 4. Start Parser container
 docker run -d --name lab-parser \
-  --network host \
+  --network lab-dev_default \
+  -p 127.0.0.1:8100:8100 \
   --cpus="1.0" --memory="512m" --pids-limit=100 \
   --read-only \
   --cap-drop=ALL --security-opt=no-new-privileges \
@@ -84,3 +86,16 @@ docker run -d --name lab-parser \
 - **Other Components Not Covered**: Go workflow worker (`services/worker`), parser inference workers, React web UI (`web`), and full multi-container orchestration are not containerized in this increment.
 - **Alembic / Database Migrations**: Alembic migration containerization is tracked separately under PR #77 (`deploy/Dockerfile.migrate`); this increment does not duplicate or alter database schema or migrations.
 - **Tracking**: Refs #3 (#3 remains open).
+
+## Runtime smoke
+
+After starting the existing Compose database, run from the repository root:
+
+```bash
+export LAB_TEST_DATABASE_URL=postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+python -m deploy.runtime_smoke --report-dir /tmp/runtime-smoke-evidence
+```
+
+The smoke requires Linux Docker and the `lab-dev_default` network supplied by `compose.dev.yml`. It creates a disposable database and named artifact volume, uses random loopback-only published service ports, runs both images as UID10001, performs actual PDFium rendering, and verifies authenticated upload/download, cross-project denial and persistence across restart. Cleanup removes its containers, volume and database; a cleanup failure is a failed smoke. It does not publish images. Local absence of Docker is blocked (exit3), not a passed container build. CI retains the measured JSON report.
+
+The smoke currently calls the migration interface already on main; #77 changes its implementation to Alembic. Recheck Docker context and migration packaging when integrating #77; this runtime context allow-list does not establish compatibility with its migration image.
