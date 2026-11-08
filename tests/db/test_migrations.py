@@ -150,6 +150,18 @@ class AlembicCommandLineTests(FreshDatabase):
         with self.connect() as c:
             self.assertEqual(c.execute("SELECT max(version) FROM schema_migrations").fetchone()[0], len(discover()))
 
+    def test_missing_trailing_wrapper_refuses_upgrade_with_nonzero_exit(self):
+        nxt = len(discover()) + 1
+        trailing_sql = migrate_module.MIGRATIONS / f"{nxt:04d}_trailing_test.sql"
+        try:
+            trailing_sql.write_text("SELECT 1;")
+            res = self.alembic("upgrade", "head")
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("missing Alembic wrapper", res.stderr)
+        finally:
+            if trailing_sql.exists():
+                trailing_sql.unlink()
+
 
 class ConcurrentMigratorTests(FreshDatabase):
     migrate_to_head = False
@@ -173,6 +185,52 @@ class ConcurrentMigratorTests(FreshDatabase):
         with self.connect() as c:
             self.assertEqual(c.execute("SELECT count(*), count(DISTINCT version) FROM schema_migrations").fetchone(),
                              (len(discover()), len(discover())))
+
+    def test_concurrent_migrators_with_barrier_report_only_applied(self):
+        """Two separate processes synchronized by a barrier on an empty database:
+        one truly applies migrations and reports [1..n]; the other applies none
+        and reports []. The database executes each migration exactly once."""
+        import multiprocessing
+
+        barrier = multiprocessing.Barrier(2)
+        q = multiprocessing.Queue()
+
+        def _worker(url: str, deployment: str, b, out_q):
+            try:
+                b.wait(timeout=30)
+                res = migrate(url, deployment)
+                out_q.put((deployment, res, None))
+            except Exception as exc:
+                out_q.put((deployment, None, exc))
+
+        p1 = multiprocessing.Process(target=_worker, args=(self.url, "p1", barrier, q))
+        p2 = multiprocessing.Process(target=_worker, args=(self.url, "p2", barrier, q))
+        p1.start()
+        p2.start()
+        p1.join(timeout=60)
+        p2.join(timeout=60)
+
+        self.assertEqual(p1.exitcode, 0)
+        self.assertEqual(p2.exitcode, 0)
+
+        results = {}
+        for _ in range(2):
+            dep, applied, err = q.get(timeout=10)
+            if err is not None:
+                raise err
+            results[dep] = applied
+
+        all_versions = [m.version for m in discover()]
+        winner = "p1" if results["p1"] == all_versions else "p2"
+        loser = "p2" if winner == "p1" else "p1"
+
+        self.assertEqual(results[winner], all_versions)
+        self.assertEqual(results[loser], [])
+
+        with self.connect() as c:
+            rows = c.execute("SELECT version, deployment FROM schema_migrations ORDER BY version").fetchall()
+            self.assertEqual([r[0] for r in rows], all_versions)
+            self.assertEqual([r[1] for r in rows], [winner] * len(all_versions))
 
 
 class InconsistentStateAbsentSchemaMigrationsTests(FreshDatabase):

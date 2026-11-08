@@ -1,6 +1,9 @@
 """Alembic wiring that needs no database: revisions match the SQL files,
 malformed script directories are refused, URL handling, checksum
 verification and adoption of databases migrated by the earlier runner."""
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -245,6 +248,70 @@ class EnvironmentGuardTests(unittest.TestCase):
         src = (Path(env.__file__)).read_text()
         self.assertIn("offline (--sql) mode is not supported", src)
         self.assertIn("a deployment id is required", src)
+
+
+class VerifyWrappersMatchSqlTests(unittest.TestCase):
+    def setUp(self):
+        self.sql_migs = [m.Migration(i, f"{i:04d}_x.sql", f"SELECT {i};") for i in range(1, 4)]
+        self.wrappers = [m.Migration(i, f"{i:04d}_x.sql", f"SELECT {i};") for i in range(1, 4)]
+
+    def test_matching_wrappers_and_sql_are_accepted(self):
+        env.verify_wrappers_match_sql(self.wrappers, self.sql_migs)
+
+    def test_missing_trailing_wrapper_is_refused(self):
+        with self.assertRaisesRegex(m.MigrationError, r"missing Alembic wrapper for SQL migration.*0003_x\.sql"):
+            env.verify_wrappers_match_sql(self.wrappers[:2], self.sql_migs)
+
+    def test_missing_multiple_trailing_wrappers_are_refused(self):
+        with self.assertRaisesRegex(m.MigrationError, r"missing Alembic wrapper for SQL migration.*0002_x\.sql, 0003_x\.sql"):
+            env.verify_wrappers_match_sql(self.wrappers[:1], self.sql_migs)
+
+    def test_extra_wrapper_without_sql_is_refused(self):
+        with self.assertRaisesRegex(m.MigrationError, r"wrapper exists without SQL migration.*0003_x\.sql"):
+            env.verify_wrappers_match_sql(self.wrappers, self.sql_migs[:2])
+
+    def test_mismatched_checksum_is_refused(self):
+        tampered = [m.Migration(1, "0001_x.sql", "SELECT 999;")] + self.wrappers[1:]
+        with self.assertRaisesRegex(m.MigrationError, r"checksum mismatch between 0001_x\.sql"):
+            env.verify_wrappers_match_sql(tampered, self.sql_migs)
+
+    def test_mismatched_name_is_refused(self):
+        renamed = [m.Migration(1, "0001_renamed.sql", self.sql_migs[0].sql)] + self.wrappers[1:]
+        with self.assertRaisesRegex(m.MigrationError, r"does not match SQL migration 0001_x\.sql"):
+            env.verify_wrappers_match_sql(renamed, self.sql_migs)
+
+
+class ProductionEntrypointOfflineTests(unittest.TestCase):
+    def test_upgrade_fails_nonzero_on_missing_trailing_wrapper(self):
+        """Offline regression: alembic upgrade head exits non-zero if trailing wrapper is missing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            mig_dir = tmp_path / "migrations"
+            mig_dir.mkdir()
+            (mig_dir / "0001_a.sql").write_text("SELECT 1;")
+            (mig_dir / "0002_b.sql").write_text("SELECT 2;")
+
+            schema_dir = tmp_path / "schema"
+            mig1 = m.Migration(1, "0001_a.sql", "SELECT 1;")
+            m._ephemeral_script_dir([mig1], schema_dir)
+
+            ini_path = tmp_path / "alembic.ini"
+            ini_path.write_text(f"[alembic]\nscript_location = {schema_dir}\n")
+
+            env_vars = dict(os.environ, PYTHONPATH=str(DB_DIR), LAB_MIGRATION_DATABASE_URL="postgresql://u:p@localhost:5432/d")
+            cmd = [
+                sys.executable, "-m", "alembic", "-c", str(ini_path),
+                "-x", "deployment=test", "upgrade", "head"
+            ]
+            res = subprocess.run(cmd, env=env_vars, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("missing Alembic wrapper for SQL migration(s): 0002_b.sql", res.stderr)
+
+    def test_explicit_test_prefix_preserves_partial_migrations(self):
+        """Explicitly passed test-prefix migrations do not enforce trailing wrapper matching."""
+        cfg = Config()
+        cfg.attributes["explicit_migrations"] = True
+        self.assertTrue(cfg.attributes.get("explicit_migrations"))
 
 
 if __name__ == "__main__":

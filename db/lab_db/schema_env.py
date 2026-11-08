@@ -6,11 +6,20 @@ checksums, which ``--sql`` offline output cannot enforce.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from alembic.util.exc import CommandError
 from alembic.script import ScriptDirectory
 
-from lab_db.migrate import LOCK_KEY, Migration, MigrationError
+from lab_db.migrate import (
+    LOCK_KEY,
+    MIGRATIONS,
+    SCHEMA_DIR,
+    Migration,
+    MigrationError,
+    _recorded_versions,
+    discover,
+)
 
 VERSION_TABLE = "alembic_version"
 _DEPLOYMENT_HELP = "a deployment id is required: alembic -x deployment=<id> upgrade head"
@@ -108,6 +117,38 @@ def verify_and_adopt(raw, migrations: list[Migration]) -> None:
             )
 
 
+def verify_wrappers_match_sql(wrappers: list[Migration], sql_migrations: list[Migration]) -> None:
+    """Verify that Alembic wrappers match the repository's SQL migrations.
+
+    Every SQL migration must have a corresponding wrapper with matching version,
+    file name, and checksum. Refuses missing trailing wrappers so production
+    entrypoints cannot treat an outdated wrapper set as head.
+    """
+    wrapper_by_version = {m.version: m for m in wrappers}
+    sql_by_version = {m.version: m for m in sql_migrations}
+
+    missing_wrappers = [m for m in sql_migrations if m.version not in wrapper_by_version]
+    if missing_wrappers:
+        names = ", ".join(m.name for m in missing_wrappers)
+        raise MigrationError(f"missing Alembic wrapper for SQL migration(s): {names}")
+
+    extra_wrappers = [m for m in wrappers if m.version not in sql_by_version]
+    if extra_wrappers:
+        names = ", ".join(m.name for m in extra_wrappers)
+        raise MigrationError(f"Alembic wrapper exists without SQL migration: {names}")
+
+    for sql_mig in sql_migrations:
+        wrap_mig = wrapper_by_version[sql_mig.version]
+        if wrap_mig.name != sql_mig.name:
+            raise MigrationError(
+                f"revision {wrap_mig.version:04d} ({wrap_mig.name}) does not match SQL migration {sql_mig.name}"
+            )
+        if wrap_mig.checksum != sql_mig.checksum:
+            raise MigrationError(
+                f"checksum mismatch between {sql_mig.name} and Alembic wrapper {wrap_mig.version:04d}"
+            )
+
+
 def run() -> None:
     from alembic import context
     from sqlalchemy import create_engine, pool
@@ -120,7 +161,26 @@ def run() -> None:
         raise MigrationError(_DEPLOYMENT_HELP)
     config.attributes["deployment"] = deployment
     url = _sqlalchemy_url(config.attributes.get("url") or os.environ.get("LAB_MIGRATION_DATABASE_URL"))
-    migrations = script_migrations(ScriptDirectory.from_config(config))
+    script = ScriptDirectory.from_config(config)
+    migrations = script_migrations(script)
+
+    is_explicit_prefix = bool(
+        config.attributes.get("explicit_migrations")
+        or context.get_x_argument(as_dictionary=True).get("allow_prefix")
+    )
+    if not is_explicit_prefix:
+        script_path = Path(script.dir).resolve()
+        paired_migrations = script_path.parent / "migrations"
+        if paired_migrations.is_dir():
+            sql_dir = paired_migrations
+        elif script_path == SCHEMA_DIR.resolve():
+            sql_dir = MIGRATIONS
+        else:
+            sql_dir = None
+
+        if sql_dir is not None:
+            sql_migrations = discover(sql_dir)
+            verify_wrappers_match_sql(migrations, sql_migrations)
 
     engine = create_engine(url, poolclass=pool.NullPool)
     try:
@@ -131,9 +191,15 @@ def run() -> None:
             try:
                 verify_and_adopt(raw, migrations)
                 raw.commit()
+                before = _recorded_versions(raw)
+                raw.commit()
                 context.configure(connection=connection, version_table=VERSION_TABLE, transaction_per_migration=True)
                 with context.begin_transaction():
                     context.run_migrations()
+                raw.commit()
+                after = _recorded_versions(raw)
+                raw.commit()
+                config.attributes["applied"] = sorted(after - before)
             finally:
                 raw.rollback()
                 raw.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))

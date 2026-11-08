@@ -130,11 +130,13 @@ def _ephemeral_script_dir(migrations: list[Migration], target: Path) -> None:
         )
 
 
-def _recorded_versions(conninfo: str) -> set[int]:
-    with psycopg.connect(conninfo) as conn:
-        if conn.execute("SELECT to_regclass('schema_migrations')").fetchone()[0] is None:
-            return set()
-        return {v for (v,) in conn.execute("SELECT version FROM schema_migrations")}
+def _recorded_versions(target: str | psycopg.Connection) -> set[int]:
+    if isinstance(target, str):
+        with psycopg.connect(target) as conn:
+            return _recorded_versions(conn)
+    if target.execute("SELECT to_regclass('schema_migrations')").fetchone()[0] is None:
+        return set()
+    return {r[0] for r in target.execute("SELECT version FROM schema_migrations").fetchall()}
 
 
 def migrate(conninfo: str, deployment: str, migrations: list[Migration] | None = None) -> list[int]:
@@ -149,18 +151,18 @@ def migrate(conninfo: str, deployment: str, migrations: list[Migration] | None =
     from alembic import command
     from alembic.config import Config
 
-    before = _recorded_versions(conninfo)
+    cfg = Config()
+    cfg.attributes.update(url=conninfo, deployment=deployment, applied=[])
     with tempfile.TemporaryDirectory() as tmp:
-        cfg = Config()
         if migrations is None:
             cfg.set_main_option("script_location", str(SCHEMA_DIR))
         else:
             ephemeral = Path(tmp) / "schema"
             _ephemeral_script_dir(sorted(migrations, key=lambda m: m.version), ephemeral)
             cfg.set_main_option("script_location", str(ephemeral))
-        cfg.attributes.update(url=conninfo, deployment=deployment)
+            cfg.attributes["explicit_migrations"] = True
         command.upgrade(cfg, "head")
-    return sorted(_recorded_versions(conninfo) - before)
+    return list(cfg.attributes.get("applied", []))
 
 
 def main(argv: list[str]) -> int:
