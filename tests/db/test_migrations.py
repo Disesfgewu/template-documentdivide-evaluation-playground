@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import threading
 import uuid
 from pathlib import Path
 
@@ -93,6 +92,10 @@ class AdoptionTests(FreshDatabase):
             self.assertEqual(c.execute("SELECT version_num FROM alembic_version").fetchall(), [(f"{len(discover()):04d}",)])
         self.assertEqual(migrate(self.url, deployment="again"), [])
 
+
+class AdoptionRefusalTests(FreshDatabase):
+    migrate_to_head = False
+
     def test_adoption_refuses_a_legacy_database_whose_migration_was_edited(self):
         with psycopg.connect(self.url) as c:
             c.execute(BOOKKEEPING)
@@ -152,23 +155,21 @@ class ConcurrentMigratorTests(FreshDatabase):
     migrate_to_head = False
 
     def test_concurrent_migrators_apply_every_migration_exactly_once(self):
-        results, errors = [], []
-        barrier = threading.Barrier(3)
+        """Separate processes, as real migrators are (Alembic's context is
+        process-global, so threads in one process cannot run concurrently)."""
+        import ast
 
-        def run(i):
-            try:
-                barrier.wait()
-                results.append(migrate(self.url, deployment=f"c{i}"))
-            except Exception as exc:  # pragma: no cover - reported below
-                errors.append(repr(exc))
-
-        threads = [threading.Thread(target=run, args=(i,)) for i in range(3)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(300)
-        self.assertEqual(errors, [])
-        self.assertEqual(sorted(v for r in results for v in r), [m.version for m in discover()])
+        env = dict(os.environ, PYTHONPATH=str(DB_DIR), LAB_MIGRATION_DATABASE_URL=self.url)
+        procs = [subprocess.Popen([sys.executable, "-m", "lab_db.migrate", "--deployment", f"c{i}"], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(3)]
+        applied = []
+        for proc in procs:
+            out, err = proc.communicate(timeout=300)
+            self.assertEqual(proc.returncode, 0, err)
+            self.assertTrue(out.startswith("applied: "), out)
+            text = out[len("applied: "):].strip()
+            applied.append([] if text.startswith("none") else ast.literal_eval(text))
+        self.assertEqual(sorted(v for r in applied for v in r), [m.version for m in discover()])
         with self.connect() as c:
             self.assertEqual(c.execute("SELECT count(*), count(DISTINCT version) FROM schema_migrations").fetchone(),
                              (len(discover()), len(discover())))

@@ -142,6 +142,9 @@ def migrate(conninfo: str, deployment: str, migrations: list[Migration] | None =
 
     ``migrations=None`` uses the repository's revisions; a list builds a
     temporary script directory from exactly those migrations.
+
+    Not thread-safe: Alembic's ``context`` is process-global. Concurrent
+    migrators must be separate processes; the advisory lock serialises them.
     """
     from alembic import command
     from alembic.config import Config
