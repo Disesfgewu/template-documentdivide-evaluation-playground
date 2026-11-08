@@ -8,7 +8,7 @@ There is a single publisher for the `sha256/<xx>/<sha256>` layout: `LocalArtifac
 
 - opening the source with `O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC` and refusing missing paths, directories, FIFOs and symlinks;
 - the strict PDF check (`inspect_pdf` order: empty, `%PDF-` header within 1024 bytes, strict `pypdf` structure, encryption rejected without password guessing, `max_pages`, `xref_repaired` detection). It runs as the store's `inspect` hook on the staged bytes, before anything is published, so a rejected PDF never reaches the store. `allow_flagged=False` (default) rejects `xref_repaired` PDFs;
-- mapping store errors to fixed, sanitized codes (`file_too_large`, `artifact_corrupted`, `artifact_root_unavailable`, `artifact_store_failed`); no PDF bytes, parser diagnostics or paths are ever included.
+- mapping store errors to fixed, sanitized codes (`file_too_large`, `artifact_corrupted`, `artifact_root_unavailable`, `artifact_store_failed`, `publication_durability_unknown`); no PDF bytes, parser diagnostics or paths are ever included.
 
 The parser does not import `lab_db`: the caller passes the store (`ingest_pdf_artifact(path, LocalArtifactStore(root))`).
 
@@ -19,11 +19,13 @@ The parser does not import `lab_db`: the caller passes the store (`ingest_pdf_ar
 - `inspect(stage_fd, sha256, size)` may reject by raising; it runs before publication.
 - Before publishing, re-checks the staged descriptor against its directory entry (same inode, one link, mode `0600`, size) and re-hashes it, so a rewritten or swapped stage file fails with `StorageCorruption`.
 - Publishes with `os.link` (never overwrites). If the object already exists it is verified (`reused_existing=True`) or rejected as corrupted; the final canonical-path check is the same as `put`.
+- Zero or negative writes fail immediately; positive short writes continue until the chunk is complete. Verification readers close even if seek or stream construction fails.
+- If the final link exists but its directory fsync fails, `PublicationDurabilityUnknown` maps to `publication_durability_unknown`. The immutable object is preserved, no success is returned, and a retry verifies/reuses the same content identity; this error does not mean publication never occurred. If staging cleanup also fails, the primary uncertainty remains with a fixed cleanup note; descriptors still close and the leftover stage requires cleanup.
 - The stage file is removed on every path; a failure to remove it is reported (`StorageCorruption`).
 
 ## Where the earlier fault-injection cases are covered now
 
-The earlier stage-tampering, publication-failure, stage-permission and descriptor-leak tests exercised code that no longer exists in this module. They moved to the store, in `tests/dbunit/test_storage.py::PutStreamTests`: in-place rewrite, replaced inode, extra link or wrong mode of the stage file, corrupted existing destination never clobbered, symlinked `sha256` directory refused, stage-removal failure reported and descriptors closed, no descriptor growth across 30 failures, concurrent duplicate writers publish one object, limit boundary and read bound, invalid arguments. PDF-level cases stay in `tests/parser/test_artifacts.py`.
+The earlier stage-tampering, publication-failure, stage-permission and descriptor-leak tests exercised code that no longer exists in this module. They moved to the store, in `tests/dbunit/test_storage.py::PutStreamTests`: in-place rewrite, replaced inode, extra link or wrong mode of the stage file, corrupted existing destination never clobbered, symlinked `sha256` directory refused, stage-removal failure reported and descriptors closed, no descriptor growth across 30 failures, concurrent duplicate writers publish one object, limit boundary and read bound, invalid arguments. PDF-level cases stay in `tests/parser/test_artifacts.py`. Regressions also cover stalled/short writes, repeated seek/fdopen failures without descriptor growth, and post-link fsync uncertainty at both store and PDF boundaries.
 
 ## Usage
 

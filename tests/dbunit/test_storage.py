@@ -759,6 +759,88 @@ class PutStreamTests(unittest.TestCase):
         self.assertEqual(self.stages(), [])
         self.assertEqual(len(self.objects()), 1)
 
+    def test_nonpositive_write_fails_without_retry_and_preserves_source(self) -> None:
+        for result in (0, -1):
+            with self.subTest(result=result):
+                fd = self.source(b"write-fault")
+                with patch("lab_db.storage.os.write", side_effect=[result, AssertionError("retried stalled write")]):
+                    with self.assertRaisesRegex(StorageCorruption, "staging write made no progress"):
+                        self.store.put_stream(fd, max_bytes=100)
+                os.fstat(fd)  # caller retains ownership
+                self.assertEqual(self.stages(), [])
+                self.assertEqual(self.objects(), [])
+
+    def test_positive_short_writes_preserve_every_byte(self) -> None:
+        original = os.write
+        data = b"short-write-content" * 100
+        with patch("lab_db.storage.os.write", side_effect=lambda fd, view: original(fd, view[:3])):
+            stored = self.store.put_stream(self.source(data), max_bytes=len(data))
+        self.assertEqual(self.store.open(stored.object_key), data)
+        self.assertEqual(self.stages(), [])
+
+    def test_verification_seek_and_fdopen_failure_close_every_duplicate(self) -> None:
+        sources = [self.source(b"verify-failure") for _ in range(8)]
+        before = self.fd_count()
+        for target in ("os.lseek", "os.fdopen"):
+            with self.subTest(target=target):
+                for fd in sources:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    with patch("lab_db.storage." + target, side_effect=OSError(5, "private diagnostic")):
+                        with self.assertRaisesRegex(StorageCorruption, "staging file is unreadable"):
+                            self.store.put_stream(fd, max_bytes=100)
+                    self.assertEqual(self.fd_count(), before)
+                    self.assertEqual(self.stages(), [])
+                    self.assertEqual(self.objects(), [])
+                    os.fstat(fd)
+
+    def test_post_link_fsync_reports_uncertainty_and_preserves_object(self) -> None:
+        data = b"published-but-durability-unknown"
+        digest = hashlib.sha256(data).hexdigest()
+        target = self.root / "sha256" / digest[:2] / digest
+        original = os.fsync
+
+        def fail_after_publication(fd):
+            if target.exists():
+                raise OSError(5, "private fsync diagnostic")
+            return original(fd)
+
+        with patch("lab_db.storage.os.fsync", side_effect=fail_after_publication):
+            with self.assertRaisesRegex(Exception, "publication_durability_unknown") as caught:
+                self.store.put_stream(self.source(data), max_bytes=100)
+        self.assertEqual(type(caught.exception).__name__, "PublicationDurabilityUnknown")
+        self.assertEqual(target.read_bytes(), data)
+        self.assertEqual(self.stages(), [])
+        self.assertTrue(self.store.put_stream(self.source(data), max_bytes=100).reused_existing)
+
+    def test_cleanup_failure_does_not_hide_publication_uncertainty(self) -> None:
+        data = b"combined-publication-fault"
+        digest = hashlib.sha256(data).hexdigest()
+        target = self.root / "sha256" / digest[:2] / digest
+        original_sync, original_unlink = os.fsync, os.unlink
+        fd = self.source(data)
+        before = self.fd_count()
+
+        def fail_sync(descriptor):
+            if target.exists():
+                raise OSError(5, "private-sync")
+            return original_sync(descriptor)
+
+        def fail_unlink(path, *args, **kwargs):
+            if str(path).startswith(".stage-"):
+                raise OSError(5, "private-cleanup")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch("lab_db.storage.os.fsync", side_effect=fail_sync), patch("lab_db.storage.os.unlink", side_effect=fail_unlink):
+            with self.assertRaisesRegex(Exception, "publication_durability_unknown") as caught:
+                self.store.put_stream(fd, max_bytes=100)
+        self.assertEqual(type(caught.exception).__name__, "PublicationDurabilityUnknown")
+        self.assertEqual(caught.exception.__notes__, ["staging cleanup also failed"])
+        self.assertEqual(self.fd_count(), before)
+        self.assertEqual(target.read_bytes(), data)
+        self.assertEqual(len(self.stages()), 1)  # retained privately for cleanup, never success
+        for name in self.stages():
+            (self.root / "sha256" / name).unlink()
+
     def test_invalid_arguments(self) -> None:
         for fd in (-1, True, "3", None):
             with self.subTest(fd=fd), self.assertRaises(ValueError):

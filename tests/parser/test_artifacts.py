@@ -75,6 +75,55 @@ class TestPdfArtifactIngestion(unittest.TestCase):
             self.assertEqual(self._stage_files(), [])
         return ctx.exception
 
+    def test_post_publication_fsync_preserves_explicit_uncertainty(self) -> None:
+        digest = hashlib.sha256(self.pdf_1p).hexdigest()
+        target = self.artifact_root / "sha256" / digest[:2] / digest
+        original = os.fsync
+
+        def fail_after_publication(fd):
+            if target.exists():
+                raise OSError(errno.EIO, "secret-fsync-path")
+            return original(fd)
+
+        with patch("lab_db.storage.os.fsync", side_effect=fail_after_publication):
+            self._assert_fail("publication_durability_unknown")
+        self.assertEqual(target.read_bytes(), self.pdf_1p)
+        self.assertTrue(ingest_pdf_artifact(self.source, self.store).reused_existing)
+
+    def test_cleanup_failure_keeps_pdf_publication_uncertainty(self) -> None:
+        digest = hashlib.sha256(self.pdf_1p).hexdigest()
+        target = self.artifact_root / "sha256" / digest[:2] / digest
+        original_sync, original_unlink = os.fsync, os.unlink
+
+        def fail_sync(fd):
+            if target.exists():
+                raise OSError(errno.EIO, "secret-sync")
+            return original_sync(fd)
+
+        def fail_unlink(path, *args, **kwargs):
+            if str(path).startswith(".stage-"):
+                raise OSError(errno.EIO, "secret-cleanup")
+            return original_unlink(path, *args, **kwargs)
+
+        before = len(os.listdir("/proc/self/fd"))
+        with patch("lab_db.storage.os.fsync", side_effect=fail_sync), patch("lab_db.storage.os.unlink", side_effect=fail_unlink):
+            with self.assertRaises(PdfArtifactError) as caught:
+                ingest_pdf_artifact(self.source, self.store)
+        self.assertEqual(caught.exception.code, "publication_durability_unknown")
+        self.assertEqual(str(caught.exception), "publication_durability_unknown")
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+        self.assertEqual(target.read_bytes(), self.pdf_1p)
+        for path in self._stage_files():
+            path.unlink()
+
+    def test_inspection_seek_failure_closes_duplicate_and_source(self) -> None:
+        before = len(os.listdir("/proc/self/fd"))
+        for _ in range(8):
+            with patch.object(artifacts.os, "lseek", side_effect=OSError(errno.EIO, "secret-path")):
+                self._assert_fail("artifact_root_unavailable")
+            self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+        self.assertEqual(self._objects(), [])
+
     def test_valid_pdf_published_content_addressed_and_immutable_modes(self) -> None:
         res = ingest_pdf_artifact(self.source, self.store)
         expected_sha = hashlib.sha256(self.pdf_1p).hexdigest()

@@ -169,13 +169,21 @@ def _inspect_staged_fd(
             warnings=(),
         )
 
+    dup_fd = -1
+    stream = None
     try:
         dup_fd = os.dup(stage_fd)
         os.lseek(dup_fd, 0, os.SEEK_SET)
         stream = io.FileIO(dup_fd, mode="rb", closefd=True)
+        dup_fd = -1  # FileIO now owns the descriptor, including wrapper failures.
         buffered = io.BufferedReader(stream)
     except OSError:
+        if stream is not None:
+            stream.close()
         raise PdfArtifactError("artifact_root_unavailable") from None
+    finally:
+        if dup_fd >= 0:
+            os.close(dup_fd)
 
     with buffered:
         with _INSPECTION_LOCK:
@@ -335,6 +343,8 @@ def ingest_pdf_artifact(
 
 def _store_error_code(exc: Exception) -> str:
     name = type(exc).__name__
+    if name == "PublicationDurabilityUnknown":
+        return "publication_durability_unknown"
     if name == "StreamTooLarge":
         return "file_too_large"
     if name == "StorageCorruption":

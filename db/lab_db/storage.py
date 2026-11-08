@@ -45,6 +45,14 @@ class StorageCorruption(ArtifactError):
     """Raised when stored artifact bytes do not match their content-addressed SHA-256."""
 
 
+class PublicationDurabilityUnknown(ArtifactError):
+    """The final object exists, but syncing its directory failed.
+
+    Preserve the object: the caller must reconcile/retry by content identity,
+    rather than treating this as proof that publication did not occur.
+    """
+
+
 class StreamTooLarge(ArtifactError):
     """The streamed source is longer than ``max_bytes`` (nothing is published)."""
 
@@ -650,6 +658,7 @@ class LocalArtifactStore:
         stage_name = None
         stage_fd = -1
         prefix_fd = -1
+        durability_error = None
         try:
             for _ in range(128):
                 candidate = f".stage-{uuid.uuid4().hex}"
@@ -679,7 +688,10 @@ class LocalArtifactStore:
                     break
                 view = memoryview(chunk)
                 while view:
-                    view = view[os.write(stage_fd, view):]
+                    written = os.write(stage_fd, view)
+                    if written <= 0:
+                        raise StorageCorruption("staging write made no progress")
+                    view = view[written:]
                 hasher.update(chunk)
                 size_bytes += len(chunk)
             if size_bytes > max_bytes:
@@ -706,7 +718,11 @@ class LocalArtifactStore:
             if reused:
                 self._verify_existing_in_prefix(prefix_fd, object_key, digest, size_bytes)
             else:
-                os.fsync(prefix_fd)
+                try:
+                    os.fsync(prefix_fd)
+                except OSError as exc:
+                    durability_error = PublicationDurabilityUnknown("publication_durability_unknown")
+                    raise durability_error from exc
             self._verify_canonical_completion(
                 object_key, prefix, digest, size_bytes, root_id, sha256_id, prefix_id
             )
@@ -725,7 +741,10 @@ class LocalArtifactStore:
                     except FileNotFoundError:
                         pass
                     except OSError as e:
-                        raise StorageCorruption("failed to remove staging file") from e
+                        if durability_error is not None:
+                            durability_error.add_note("staging cleanup also failed")
+                        else:
+                            raise StorageCorruption("failed to remove staging file") from e
             finally:
                 for fd in (stage_fd, prefix_fd, sha256_fd):
                     if fd >= 0:
@@ -749,13 +768,17 @@ class LocalArtifactStore:
             or dst.st_size != size_bytes
         ):
             raise StorageCorruption("staging file was replaced or modified before publication")
+        reader = -1
         try:
             reader = os.dup(stage_fd)
             os.lseek(reader, 0, os.SEEK_SET)
-            with os.fdopen(reader, "rb") as f:
+            with os.fdopen(reader, "rb", closefd=False) as f:
                 actual, actual_size = _bounded_file_hash(f, size_bytes)
         except OSError as e:
             raise StorageCorruption("staging file is unreadable before publication") from e
+        finally:
+            if reader >= 0:
+                os.close(reader)
         if actual != digest or actual_size != size_bytes:
             raise StorageCorruption("staging file content changed before publication")
 
