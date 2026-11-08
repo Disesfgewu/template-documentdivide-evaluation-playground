@@ -74,7 +74,7 @@ class TrackInputTests(unittest.TestCase):
             self.assertEqual(codes(check_track_input(SHARED, {"parse_bundle": declared})),
                              [("parse_bundle", "undeclared_shared_parse")])
         self.assertEqual(codes(check_track_input(SHARED, {"parse_bundle": {**BUNDLE, "bundle_id": ""}})),
-                         [("parse_bundle", "undeclared_shared_parse")])
+                         [("parse_bundle.bundle_id", "invalid_shared_parse_declaration")])
         self.assertEqual(codes(check_track_input(SHARED, {"parse_bundle": "pb_1"})),
                          [("parse_bundle", "undeclared_shared_parse")])
 
@@ -87,6 +87,84 @@ class TrackInputTests(unittest.TestCase):
             check_track_input("raw_pdf_track", {})  # type: ignore[arg-type]
         with self.assertRaisesRegex(ValueError, "invalid_payload"):
             check_track_input(RAW, [])  # type: ignore[arg-type]
+
+
+class CurrentParserContractTests(unittest.TestCase):
+    """The raw-track guard must follow the real ParseResult contract, and a shared declaration must
+    be well formed (PM review on 4038ed3)."""
+
+    @staticmethod
+    def parse_result() -> dict:
+        from lab_contracts.parse import ParseResult
+
+        payload = json.loads((EXAMPLES / "ParseResult.mixed_pages.json").read_text())
+        ParseResult.model_validate(payload)  # a valid, current parser output
+        return payload
+
+    def test_a_current_parse_result_is_refused_in_the_raw_track_at_any_depth(self):
+        result = self.parse_result()
+        cases = {
+            "document_preparation": ({"document_preparation": result}, "document_preparation"),
+            "top level": (dict(result), None),
+            "nested": ({"a": {"b": {"c": result}}}, "a.b.c"),
+            "in an array": ({"results": [{"ok": 1}, result]}, "results[1]"),
+        }
+        for name, (payload, structural_path) in cases.items():
+            with self.subTest(name=name):
+                leaks = check_track_input(RAW, payload)
+                self.assertTrue(leaks, "a valid ParseResult passed the raw-track guard")
+                self.assertTrue(all(l.code == "parse_result_in_raw_track" for l in leaks))
+                if structural_path is not None:
+                    self.assertIn(structural_path, [l.path for l in leaks])
+
+    def test_the_dedicated_parser_output_fields_come_from_the_contract(self):
+        from lab_contracts.parse import ParseResult
+
+        for name in ("manifest_ref", "raw_result_refs", "normalized_evidence_refs"):
+            self.assertIn(name, ParseResult.model_fields)
+            self.assertIn(name, PARSE_RESULT_FIELDS)
+            self.assertEqual(codes(check_track_input(RAW, {"x": {name: ["r1"]}})),
+                             [(f"x.{name}", "parse_result_in_raw_track")])
+        for generic in ("operation_id", "pages"):  # too generic to refuse by name alone
+            self.assertNotIn(generic, PARSE_RESULT_FIELDS)
+            self.assertEqual(check_track_input(RAW, {generic: "x"}), [])
+
+    def test_a_valid_parse_result_is_the_shared_tracks_declared_content_not_a_raw_track_leak(self):
+        payload = {"parse_bundle": BUNDLE, "document_preparation": self.parse_result()}
+        self.assertEqual(check_track_input(SHARED, payload), [])
+
+    def test_ordinary_public_requests_are_still_accepted(self):
+        for name in ("PrepareRequest", "QueryRequest"):
+            for path in EXAMPLES.glob(f"{name}*.json"):
+                self.assertEqual(check_track_input(RAW, json.loads(path.read_text())), [], path.name)
+
+    def test_a_malformed_bundle_hash_is_refused(self):
+        for bad in ("not-a-hash", "g" * 64, "A" * 64, " ", "", "a" * 63, "a" * 65, "a" * 63 + " ", 5, None, ["a" * 64]):
+            with self.subTest(bad=bad):
+                self.assertEqual(
+                    codes(check_track_input(SHARED, {"parse_bundle": {**BUNDLE, "bundle_sha256": bad}})),
+                    [("parse_bundle.bundle_sha256", "invalid_shared_parse_declaration")])
+        self.assertEqual(check_track_input(SHARED, {"parse_bundle": {**BUNDLE, "bundle_sha256": "0123456789abcdef" * 4}}), [])
+
+    def test_the_declared_id_and_revision_follow_the_resource_id_limits(self):
+        for key in ("bundle_id", "parser_revision"):
+            for bad in ("", "x" * 129, 5, None, ["a"]):
+                with self.subTest(key=key, bad=bad):
+                    self.assertEqual(codes(check_track_input(SHARED, {"parse_bundle": {**BUNDLE, key: bad}})),
+                                     [(f"parse_bundle.{key}", "invalid_shared_parse_declaration")])
+            self.assertEqual(check_track_input(SHARED, {"parse_bundle": {**BUNDLE, key: "x" * 128}}), [])
+            self.assertEqual(check_track_input(SHARED, {"parse_bundle": {**BUNDLE, key: "x"}}), [])
+
+    def test_several_malformed_fields_are_each_reported(self):
+        leaks = check_track_input(SHARED, {"parse_bundle": {"bundle_id": "", "parser_revision": "x" * 200,
+                                                           "bundle_sha256": "zz"}})
+        self.assertEqual(sorted(l.path for l in leaks),
+                         ["parse_bundle.bundle_id", "parse_bundle.bundle_sha256", "parse_bundle.parser_revision"])
+
+    def test_a_declaration_that_is_not_an_object_is_undeclared(self):
+        for bad in (None, "pb_1", ["pb_1"], 5):
+            self.assertEqual(codes(check_track_input(SHARED, {"parse_bundle": bad})),
+                             [("parse_bundle", "undeclared_shared_parse")])
 
 
 class ComparabilityTests(unittest.TestCase):

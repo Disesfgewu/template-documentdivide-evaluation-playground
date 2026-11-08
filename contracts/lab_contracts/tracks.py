@@ -19,6 +19,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping, Optional
 
+from pydantic import TypeAdapter, ValidationError
+
+from .base import ResourceId, Sha256
+from .parse import ParseResult
+
 __all__ = [
     "Comparability",
     "FORBIDDEN_FIELDS",
@@ -50,10 +55,18 @@ FORBIDDEN_FIELDS = frozenset({
 })
 
 # Outputs of a parser: allowed only as a declared shared parse, never in the raw track.
+# Besides the hand-listed names, the dedicated output fields of the current ``ParseResult``
+# contract are taken from the contract itself (``operation_id`` and ``pages`` are too generic
+# to refuse as names; a whole ``ParseResult`` is caught structurally in ``check_track_input``),
+# so the guard follows the parser contract when it changes.
+_GENERIC_PARSE_FIELDS = frozenset({"operation_id", "pages"})
 PARSE_RESULT_FIELDS = frozenset({
     "parse_bundle", "parsed_pages", "ocr_text", "structured_content", "middle_json",
     "layout", "table_cells",
-})
+}) | (frozenset(ParseResult.model_fields) - _GENERIC_PARSE_FIELDS)
+
+_RESOURCE_ID = TypeAdapter(ResourceId)
+_SHA256 = TypeAdapter(Sha256)
 
 SHARED_PARSE_DECLARATION = ("bundle_id", "parser_revision", "bundle_sha256")
 
@@ -61,7 +74,7 @@ SHARED_PARSE_DECLARATION = ("bundle_id", "parser_revision", "bundle_sha256")
 @dataclass(frozen=True)
 class Leak:
     path: str
-    code: str  # forbidden_field | parse_result_in_raw_track | gold_identifier
+    code: str  # forbidden_field | parse_result_in_raw_track | gold_identifier | undeclared_shared_parse | invalid_shared_parse_declaration
 
 
 def _walk(value: Any, path: str) -> Iterable[tuple[str, Optional[str], Any]]:
@@ -117,16 +130,45 @@ def check_track_input(
     problems = find_gold_leaks(payload, gold_identifiers=gold_identifiers)
     parse_fields = {f.lower() for f in PARSE_RESULT_FIELDS}
     if track is Track.raw_pdf_track:
-        for path, key, _ in _walk(payload, ""):
+        for path, key, value in _walk(payload, ""):
             if key is not None and key.lower() in parse_fields:
                 problems.append(Leak(path, "parse_result_in_raw_track"))
+            elif isinstance(value, Mapping) and _is_parse_result(value):
+                problems.append(Leak(path, "parse_result_in_raw_track"))
     else:
-        declared = payload.get("parse_bundle")
-        if not isinstance(declared, Mapping) or any(
-            not isinstance(declared.get(k), str) or not declared.get(k) for k in SHARED_PARSE_DECLARATION
-        ):
-            problems.append(Leak("parse_bundle", "undeclared_shared_parse"))
+        problems.extend(_shared_declaration_problems(payload.get("parse_bundle")))
     return problems
+
+
+def _is_parse_result(node: Mapping[str, Any]) -> bool:
+    """Whether a nested object is a valid current ``ParseResult`` (checked by the contract itself)."""
+    if not {"manifest_ref", "raw_result_refs", "pages"} <= set(node):  # cheap pre-filter
+        return False
+    try:
+        ParseResult.model_validate(node)
+    except ValidationError:
+        return False
+    return True
+
+
+def _valid(adapter: TypeAdapter, value: object) -> bool:
+    try:
+        adapter.validate_python(value, strict=True)
+    except ValidationError:
+        return False
+    return True
+
+
+def _shared_declaration_problems(declared: Any) -> list[Leak]:
+    """The shared parse must be declared with a resource id, a parser revision and a lowercase
+    64-hex bundle hash, validated with the same types the contracts use (SPEC 16.1)."""
+    if not isinstance(declared, Mapping) or any(key not in declared for key in SHARED_PARSE_DECLARATION):
+        return [Leak("parse_bundle", "undeclared_shared_parse")]
+    found = []
+    for key, adapter in (("bundle_id", _RESOURCE_ID), ("parser_revision", _RESOURCE_ID), ("bundle_sha256", _SHA256)):
+        if not _valid(adapter, declared[key]):
+            found.append(Leak(f"parse_bundle.{key}", "invalid_shared_parse_declaration"))
+    return found
 
 
 def leaderboard_key(track: Track, benchmark_revision_id: str, budget_profile: str) -> tuple[str, str, str]:
