@@ -11,6 +11,7 @@ Exercised against:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -60,6 +61,10 @@ def find_free_port() -> int:
 def find_browser_executable() -> str | None:
     if os.environ.get("CHROME_BIN") and os.path.exists(os.environ["CHROME_BIN"]):
         return os.environ["CHROME_BIN"]
+    for bin_name in ("google-chrome", "chromium", "chromium-browser"):
+        found = shutil.which(bin_name)
+        if found and os.path.exists(found):
+            return found
     candidates = [
         "/home/martin/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome",
         "/usr/bin/google-chrome",
@@ -87,7 +92,10 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
         super().setUp()
         self.browser_bin = find_browser_executable()
         if not self.browser_bin:
-            self.skipTest("No Chrome/Chromium executable found on host for browser acceptance")
+            raise RuntimeError(
+                "No Chrome/Chromium executable found on host for browser acceptance. "
+                "Set CHROME_BIN or install chromium/google-chrome."
+            )
 
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -123,7 +131,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=0.5):
                     break
-            except (ConnectionRefentError if hasattr(socket, "ConnectionRefentError") else OSError):
+            except (ConnectionRefusedError if hasattr(socket, "ConnectionRefusedError") else OSError):
                 time.sleep(0.05)
         else:
             raise RuntimeError(f"Server on port {port} failed to start in time")
@@ -159,34 +167,37 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
         download_tmp = Path(self.tmp.name) / "downloads"
         download_tmp.mkdir(parents=True, exist_ok=True)
 
-        # Run headless browser acceptance runner
+        # Pass sensitive parameters via stdin JSON (no tokens in process arguments)
+        payload = {
+            "url": f"http://127.0.0.1:{port}/",
+            "token": owner_token,
+            "projectId": str(project_id),
+            "pdfPath": str(self.fixture_pdf),
+            "expectedSha256": self.f01_sha256,
+            "expectedSize": self.f01_size,
+            "expectedPages": 21,
+            "otherToken": other_token,
+            "browserPath": self.browser_bin,
+            "downloadDir": str(download_tmp),
+        }
+
         cmd = [
             "node",
             str(_REPO_ROOT / "tests" / "api_db" / "accept_document_ui_browser.mjs"),
-            "--url",
-            f"http://127.0.0.1:{port}/",
-            "--token",
-            owner_token,
-            "--project-id",
-            str(project_id),
-            "--pdf-path",
-            str(self.fixture_pdf),
-            "--expected-sha256",
-            self.f01_sha256,
-            "--expected-size",
-            str(self.f01_size),
-            "--expected-pages",
-            "21",
-            "--other-token",
-            other_token,
-            "--browser-path",
-            self.browser_bin,
-            "--download-dir",
-            str(download_tmp),
         ]
 
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        self.assertEqual(res.returncode, 0, f"Browser test failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
+        res = subprocess.run(
+            cmd,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            res.returncode,
+            0,
+            f"Browser test failed with exit code {res.returncode}:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}",
+        )
 
         # Verify PostgreSQL database directly
         with self.connect() as conn:
@@ -198,7 +209,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
                 )
                 versions = cur.fetchall()
                 # Confirm lost-response replay created NO duplicate version row
-                self.assertEqual(len(versions), 1, f"Expected 1 version row, found {len(versions)}")
+                self.assertEqual(len(versions), 1, f"Expected exactly 1 version row in DB, found {len(versions)}")
                 row = versions[0]
                 self.assertEqual(row["sha256"], self.f01_sha256)
                 self.assertEqual(row["page_count"], 21)
@@ -215,7 +226,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
                 page_cnt = cur.fetchone()["cnt"]
                 self.assertEqual(page_cnt, 21)
 
-        # Verify artifact stored on disk byte-matches synthetic F01
-        stored_bytes = self.store.read(self.f01_sha256)
+        # Verify artifact stored on disk using LocalArtifactStore.open
+        stored_bytes = self.store.open(art["object_key"], expected_size=self.f01_size)
         self.assertEqual(hashlib.sha256(stored_bytes).hexdigest(), self.f01_sha256)
         self.assertEqual(stored_bytes, self.f01_21)

@@ -5,14 +5,7 @@
  * Runs against a live FastAPI + built web server (no mocks).
  * Uses real headless Chrome / Chromium via standard Chrome DevTools Protocol (CDP).
  *
- * Flow:
- * 1. Navigate to UI.
- * 2. Authenticate with signed Bearer token (memory only).
- * 3. Fill Project ID, select synthetic 21-page PDF fixture.
- * 4. Submit upload; verify UI shows 21 pages, correct SHA-256, revision 1, documentVersionId.
- * 5. Replay upload with same selection and idempotency key; verify UI shows replayed notice.
- * 6. Download document; verify downloaded bytes match original SHA-256 and size.
- * 7. Cross-project denial: test with non-member actor token; verify UI shows 403 error.
+ * All sensitive configuration is read from stdin as JSON (no tokens in CLI args or process list).
  */
 
 import { spawn } from "node:child_process";
@@ -21,58 +14,41 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
-function parseArgs() {
-  const args = process.argv.slice(2);
-  const options = {};
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("--")) {
-      const key = args[i].slice(2);
-      options[key] = args[i + 1];
-      i++;
-    }
-  }
-  return options;
+async function readStdin() {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { data += chunk; });
+    process.stdin.on("end", () => {
+      try {
+        resolve(JSON.parse(data));
+      } catch (err) {
+        reject(new Error("Invalid JSON on stdin: " + err.message));
+      }
+    });
+    process.stdin.on("error", reject);
+  });
 }
 
-const opts = parseArgs();
-const url = opts.url || "http://127.0.0.1:8000/";
-const token = opts.token;
-const projectId = opts["project-id"];
-const pdfPath = opts["pdf-path"];
-const expectedSha256 = opts["expected-sha256"];
-const expectedSize = parseInt(opts["expected-size"] || "0", 10);
-const expectedPages = parseInt(opts["expected-pages"] || "21", 10);
-const otherToken = opts["other-token"];
-const downloadDir = opts["download-dir"] || fs.mkdtempSync(path.join(os.tmpdir(), "browser-download-"));
+const config = await readStdin();
+const url = config.url || "http://127.0.0.1:8000/";
+const token = config.token;
+const projectId = config.projectId;
+const pdfPath = config.pdfPath;
+const expectedSha256 = config.expectedSha256;
+const expectedSize = parseInt(config.expectedSize || "0", 10);
+const expectedPages = parseInt(config.expectedPages || "21", 10);
+const otherToken = config.otherToken;
+const downloadDir = config.downloadDir || fs.mkdtempSync(path.join(os.tmpdir(), "browser-download-"));
+const browserPath = config.browserPath;
 
 if (!token || !projectId || !pdfPath) {
-  console.error("Missing required arguments: --token, --project-id, --pdf-path");
+  console.error("Missing required fields in stdin JSON: token, projectId, pdfPath");
   process.exit(2);
 }
 
-// Locate browser binary
-function findBrowser() {
-  if (opts["browser-path"] && fs.existsSync(opts["browser-path"])) {
-    return opts["browser-path"];
-  }
-  if (process.env.CHROME_BIN && fs.existsSync(process.env.CHROME_BIN)) {
-    return process.env.CHROME_BIN;
-  }
-  const candidates = [
-    "/home/martin/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
-  }
-  return null;
-}
-
-const browserPath = findBrowser();
-if (!browserPath) {
-  console.error("BLOCKED: No Chrome/Chromium browser found (set CHROME_BIN or install chrome)");
+if (!browserPath || !fs.existsSync(browserPath)) {
+  console.error("BLOCKED: Browser binary not found at: " + browserPath);
   process.exit(3);
 }
 
@@ -118,7 +94,7 @@ async function run() {
   const port = await portPromise;
   console.log(`Browser CDP listening on port ${port}`);
 
-  // Fetch target list
+  // Fetch page target
   const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
   const list = await listRes.json();
   const pageTarget = list.find((t) => t.type === "page") || list[0];
@@ -150,26 +126,40 @@ async function run() {
       ws.send(JSON.stringify({ id, method, params }));
     });
 
+  // Event handlers
+  const eventListeners = new Set();
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      if (msg.method) {
+        for (const listener of eventListeners) {
+          listener(msg.method, msg.params);
+        }
+      }
+    } catch {}
+  };
+
   // Enable domains
   await cdp("Page.enable");
   await cdp("Runtime.enable");
   await cdp("DOM.enable");
+  await cdp("Network.enable");
   await cdp("Browser.setDownloadBehavior", {
     behavior: "allowAndName",
     downloadPath: downloadDir,
     eventsEnabled: true,
   });
 
-  console.log(`Navigating to ${url}...`);
-  await cdp("Page.navigate", { url });
-  await new Promise((r) => setTimeout(r, 1000));
-
+  // Helpers for React controlled inputs and DOM evaluation
   async function evaluate(expression) {
     const res = await cdp("Runtime.evaluate", {
       expression,
       returnByValue: true,
       awaitPromise: true,
     });
+    if (res.exceptionDetails) {
+      throw new Error("Evaluation error: " + JSON.stringify(res.exceptionDetails));
+    }
     return res.result?.value;
   }
 
@@ -183,24 +173,68 @@ async function run() {
     throw new Error(`Timeout waiting for selector: ${selector}`);
   }
 
-  // 1. Fill auth token and project ID
-  console.log("Entering auth token and project ID...");
+  // Setup Fetch interception for genuine lost first response
+  let interceptFirstUploadResponse = true;
+  let firstRecordedIdempotencyKey = null;
+  let secondRecordedIdempotencyKey = null;
+  let firstBackendStatus = null;
+
+  eventListeners.add(async (method, params) => {
+    if (method === "Fetch.requestPaused") {
+      const { requestId, request, responseStatusCode } = params;
+      const isUpload = request.url.includes("/documents") && request.method === "POST";
+      const headers = request.headers || {};
+      const idempotencyKey = Object.entries(headers).find(([k]) => k.toLowerCase() === "idempotency-key")?.[1];
+
+      if (isUpload && interceptFirstUploadResponse) {
+        // First upload request reached Response stage: backend has committed the transaction!
+        interceptFirstUploadResponse = false;
+        firstRecordedIdempotencyKey = idempotencyKey;
+        firstBackendStatus = responseStatusCode;
+        console.log(`Intercepted first upload response (backend status: ${responseStatusCode}, idempotency-key: ${idempotencyKey}); failing response to simulate lost response...`);
+        // Fail network response at the client side after successful backend commit
+        await cdp("Fetch.failRequest", { requestId, errorReason: "ConnectionReset" });
+      } else if (isUpload && !interceptFirstUploadResponse) {
+        // Second upload request (the retry)
+        secondRecordedIdempotencyKey = idempotencyKey;
+        console.log(`Intercepted retry upload request (idempotency-key: ${idempotencyKey}); continuing request...`);
+        await cdp("Fetch.continueRequest", { requestId });
+      } else {
+        await cdp("Fetch.continueRequest", { requestId });
+      }
+    }
+  });
+
+  await cdp("Fetch.enable", {
+    patterns: [{ urlPattern: "*documents*", requestStage: "Response" }],
+  });
+
+  console.log(`Navigating to ${url}...`);
+  await cdp("Page.navigate", { url });
+  await new Promise((r) => setTimeout(r, 1000));
+
+  // Helper in page to set React controlled input values via native descriptor setter
+  await evaluate(`
+    window.__setReactInput = (el, val) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+  `);
+
+  // 1. Fill auth token and project ID using React-safe setter
+  console.log("Entering auth token, project ID, and logical ID...");
   await waitForSelector("#auth-token");
   await evaluate(`
     (() => {
-      const t = document.getElementById("auth-token");
-      t.value = ${JSON.stringify(token)};
-      t.dispatchEvent(new Event("input", { bubbles: true }));
-      const p = document.getElementById("upload-project-id");
-      p.value = ${JSON.stringify(projectId)};
-      p.dispatchEvent(new Event("input", { bubbles: true }));
-      const l = document.getElementById("upload-logical-id");
-      l.value = "f01-pages-21";
-      l.dispatchEvent(new Event("input", { bubbles: true }));
+      window.__setReactInput(document.getElementById("auth-token"), ${JSON.stringify(token)});
+      window.__setReactInput(document.getElementById("upload-project-id"), ${JSON.stringify(projectId)});
+      window.__setReactInput(document.getElementById("upload-logical-id"), "f01-pages-21");
     })()
   `);
 
-  // 2. Attach PDF file
+  // 2. Attach synthetic 21-page PDF file
   console.log(`Attaching synthetic PDF fixture: ${pdfPath}...`);
   const docRoot = await cdp("DOM.getDocument");
   const fileInput = await cdp("DOM.querySelector", {
@@ -214,83 +248,161 @@ async function run() {
   });
   await evaluate(`document.getElementById("upload-file").dispatchEvent(new Event("change", { bubbles: true }))`);
 
-  // 3. Submit upload
-  console.log("Submitting upload form...");
-  await evaluate(`document.querySelector("form button[type='submit']").click()`);
+  // 3. Submit first upload attempt (which will experience a lost response after backend commit)
+  console.log("Submitting first upload form (response will be lost after commit)...");
+  await evaluate(`
+    (() => {
+      const uploadForm = document.getElementById("upload-project-id").closest("form");
+      uploadForm.querySelector("button[type='submit']").click();
+    })()
+  `);
 
-  // 4. Verify upload result in UI
-  console.log("Waiting for upload success in UI...");
+  // Assert first attempt shows UI error and NO success
+  await waitForSelector("[data-testid='upload-error']");
+  const uploadErrorVisible = await evaluate(`!!document.querySelector("[data-testid='upload-error']")`);
+  const uploadSuccessVisible = await evaluate(`!!document.querySelector("[data-testid='upload-success']")`);
+  if (!uploadErrorVisible || uploadSuccessVisible) {
+    throw new Error("First upload did not show error or showed false success on lost response!");
+  }
+  console.log("Verified: First attempt showed upload error with no false success in UI.");
+  if (!firstRecordedIdempotencyKey) {
+    throw new Error("First upload Idempotency-Key was not captured!");
+  }
+  if (firstBackendStatus !== 201 && firstBackendStatus !== 200) {
+    throw new Error(`Expected backend commit status 201/200 before lost response, got ${firstBackendStatus}`);
+  }
+
+  // 4. Retry upload with SAME selected File (simulating operator retry after ambiguous network failure)
+  console.log("Retrying upload with same selected File...");
+  await evaluate(`
+    (() => {
+      const uploadForm = document.getElementById("upload-project-id").closest("form");
+      uploadForm.querySelector("button[type='submit']").click();
+    })()
+  `);
+
+  // 5. Verify retry success in UI
   await waitForSelector("[data-testid='upload-success']");
-  const uploadSuccessText = await evaluate(`document.querySelector("[data-testid='upload-success']").innerText`);
-  console.log("UI Upload Success Result:\n" + uploadSuccessText);
+  const retrySuccessText = await evaluate(`document.querySelector("[data-testid='upload-success']").innerText`);
+  console.log("Retry Upload Success Result:\n" + retrySuccessText);
 
-  if (!uploadSuccessText.includes(`頁數: ${expectedPages}`)) {
+  // Assert same idempotency key was used across both attempts
+  if (firstRecordedIdempotencyKey !== secondRecordedIdempotencyKey) {
+    throw new Error(
+      `Idempotency key changed on retry! First: ${firstRecordedIdempotencyKey}, Second: ${secondRecordedIdempotencyKey}`
+    );
+  }
+  console.log(`Verified: Same Idempotency-Key (${firstRecordedIdempotencyKey}) sent on both requests.`);
+
+  // Assert replayed=true is shown in UI
+  if (!retrySuccessText.includes("（冪等請求已重播）")) {
+    throw new Error("Retry did not indicate replayed=true in UI!");
+  }
+  if (!retrySuccessText.includes(`頁數: ${expectedPages}`)) {
     throw new Error(`UI did not show expected page count: ${expectedPages}`);
   }
-  if (expectedSha256 && !uploadSuccessText.includes(expectedSha256)) {
+  if (expectedSha256 && !retrySuccessText.includes(expectedSha256)) {
     throw new Error(`UI did not show expected SHA-256: ${expectedSha256}`);
   }
 
-  const docIdMatch = uploadSuccessText.match(/Document Version ID:\s*([0-9a-f-]+)/i);
+  const docIdMatch = retrySuccessText.match(/Document Version ID:\s*([0-9a-f-]+)/i);
   if (!docIdMatch) throw new Error("Could not extract Document Version ID from UI");
   const docVersionId = docIdMatch[1];
   console.log(`Uploaded Document Version ID: ${docVersionId}`);
 
-  // 5. Test lost-response replay with same selection
-  console.log("Testing lost-response replay with same selection/key...");
-  await evaluate(`document.querySelector("form button[type='submit']").click()`);
-  await new Promise((r) => setTimeout(r, 1000));
-  const replayText = await evaluate(`document.querySelector("[data-testid='upload-success']").innerText`);
-  console.log("Replay Result:\n" + replayText);
+  // Track downloads in downloadDir
+  const initialFiles = new Set(fs.readdirSync(downloadDir));
 
-  // 6. Test download via UI
-  console.log("Testing download via UI...");
+  // 6. Test download targeting the actual download form
+  console.log("Entering Document ID in download form...");
+  await waitForSelector("#download-document-id");
   await evaluate(`
     (() => {
-      const copyBtn = Array.from(document.querySelectorAll("button")).find(b => b.innerText.includes("帶入此 Document ID"));
-      if (copyBtn) copyBtn.click();
-      else {
-        const d = document.getElementById("download-document-id");
-        d.value = ${JSON.stringify(docVersionId)};
-        d.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-    })()
-  `);
-
-  // Click download button
-  await evaluate(`
-    (() => {
-      const downloadSection = document.querySelector("input#download-document-id").closest("div");
-      const submitBtn = downloadSection.querySelector("button[type='submit']");
-      submitBtn.click();
+      window.__setReactInput(document.getElementById("download-document-id"), ${JSON.stringify(docVersionId)});
+      const downloadForm = document.getElementById("download-document-id").closest("form");
+      downloadForm.querySelector("button[type='submit']").click();
     })()
   `);
 
   await waitForSelector("[data-testid='download-success']");
-  const downloadSuccessText = await evaluate(`document.querySelector("[data-testid='download-success']").innerText`);
-  console.log("Download Result:\n" + downloadSuccessText);
+  console.log("Waiting for downloaded file to be written to disk...");
 
-  // 7. Test cross-project denial
+  let downloadedFile = null;
+  const downloadDeadline = Date.now() + 15000;
+  while (Date.now() < downloadDeadline) {
+    const currentFiles = fs.readdirSync(downloadDir);
+    const newFiles = currentFiles.filter((f) => !initialFiles.has(f) && !f.endsWith(".crdownload"));
+    if (newFiles.length > 0) {
+      downloadedFile = path.join(downloadDir, newFiles[0]);
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  if (!downloadedFile || !fs.existsSync(downloadedFile)) {
+    throw new Error("Downloaded file was not written to disk in " + downloadDir);
+  }
+
+  const downloadedBytes = fs.readFileSync(downloadedFile);
+  const downloadedSha256 = crypto.createHash("sha256").update(downloadedBytes).digest("hex");
+  const originalBytes = fs.readFileSync(pdfPath);
+
+  if (downloadedBytes.length !== originalBytes.length) {
+    throw new Error(`Downloaded size (${downloadedBytes.length}) != original (${originalBytes.length})`);
+  }
+  if (downloadedSha256 !== expectedSha256) {
+    throw new Error(`Downloaded SHA-256 (${downloadedSha256}) != expected (${expectedSha256})`);
+  }
+  if (Buffer.compare(downloadedBytes, originalBytes) !== 0) {
+    throw new Error("Downloaded bytes do not match original bytes byte-for-byte!");
+  }
+  console.log(`Verified: Downloaded file byte-identical and SHA-256 verified (${downloadedSha256}).`);
+
+  // 7. Test cross-project denial with signed other actor
   if (otherToken) {
-    console.log("Testing cross-project denial with other actor token...");
+    console.log("Testing cross-project access denial with non-member actor token...");
+    let unauthorizedStatusCode = null;
+
+    eventListeners.add((method, params) => {
+      if (method === "Network.responseReceived") {
+        if (params.response.url.includes(`/documents/${docVersionId}/download`)) {
+          unauthorizedStatusCode = params.response.status;
+        }
+      }
+    });
+
+    const fileCountBefore = fs.readdirSync(downloadDir).length;
+
     await evaluate(`
       (() => {
-        const t = document.getElementById("auth-token");
-        t.value = ${JSON.stringify(otherToken)};
-        t.dispatchEvent(new Event("input", { bubbles: true }));
-        const downloadSection = document.querySelector("input#download-document-id").closest("div");
-        downloadSection.querySelector("button[type='submit']").click();
+        window.__setReactInput(document.getElementById("auth-token"), ${JSON.stringify(otherToken)});
+        const downloadForm = document.getElementById("download-document-id").closest("form");
+        downloadForm.querySelector("button[type='submit']").click();
       })()
     `);
+
     await waitForSelector("[data-testid='download-error']");
     const downloadErrorText = await evaluate(`document.querySelector("[data-testid='download-error']").innerText`);
-    console.log("Cross-project download error result:\n" + downloadErrorText);
-    if (!downloadErrorText.includes("權限不足") && !downloadErrorText.includes("403")) {
-      throw new Error(`Expected truthful 403 error, got: ${downloadErrorText}`);
+    const downloadSuccessNow = await evaluate(`!!document.querySelector("[data-testid='download-success']")`);
+
+    if (downloadSuccessNow) {
+      throw new Error("Cross-project download showed false success!");
+    }
+    console.log("Cross-project denial UI error text:\n" + downloadErrorText);
+
+    // Backend returns 404 (or 403) for non-member actor
+    if (unauthorizedStatusCode !== 404 && unauthorizedStatusCode !== 403) {
+      throw new Error(`Expected HTTP 404 or 403 for cross-project actor, got: ${unauthorizedStatusCode}`);
+    }
+    console.log(`Verified: Backend returned HTTP ${unauthorizedStatusCode} and UI presented truthful error.`);
+
+    const fileCountAfter = fs.readdirSync(downloadDir).length;
+    if (fileCountAfter !== fileCountBefore) {
+      throw new Error("A file was downloaded despite cross-project denial!");
     }
   }
 
-  console.log("SUCCESS: Real browser acceptance test passed!");
+  console.log("SUCCESS: Real browser acceptance test passed all checks!");
   ws.close();
   cleanup();
   process.exit(0);
