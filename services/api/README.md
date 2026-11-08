@@ -41,3 +41,5 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 - **下載**：授權與 artifact 狀態、大小上限、checksum 都先在資料庫層檢查，才讀取檔案；讀檔受 `max_pdf_bytes` 限制並驗證 sha256。
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
+
+`GET /api/v1/runs/{id}`：run 狀態、benchmark revision、budget profile、finalized_at 與進度計數（題數、attempt、已接受作答/棄答、待處理、被拒及逾時提交）。只回計數，不含答案、payload 或分數。owner/maintainer/reviewer 可看專案內任何 run；participant 只能看自己擁有之 method revision 的 run，其餘 404；observer 僅限已發布彙總（尚未實作），故 403；非成員 404。
