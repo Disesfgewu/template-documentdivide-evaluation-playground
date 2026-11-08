@@ -196,6 +196,12 @@ class StaleVersion(Exception):
     """row_version did not match: someone else changed the row (409)."""
 
 
+class FreezeIneligible(Exception):
+    """The benchmark revision cannot be frozen: mandatory eligibility
+    (independent question validation, human review gates, four-part records,
+    and quota satisfaction) cannot be proven by the current database schema."""
+
+
 def transition_benchmark(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID,
                          expected_row_version: int, to_status: str, reason: str, actor_id: uuid.UUID,
                          compliance: Optional[str] = None) -> int:
@@ -211,13 +217,28 @@ def transition_benchmark(conn: psycopg.Connection, project_id: uuid.UUID, benchm
     if decision.condition is not None:
         raise PermissionDenied(f"{decision.role} may only comment, not {to_status} a benchmark")
     with conn.transaction():
-        cur = conn.execute("SELECT status::text, row_version, resource_id FROM benchmark_revisions "
+        cur = conn.execute("SELECT status::text, row_version, resource_id, compliance FROM benchmark_revisions "
                            "WHERE id = %s AND project_id = %s FOR UPDATE", (benchmark_id, project_id)).fetchone()
         if cur is None:
             raise NotFound("benchmark")
-        from_status, version, resource_id = cur
+        from_status, version, resource_id, current_compliance = cur
         if version != expected_row_version:
             raise StaleVersion(f"benchmark {benchmark_id} is at row_version {version}, not {expected_row_version}")
+        effective_compliance = compliance if compliance is not None else current_compliance
+        if to_status == "frozen" and from_status == "ready_to_freeze":
+            if not effective_compliance:
+                raise ValueError("a compliance designation ('compliant' or 'partial') is required to freeze a benchmark")
+            if effective_compliance not in ("compliant", "partial"):
+                raise ValueError(f"invalid compliance {effective_compliance!r}: must be 'compliant' or 'partial'")
+            if effective_compliance == "compliant":
+                raise FreezeIneligible(
+                    f"benchmark revision {benchmark_id} cannot freeze as compliant: "
+                    "mandatory eligibility (independent question validation, human review gates, "
+                    "and quota verification) cannot be proven by the current database schema"
+                )
+            if effective_compliance == "partial":
+                if decision.role != "owner":
+                    raise PermissionDenied(f"{decision.role} may not freeze a partial benchmark: owner required")
         conn.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', %s, true)",
                      (str(actor_id), reason))
         new_version = conn.execute(

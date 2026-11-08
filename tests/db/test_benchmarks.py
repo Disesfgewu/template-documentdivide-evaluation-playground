@@ -7,7 +7,7 @@ import uuid
 import psycopg
 from psycopg import errors
 
-from lab_db.repo import Change, StaleVersion, record_change, transition_benchmark
+from lab_db.repo import Change, FreezeIneligible, PermissionDenied, StaleVersion, record_change, transition_benchmark
 
 from .base import FreshDatabase, h
 
@@ -149,6 +149,49 @@ class StateMachineTests(FreshDatabase):
                 transition_benchmark(c, f.p, f.bench, 1, "frozen", "skip everything", f.a, compliance="compliant")
             self.assertEqual(c.execute("SELECT status::text, row_version FROM benchmark_revisions WHERE id = %s",
                                        (f.bench,)).fetchone(), ("draft", 1))
+
+    def test_freeze_as_compliant_fails_closed_ineligible(self):
+        with self.connect() as c:
+            f = Fixture(self, c)
+            v = 1
+            for s in HAPPY_PATH:
+                v = transition_benchmark(c, f.p, f.bench, v, s, f"to {s}", f.a)
+            with self.assertRaises(FreezeIneligible) as ctx:
+                transition_benchmark(c, f.p, f.bench, v, "frozen", "freeze compliant", f.a, compliance="compliant")
+            self.assertIn("cannot freeze as compliant", str(ctx.exception))
+            # Verify fail-closed rollback: benchmark remains ready_to_freeze at row_version v and unfrozen
+            st, ver, frozen_at = c.execute(
+                "SELECT status::text, row_version, frozen_at FROM benchmark_revisions WHERE id = %s",
+                (f.bench,)
+            ).fetchone()
+            self.assertEqual(st, "ready_to_freeze")
+            self.assertEqual(ver, v)
+            self.assertIsNone(frozen_at)
+
+    def test_freeze_without_compliance_rejected(self):
+        with self.connect() as c:
+            f = Fixture(self, c)
+            v = 1
+            for s in HAPPY_PATH:
+                v = transition_benchmark(c, f.p, f.bench, v, s, f"to {s}", f.a)
+            with self.assertRaises(ValueError) as ctx:
+                transition_benchmark(c, f.p, f.bench, v, "frozen", "freeze missing compliance", f.a, compliance=None)
+            self.assertIn("compliance designation", str(ctx.exception))
+
+    def test_freeze_partial_by_non_owner_rejected(self):
+        with self.connect() as c:
+            f = Fixture(self, c)
+            maintainer = uuid.uuid4()
+            with c.transaction():
+                c.execute("INSERT INTO actors (id, display_name) VALUES (%s, 'maint')", (maintainer,))
+                c.execute("INSERT INTO project_members (project_id, actor_id, role) VALUES (%s, %s, 'maintainer')",
+                          (f.p, maintainer))
+            v = 1
+            for s in HAPPY_PATH:
+                v = transition_benchmark(c, f.p, f.bench, v, s, f"to {s}", f.a)
+            with self.assertRaises(PermissionDenied) as ctx:
+                transition_benchmark(c, f.p, f.bench, v, "frozen", "maint partial freeze", maintainer, compliance="partial")
+            self.assertIn("owner required", str(ctx.exception))
 
     def test_stale_row_version(self):
         with self.connect() as c:
