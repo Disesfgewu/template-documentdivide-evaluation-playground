@@ -123,5 +123,37 @@ class AuthorizationOrderTests(unittest.TestCase):
         self.assertEqual(conn.execute.call_args_list[-1].args[1], (BID, -1, 3))
 
 
+class BenchmarkDetailTests(unittest.TestCase):
+    def conn(self, status="frozen"):
+        import datetime
+        conn = MagicMock()
+        frozen = datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc) if status == "frozen" else None
+        conn.execute.return_value.fetchone.return_value = (BID, status, 20, 2, "partial" if frozen else None, frozen)
+        conn.execute.return_value.fetchall.return_value = [("general", 12), ("chart_table", 3)]
+        return conn
+
+    def test_counts_every_bucket_and_total(self):
+        with patch.object(b, "authorize", return_value=Decision("owner", None)):
+            out = b._get_benchmark(self.conn(), uuid.uuid4(), uuid.uuid4(), "bench", 1)
+        self.assertEqual(out["quota_counts"], {"general": 12, "cross_page": 0, "chart_table": 3, "confusable": 0})
+        self.assertEqual(out["question_count"], 15)
+        self.assertEqual((out["n_target"], out["q_min"], out["compliance"]), (20, 2, "partial"))
+        self.assertEqual(out["frozen_at"], "2026-01-02T00:00:00+00:00")
+        self.assertEqual(set(out), {"benchmark_revision_id", "logical_id", "revision", "status", "n_target", "q_min",
+                                    "compliance", "frozen_at", "question_count", "quota_counts"})
+
+    def test_draft_has_no_frozen_at_and_is_hidden_from_participants(self):
+        with patch.object(b, "authorize", return_value=Decision("owner", None)):
+            self.assertIsNone(b._get_benchmark(self.conn("draft"), uuid.uuid4(), uuid.uuid4(), "bench", 1)["frozen_at"])
+        def auth(conn, p, a, action):
+            if action == "read_gold_and_generation_context":
+                raise PermissionDenied("participant")
+            return Decision("participant", None)
+        with patch.object(b, "authorize", side_effect=auth):
+            with self.assertRaises(ApiError) as ctx:
+                b._get_benchmark(self.conn("draft"), uuid.uuid4(), uuid.uuid4(), "bench", 1)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,8 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 
 `POST /api/v1/documents`（亦有 `/documents`、`/api/v1/projects/{project_id}/documents`）、`GET /api/v1/documents/{id}`（`Accept: application/pdf` 取原檔）、`.../original`、`.../download`、`.../pages/{n}`。一律需要簽章的 Bearer actor token，project 角色由 PostgreSQL 判定；沒有在請求內自稱身分的方式。
 
+`GET /api/v1/benchmarks/{logical_id}/revisions/{revision}?project_id=…`：題庫 revision 狀態、n_target、q_min、compliance、frozen_at、題數及各 quota bucket 題數（可見性規則同下）。
+
 `GET /api/v1/benchmarks/{logical_id}/revisions/{revision}/questions?project_id=…&limit=…&cursor=…`：公開問題集（依 ordinal 排序、cursor 分頁、limit 1–200）。只輸出題目欄位與 payload 白名單（language、tags、modality_requirements、reasoning_type、visual_object_refs），不含答案、facts、evidence sets 與 distractors。owner/maintainer/reviewer 可看草稿；participant 只看已凍結版本，草稿一律 404；observer 無明確授權時 403；非成員 404。
 
 - **先授權、再讀 body**：授權（`import_and_configure_parse`）通過後才取得 admission slot 並讀取請求內容；未授權的請求不佔 slot、不讀任何 body 位元組。

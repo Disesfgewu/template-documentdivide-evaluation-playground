@@ -27,6 +27,7 @@ router = APIRouter()
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 BENCHMARK_RESOURCE_TYPE = "benchmark_revision"
+QUOTA_BUCKETS = ("general", "cross_page", "chart_table", "confusable")
 # The only payload keys copied out (the public part of the Question contract).
 PUBLIC_PAYLOAD_KEYS = ("language", "tags", "modality_requirements", "reasoning_type", "visual_object_refs")
 
@@ -71,8 +72,10 @@ def public_question(row: tuple) -> dict:
     return item
 
 
-def _list_public_questions(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
-                           logical_id: str, revision: int, cursor: Optional[str], limit: int) -> dict:
+def _resolve_visible(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
+                     logical_id: str, revision: int) -> tuple:
+    """Authorize, then find the benchmark revision this caller may see.
+    Returns the revision row (id, status, n_target, q_min, compliance, frozen_at)."""
     try:
         decision = authorize(conn, project_id, actor_id, "read_licensed_pdf_and_public_questions")
         if decision.condition == "explicit_grant":
@@ -88,13 +91,33 @@ def _list_public_questions(conn: psycopg.Connection, actor_id: uuid.UUID, projec
         sees_unfrozen = False
 
     row = conn.execute(
-        "SELECT br.id, br.status::text FROM benchmark_revisions br JOIN resource_versions rv ON rv.id = br.resource_id "
+        "SELECT br.id, br.status::text, br.n_target, br.q_min, br.compliance, br.frozen_at "
+        "FROM benchmark_revisions br JOIN resource_versions rv ON rv.id = br.resource_id "
         "WHERE br.project_id = %s AND rv.resource_type = %s AND rv.logical_id = %s AND rv.revision = %s",
         (project_id, BENCHMARK_RESOURCE_TYPE, logical_id, revision)).fetchone()
     # A caller without gold access gets the same 404 for a draft as for a missing revision.
     if row is None or (row[1] != "frozen" and not sees_unfrozen):
         raise ApiError(404, "not_found", "benchmark revision not found")
-    benchmark_id, status = row
+    return row
+
+
+def _get_benchmark(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
+                   logical_id: str, revision: int) -> dict:
+    bid, status, n_target, q_min, compliance, frozen_at = _resolve_visible(conn, actor_id, project_id, logical_id, revision)
+    counts = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
+                               (bid,)).fetchall())
+    buckets = {k: int(counts.get(k, 0)) for k in QUOTA_BUCKETS}
+    return {
+        "benchmark_revision_id": str(bid), "logical_id": logical_id, "revision": revision, "status": status,
+        "n_target": n_target, "q_min": q_min, "compliance": compliance,
+        "frozen_at": frozen_at.isoformat() if frozen_at else None,
+        "question_count": sum(buckets.values()), "quota_counts": buckets,
+    }
+
+
+def _list_public_questions(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
+                           logical_id: str, revision: int, cursor: Optional[str], limit: int) -> dict:
+    benchmark_id, status = _resolve_visible(conn, actor_id, project_id, logical_id, revision)[:2]
     after = decode_cursor(cursor, benchmark_id) if cursor else -1
 
     rows = conn.execute(
@@ -117,12 +140,29 @@ async def list_public_questions_handler(
 ) -> JSONResponse:
     project_id = resolve_project_id(request)
     limit = parse_limit(request.query_params.get("limit"))
-    if not 1 <= len(logical_id) <= 128 or revision < 1 or revision > 2**31 - 1:
-        raise ApiError(404, "not_found", "benchmark revision not found")
+    _valid_ref(logical_id, revision)
     content = await _run_blocking(request, "meta", _list_public_questions, conn, actor_id, project_id,
                                   logical_id, revision, request.query_params.get("cursor"), limit)
     return JSONResponse(status_code=200, content=content)
 
 
+def _valid_ref(logical_id: str, revision: int) -> None:
+    if not 1 <= len(logical_id) <= 128 or revision < 1 or revision > 2**31 - 1:
+        raise ApiError(404, "not_found", "benchmark revision not found")
+
+
+async def get_benchmark_handler(
+    logical_id: str, revision: int, request: Request,
+    conn: psycopg.Connection = Depends(get_db),
+    actor_id: uuid.UUID = Depends(get_authenticated_actor),
+) -> JSONResponse:
+    project_id = resolve_project_id(request)
+    _valid_ref(logical_id, revision)
+    content = await _run_blocking(request, "meta", _get_benchmark, conn, actor_id, project_id, logical_id, revision)
+    return JSONResponse(status_code=200, content=content)
+
+
+router.add_api_route("/api/v1/benchmarks/{logical_id}/revisions/{revision}", get_benchmark_handler,
+                     methods=["GET"], name="get_benchmark_v1")
 router.add_api_route("/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions",
                      list_public_questions_handler, methods=["GET"], name="list_public_questions_v1")
