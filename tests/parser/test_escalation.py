@@ -1,13 +1,16 @@
 """Limited DPI/crop escalation planning (SPEC 19.3 item 8)."""
 from __future__ import annotations
 
+import io
 import random
 import unittest
+
+import pypdfium2 as pdfium
 
 from lab_parser.escalation import (
     Attempt, EscalationError, EscalationPolicy, WEAKNESSES, plan_next,
 )
-from lab_parser.render import MAX_PIXELS, MAX_SIDE_PX
+from lab_parser.render import MAX_PIXELS, MAX_SIDE_PX, render_region
 
 PAGE = (612.0, 792.0)
 BOX = (0.1, 0.1, 0.5, 0.5)
@@ -28,17 +31,17 @@ class FirstAttemptTests(unittest.TestCase):
     def test_first_render_is_150_dpi_with_the_pixels_render_will_produce(self):
         p = plan_next([], "none", box=BOX, page_size_pt=PAGE)
         self.assertEqual((p.action, p.attempt_no, p.dpi, p.box, p.profile), ("render", 1, 150, BOX, "default"))
-        # render.render_region: round((x1 - x0) * page_w_pt * dpi / 72)
-        self.assertEqual((p.width_px, p.height_px), (round(0.4 * 612 * 150 / 72), round(0.4 * 792 * 150 / 72)))
+        # Exact PDFium crop quantization at 150 DPI produces (509, 659)
+        self.assertEqual((p.width_px, p.height_px), (509, 659))
         self.assertEqual(p.tiles, ())
-        self.assertEqual(p.policy_version, "dpi-escalation-1")
+        self.assertEqual(p.policy_version, "dpi-escalation-2")
 
     def test_weakness_is_ignored_for_the_first_render(self):
         self.assertEqual(plan_next([], "blurry", box=BOX, page_size_pt=PAGE).dpi, 150)
 
-    def test_a_tiny_box_still_renders_one_pixel_at_least(self):
+    def test_quantized_empty_crop_requires_review(self):
         p = plan_next([], "none", box=(0.5, 0.5, 0.5001, 0.5001), page_size_pt=(10.0, 10.0))
-        self.assertEqual((p.width_px, p.height_px), (1, 1))
+        self.assertEqual((p.action, p.reasons), ("needs_review", ("unrenderable_crop",)))
 
 
 class DpiEscalationTests(ErrorCode, unittest.TestCase):
@@ -51,7 +54,8 @@ class DpiEscalationTests(ErrorCode, unittest.TestCase):
             with self.subTest(weakness=weakness):
                 p = plan_next(self.first(), weakness, box=BOX, page_size_pt=PAGE)
                 self.assertEqual((p.action, p.attempt_no, p.dpi, p.box, p.profile), ("render", 2, 300, BOX, "default"))
-                self.assertEqual((p.width_px, p.height_px), (round(0.4 * 612 * 300 / 72), round(0.4 * 792 * 300 / 72)))
+                # Exact PDFium crop quantization at 300 DPI produces (1019, 1319)
+                self.assertEqual((p.width_px, p.height_px), (1019, 1319))
 
     def test_no_second_dpi_escalation(self):
         h = self.first()
@@ -258,6 +262,154 @@ class ValidationTests(ErrorCode, unittest.TestCase):
         self.assertCode("invalid_history", plan_next, ["x"], "blurry", box=BOX, page_size_pt=PAGE)
         self.assertCode("invalid_policy", plan_next, [], "none", box=BOX, page_size_pt=PAGE, policy="x")
         self.assertCode("invalid_profile", plan_next, [], "none", box=BOX, page_size_pt=PAGE, default_profile="")
+
+
+class PdfiumIntegrationRegressionTests(unittest.TestCase):
+    """Meaningful real PDFium integration regressions for exact rounding and tiling."""
+
+    def _make_pdf(self, width_pt: float, height_pt: float, rotation: int = 0) -> tuple[bytes, tuple[float, float]]:
+        pdf = pdfium.PdfDocument.new()
+        page = pdf.new_page(width_pt, height_pt)
+        if rotation:
+            page.set_rotation(rotation)
+        buf = io.BytesIO()
+        pdf.save(buf)
+        pdf.close()
+        data = buf.getvalue()
+        doc = pdfium.PdfDocument(data)
+        size = doc[0].get_size()
+        doc.close()
+        return data, size
+
+    def test_exact_fullpage_rounding_pdfium(self):
+        # Host reproduced: real blank 301x301pt PDF at 150 DPI -> 628x628
+        data, page_size = self._make_pdf(301.0, 301.0)
+        p = plan_next([], "none", box=(0.0, 0.0, 1.0, 1.0), page_size_pt=page_size)
+        asset = render_region(data, 0, region=(0.0, 0.0, 1.0, 1.0), dpi=150)
+        self.assertEqual((p.width_px, p.height_px), (628, 628))
+        self.assertEqual((asset.width_px, asset.height_px), (628, 628))
+        self.assertEqual(p.tiles, ())
+
+    def test_tiled_side_and_pixel_boundaries_pdfium(self):
+        # Host reproduced: blank 1966.2x300pt PDF -> PDFium page_size (1966.199951171875, 300)
+        # Plans 4097x625; width 4097 > 4096 so tiling is required.
+        data, page_size = self._make_pdf(1966.2, 300.0)
+        p = plan_next([], "none", box=(0.0, 0.0, 1.0, 1.0), page_size_pt=page_size)
+        self.assertEqual((p.width_px, p.height_px), (4097, 625))
+        self.assertGreaterEqual(len(p.tiles), 2)
+
+        # Every tile must fit render limits and match rendered pixels exactly
+        for idx, t in enumerate(p.tiles):
+            asset = render_region(data, 0, region=t.box, dpi=p.dpi)
+            self.assertEqual(
+                (asset.width_px, asset.height_px),
+                (t.width_px, t.height_px),
+                f"Tile {idx} dimension mismatch",
+            )
+            self.assertLessEqual(t.width_px, MAX_SIDE_PX)
+            self.assertLessEqual(t.height_px, MAX_SIDE_PX)
+            self.assertLessEqual(t.width_px * t.height_px, MAX_PIXELS)
+
+        # Pixel budget accounting must include all actual tiles
+        tile_pixels = sum(t.width_px * t.height_px for t in p.tiles)
+        pol_tight = EscalationPolicy(pixel_budget=16_000_000)
+        p_tight = plan_next(
+            [Attempt(150, (0.0, 0.0, 1.0, 1.0), "default", 16_000_000 - tile_pixels + 1)],
+            "blurry",
+            box=(0.0, 0.0, 1.0, 1.0),
+            page_size_pt=page_size,
+            policy=pol_tight,
+        )
+        self.assertEqual((p_tight.action, p_tight.reasons), ("needs_review", ("pixel_budget_exceeded",)))
+
+    def test_exact_nonzero_crop_rounding_pdfium(self):
+        data, page_size = self._make_pdf(612.0, 792.0)
+        box = (0.1, 0.1, 0.5, 0.5)
+
+        p150 = plan_next([], "none", box=box, page_size_pt=page_size)
+        asset150 = render_region(data, 0, region=box, dpi=150)
+        self.assertEqual((p150.width_px, p150.height_px), (asset150.width_px, asset150.height_px))
+        self.assertEqual((p150.width_px, p150.height_px), (509, 659))
+
+        p300 = plan_next([Attempt(150, box, "default", 509 * 659)], "blurry", box=box, page_size_pt=page_size)
+        asset300 = render_region(data, 0, region=box, dpi=300)
+        self.assertEqual((p300.width_px, p300.height_px), (asset300.width_px, asset300.height_px))
+        self.assertEqual((p300.width_px, p300.height_px), (1019, 1319))
+
+    def test_rotated_cropbox_quantization_pdfium(self):
+        data, page_size = self._make_pdf(301.0, 401.0, rotation=90)
+        p = plan_next([], "none", box=(0.0, 0.0, 1.0, 1.0), page_size_pt=page_size)
+        asset = render_region(data, 0, region=(0.0, 0.0, 1.0, 1.0), dpi=150)
+        self.assertEqual((p.width_px, p.height_px), (836, 628))
+        self.assertEqual((asset.width_px, asset.height_px), (836, 628))
+
+
+class HistoryAndOverflowRegressionTests(ErrorCode, unittest.TestCase):
+    """Validation regressions for invalid history, schema, and page size overflow."""
+
+    def test_oversized_integers_are_sanitized_or_budget_gated(self):
+        huge = 10 ** 400
+        self.assertCode("invalid_page_size", plan_next, [], "none", box=BOX, page_size_pt=(huge, 300))
+        self.assertCode("invalid_box", plan_next, [], "none", box=(0, 0, huge, 1), page_size_pt=PAGE)
+        p = plan_next([Attempt(150, BOX, "default", huge)], "blurry", box=BOX, page_size_pt=PAGE)
+        self.assertEqual((p.action, p.reasons), ("needs_review", ("pixel_budget_exceeded",)))
+
+    def test_invalid_attempt_pixels(self):
+        # Negative pixels
+        self.assertCode("invalid_history", plan_next, [Attempt(150, BOX, "default", -100000000)], "blurry",
+                        box=BOX, page_size_pt=PAGE)
+        # NaN pixels
+        self.assertCode("invalid_history", plan_next, [Attempt(150, BOX, "default", float("nan"))], "blurry",  # type: ignore[arg-type]
+                        box=BOX, page_size_pt=PAGE)
+        # Zero / bool / non-int pixels
+        self.assertCode("invalid_history", plan_next, [Attempt(150, BOX, "default", 0)], "blurry",
+                        box=BOX, page_size_pt=PAGE)
+        self.assertCode("invalid_history", plan_next, [Attempt(150, BOX, "default", True)], "blurry",  # type: ignore[arg-type]
+                        box=BOX, page_size_pt=PAGE)
+
+        # Valid pixels at budget bound goes to needs_review, not uncaught or render
+        pol = EscalationPolicy(pixel_budget=16_000_000)
+        p = plan_next([Attempt(150, BOX, "default", 16_000_000)], "blurry", box=BOX, page_size_pt=PAGE, policy=pol)
+        self.assertEqual((p.action, p.reasons), ("needs_review", ("pixel_budget_exceeded",)))
+
+    def test_invalid_attempt_dpi_out_of_policy(self):
+        # Attempt with 999 DPI
+        self.assertCode("invalid_history", plan_next, [Attempt(999, BOX, "default", 100)], "missing_labels",
+                        box=BOX, page_size_pt=PAGE)
+        # Attempt with DPI not in policy (e.g. 72 when policy is 150/300)
+        self.assertCode("invalid_history", plan_next, [Attempt(72, BOX, "default", 100)], "blurry",
+                        box=BOX, page_size_pt=PAGE)
+        # Bool DPI
+        self.assertCode("invalid_history", plan_next, [Attempt(True, BOX, "default", 100)], "blurry",  # type: ignore[arg-type]
+                        box=BOX, page_size_pt=PAGE)
+
+    def test_invalid_attempt_box_and_profile(self):
+        # Invalid box coordinates
+        self.assertCode("invalid_history", plan_next, [Attempt(150, (0, 0, 1), "default", 100)], "blurry",  # type: ignore[arg-type]
+                        box=BOX, page_size_pt=PAGE)
+        self.assertCode("invalid_history", plan_next, [Attempt(150, (0, 0, 0.5, float("nan")), "default", 100)], "blurry",
+                        box=BOX, page_size_pt=PAGE)
+        # Empty or oversized profile
+        self.assertCode("invalid_history", plan_next, [Attempt(150, BOX, "", 100)], "blurry",
+                        box=BOX, page_size_pt=PAGE)
+        self.assertCode("invalid_history", plan_next, [Attempt(150, BOX, "x" * 65, 100)], "blurry",
+                        box=BOX, page_size_pt=PAGE)
+
+    def test_impossible_bounded_history_rejected(self):
+        # History with de-escalating DPI (300 -> 150)
+        self.assertCode("invalid_history", plan_next,
+                        [Attempt(300, BOX, "default", 100), Attempt(150, BOX, "default", 100)],
+                        "blurry", box=BOX, page_size_pt=PAGE)
+        # History longer than max_attempts
+        pol = EscalationPolicy(max_attempts=3)
+        long_history = [Attempt(150, BOX, "default", 100)] * 4
+        self.assertCode("invalid_history", plan_next, long_history, "blurry", box=BOX, page_size_pt=PAGE, policy=pol)
+
+    def test_gigantic_page_dimensions_overflow_rejected(self):
+        # Finite gigantic dimensions that would overflow floating-point scaling or int conversions
+        for huge_page in ((1e308, 792.0), (612.0, 1e308), (1e300, 1e300), (1e15, 100.0)):
+            with self.subTest(page=huge_page):
+                self.assertCode("invalid_page_size", plan_next, [], "none", box=BOX, page_size_pt=huge_page)
 
 
 if __name__ == "__main__":

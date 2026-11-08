@@ -9,9 +9,12 @@ review, never an unbounded retry; the crop is never silently downscaled, an
 over-limit crop is cut into tiles that each carry the transform back to the crop.
 
 Boxes are normalized page coordinates ``(x0, y0, x1, y1)`` in ``[0, 1]`` with
-the origin top-left, and ``page_size_pt`` is the page size in points, as in
-``render.render_region``; pixels use the same rule (``round(points * dpi / 72)``)
-so a planned size is the size that render will produce.
+the origin top-left, and ``page_size_pt`` is the visible page size in points, as
+in ``render.render_region``. Rasterization dimensions follow PDFium's exact crop
+quantization semantics (scale = dpi / 72.0; canvas ceil-quantized; crop edges
+ceil-quantized in canvas units; dimensions = src_dim - crop_start - crop_end).
+Planned sizes match the exact pixel dimensions that ``render_region`` produces
+for both full-page and crop renders.
 
 The defaults are adjustable design values, not tool guarantees (SPEC): changing
 one needs a new ``POLICY_VERSION`` and re-testing. A policy may lower the pixel
@@ -23,7 +26,7 @@ from dataclasses import dataclass
 import math
 from typing import Optional, Sequence
 
-from .render import MAX_DPI, MAX_PIXELS, MAX_SIDE_PX, MIN_DPI
+from .render import MAX_DPI, MAX_PIXELS, MAX_SIDE_PX, MIN_DPI, raster_size_px
 
 __all__ = [
     "Attempt",
@@ -35,7 +38,7 @@ __all__ = [
     "plan_next",
 ]
 
-POLICY_VERSION = "dpi-escalation-1"
+POLICY_VERSION = "dpi-escalation-2"
 WEAKNESSES = ("none", "too_small", "blurry", "missing_labels")
 Box = tuple[float, float, float, float]
 
@@ -124,11 +127,20 @@ def _review(*reasons: str) -> Plan:
     return Plan("needs_review", None, None, None, None, None, None, (), tuple(reasons))
 
 
+def _finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, ValueError):
+        return False
+
+
 def _check_box(box: object) -> Box:
     if not isinstance(box, tuple) or len(box) != 4:
         raise EscalationError("invalid_box")
     for v in box:
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        if not _finite_number(v):
             raise EscalationError("invalid_box")
     x0, y0, x1, y1 = (float(v) for v in box)
     if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
@@ -137,9 +149,7 @@ def _check_box(box: object) -> Box:
 
 
 def _size_px(box: Box, page_size_pt: tuple[float, float], dpi: int) -> tuple[int, int]:
-    scale = dpi / 72.0
-    return (max(1, int(round((box[2] - box[0]) * page_size_pt[0] * scale))),
-            max(1, int(round((box[3] - box[1]) * page_size_pt[1] * scale))))
+    return raster_size_px(box, page_size_pt, dpi)
 
 
 def _fits(w: int, h: int, policy: EscalationPolicy) -> bool:
@@ -158,6 +168,15 @@ def _tiles(box: Box, page_size_pt: tuple[float, float], dpi: int, policy: Escala
     done within ``max_tiles``."""
     width, height = _size_px(box, page_size_pt, dpi)
     scale = dpi / 72.0
+    page_w_pt, page_h_pt = page_size_pt
+    src_width = math.ceil(page_w_pt * scale)
+    src_height = math.ceil(page_h_pt * scale)
+
+    crop_left_0 = math.ceil(box[0] * page_w_pt * scale)
+    crop_right_0 = math.ceil((1.0 - box[2]) * page_w_pt * scale)
+    crop_top_0 = math.ceil(box[1] * page_h_pt * scale)
+    crop_bottom_0 = math.ceil((1.0 - box[3]) * page_h_pt * scale)
+
     overlap = policy.tile_overlap_px
     for total in range(2, policy.max_tiles + 1):
         for nx in range(1, total + 1):
@@ -175,12 +194,18 @@ def _tiles(box: Box, page_size_pt: tuple[float, float], dpi: int, policy: Escala
                     top = max(0, iy * th - (overlap if iy else 0))
                     right = min(width, (ix + 1) * tw + (overlap if ix < nx - 1 else 0))
                     bottom = min(height, (iy + 1) * th + (overlap if iy < ny - 1 else 0))
-                    tile_box = (
-                        box[0] + left / scale / page_size_pt[0],
-                        box[1] + top / scale / page_size_pt[1],
-                        min(box[2], box[0] + right / scale / page_size_pt[0]),
-                        min(box[3], box[1] + bottom / scale / page_size_pt[1]),
-                    )
+
+                    P_left = crop_left_0 + left
+                    P_right = crop_left_0 + right
+                    P_top = crop_top_0 + top
+                    P_bottom = crop_top_0 + bottom
+
+                    tile_x0 = box[0] if left == 0 else (P_left - 0.5) / (page_w_pt * scale)
+                    tile_x1 = box[2] if right == width else 1.0 - (src_width - P_right - 0.5) / (page_w_pt * scale)
+                    tile_y0 = box[1] if top == 0 else (P_top - 0.5) / (page_h_pt * scale)
+                    tile_y1 = box[3] if bottom == height else 1.0 - (src_height - P_bottom - 0.5) / (page_h_pt * scale)
+
+                    tile_box = (tile_x0, tile_y0, tile_x1, tile_y1)
                     tw_px, th_px = right - left, bottom - top
                     if not _fits(tw_px, th_px, policy):
                         return ()
@@ -189,8 +214,26 @@ def _tiles(box: Box, page_size_pt: tuple[float, float], dpi: int, policy: Escala
     return ()
 
 
+def _check_attempt(a: object, policy: EscalationPolicy) -> Attempt:
+    if not isinstance(a, Attempt):
+        raise EscalationError("invalid_history")
+    if isinstance(a.dpi, bool) or not isinstance(a.dpi, int) or a.dpi not in (policy.first_dpi, policy.escalated_dpi):
+        raise EscalationError("invalid_history")
+    try:
+        _check_box(a.box)
+    except EscalationError:
+        raise EscalationError("invalid_history")
+    if isinstance(a.profile, bool) or not isinstance(a.profile, str) or not 1 <= len(a.profile) <= 64:
+        raise EscalationError("invalid_history")
+    if isinstance(a.pixels, bool) or not isinstance(a.pixels, int) or a.pixels <= 0:
+        raise EscalationError("invalid_history")
+    return a
+
+
 def _render_plan(box, profile, dpi, attempt_no, page_size_pt, history, policy) -> Plan:
     width, height = _size_px(box, page_size_pt, dpi)
+    if width <= 0 or height <= 0:
+        return _review("unrenderable_crop")
     tiles: tuple[Tile, ...] = ()
     if not _fits(width, height, policy):
         tiles = _tiles(box, page_size_pt, dpi, policy)
@@ -223,15 +266,29 @@ def plan_next(
     if weakness not in WEAKNESSES:
         raise EscalationError("invalid_weakness")
     box = _check_box(box)
-    if (not isinstance(page_size_pt, tuple) or len(page_size_pt) != 2
-            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
-                   for v in page_size_pt)):
+    if not isinstance(page_size_pt, tuple) or len(page_size_pt) != 2:
         raise EscalationError("invalid_page_size")
+    for v in page_size_pt:
+        if not _finite_number(v) or v <= 0:
+            raise EscalationError("invalid_page_size")
+        try:
+            scaled = float(v) * (policy.escalated_dpi / 72.0)
+            if not math.isfinite(scaled) or scaled > 1e9:
+                raise EscalationError("invalid_page_size")
+        except (OverflowError, ValueError):
+            raise EscalationError("invalid_page_size")
     if not isinstance(default_profile, str) or not 1 <= len(default_profile) <= 64:
         raise EscalationError("invalid_profile")
+    if not isinstance(history, Sequence) or isinstance(history, (str, bytes)):
+        raise EscalationError("invalid_history")
+    if len(history) > policy.max_attempts:
+        raise EscalationError("invalid_history")
+    prev_dpi = None
     for a in history:
-        if not isinstance(a, Attempt):
+        _check_attempt(a, policy)
+        if prev_dpi is not None and a.dpi < prev_dpi:
             raise EscalationError("invalid_history")
+        prev_dpi = a.dpi
 
     if not history:
         return _render_plan(box, default_profile, policy.first_dpi, 1, page_size_pt, history, policy)
