@@ -135,6 +135,7 @@ class PublicQuestionsRealDbTests(FreshDatabase):
     def test_bad_cursor_and_limit_are_400(self):
         f, roles = self.seed()
         self.assertEqual(self.get(f.a, f.p, cursor="garbage").status_code, 400)
+        self.assertEqual(self.get(f.a, f.p, cursor="").status_code, 400)
         self.assertEqual(self.get(f.a, f.p, limit="0").status_code, 400)
         self.assertEqual(self.get(f.a, f.p, limit="9999").status_code, 400)
 

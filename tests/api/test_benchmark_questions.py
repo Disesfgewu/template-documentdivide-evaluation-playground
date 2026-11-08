@@ -126,6 +126,15 @@ class AuthorizationOrderTests(unittest.TestCase):
         self.assertEqual((ctx.exception.status_code, ctx.exception.code), (404, "not_found"))
         self.assertEqual(conn.execute.call_count, 1)  # no question was read
 
+    def test_empty_cursor_is_not_treated_as_first_page(self):
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (BID, "draft")
+        with patch.object(b, "authorize", return_value=Decision("owner", None)):
+            with self.assertRaises(ApiError) as ctx:
+                b._list_public_questions(conn, uuid.uuid4(), uuid.uuid4(), "bench", 1, "", 10)
+        self.assertEqual((ctx.exception.status_code, ctx.exception.code), (400, "invalid_cursor"))
+        self.assertEqual(conn.execute.call_count, 1)
+
     def test_owner_sees_a_draft_and_paging_reports_the_next_cursor(self):
         conn = MagicMock()
         rows = [(uuid.uuid4(), f"q{i}", i, "T", "b" * 64, "general", {"language": "en"}) for i in range(3)]

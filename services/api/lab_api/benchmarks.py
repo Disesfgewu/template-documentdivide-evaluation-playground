@@ -129,7 +129,7 @@ def _get_benchmark(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uu
 def _list_public_questions(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
                            logical_id: str, revision: int, cursor: Optional[str], limit: int) -> dict:
     benchmark_id, status = _resolve_visible(conn, actor_id, project_id, logical_id, revision)[:2]
-    after = decode_cursor(cursor, benchmark_id) if cursor else -1
+    after = decode_cursor(cursor, benchmark_id) if cursor is not None else -1
 
     rows = conn.execute(
         "SELECT id, question_key, ordinal, question_text, question_hash, quota_bucket, payload FROM questions "
