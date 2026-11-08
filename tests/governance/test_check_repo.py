@@ -17,6 +17,8 @@ class Fixture(unittest.TestCase):
         for rel in check_repo.REQUIRED_FILES + [
             ".github/workflows/ci.yml",
             "docs/BENCHMARK_TRANSFER.md",
+            "docs/PDF_FIXTURE_ACCEPTANCE.md",
+            "docs/RELEASE_EVIDENCE.md",
             "tools/governance/verified_identities.txt",
         ]:
             dst = self.tmp / rel
