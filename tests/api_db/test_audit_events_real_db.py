@@ -122,6 +122,64 @@ class AuditEventsRealDbTests(FreshDatabase):
                                      "before_revision", "after_revision", "reason", "outcome", "operation_id",
                                      "trace_id", "occurred_at"})
 
+    def test_reason_credential_redaction_preserves_raw_database(self):
+        p, owner, *_ = self.seed()
+        op = uuid.uuid4()
+        raw_reason = "Sync failed: Bearer test-bearer-canary-secret key=sk-fake-canary-api-key https://alice:pass-canary-123@db.internal:5432/app"
+        evt_id = uuid.uuid4()
+        with self.connect() as c:
+            with c.transaction():
+                c.execute("INSERT INTO operations (id, project_id, kind, actor_id, status) VALUES (%s, %s, 'k', %s, 'intent')",
+                          (op, p, owner))
+                c.execute("INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, "
+                          "reason, outcome, operation_id, occurred_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())",
+                          (evt_id, p, owner, "document.imported", "document_version", raw_reason, "failed", op))
+
+        # 1. HTTP response must have sensitive credentials redacted
+        res = self.get(owner, p, action="document.imported", outcome="failed")
+        self.assertEqual(res.status_code, 200)
+        items = [i for i in res.json()["items"] if i["event_id"] == str(evt_id)]
+        self.assertEqual(len(items), 1)
+        redacted_reason = items[0]["reason"]
+        self.assertNotIn("test-bearer-canary-secret", redacted_reason)
+        self.assertNotIn("sk-fake-canary-api-key", redacted_reason)
+        self.assertNotIn("pass-canary-123", redacted_reason)
+        self.assertIn("[REDACTED]", redacted_reason)
+
+        # 2. Append-only raw database audit event must retain verbatim raw text unchanged
+        with self.connect() as c:
+            row = c.execute("SELECT reason FROM audit_events WHERE event_id = %s", (evt_id,)).fetchone()
+            self.assertEqual(row[0], raw_reason)
+
+    def test_cursor_and_limit_regressions_real_db(self):
+        p, owner, *_ = self.seed()
+
+        # Bounded invalid decimal input rejected with 400 before int conversion
+        r_lim = self.get(owner, p, limit="9" * 5000)
+        self.assertEqual(r_lim.status_code, 400)
+        self.assertEqual(r_lim.json()["error"]["code"], "bad_request")
+
+        # Explicit empty cursor rejected
+        r_empty = self.get(owner, p, cursor="")
+        self.assertEqual(r_empty.status_code, 400)
+        self.assertEqual(r_empty.json()["error"]["code"], "invalid_cursor")
+
+        # Keyset pagination cursor regressions
+        r_page = self.get(owner, p, limit="2")
+        self.assertEqual(r_page.status_code, 200)
+        cursor = r_page.json()["next_cursor"]
+        self.assertIsNotNone(cursor)
+
+        # Noncanonical base64 suffixes rejected
+        self.assertEqual(self.get(owner, p, cursor=cursor + "=").status_code, 400)
+        self.assertEqual(self.get(owner, p, cursor=cursor + "==").status_code, 400)
+        self.assertEqual(self.get(owner, p, cursor=cursor + "A").status_code, 400)
+
+        # Changed filter rejected
+        r_changed_filt = self.get(owner, p, cursor=cursor, action="document.imported")
+        self.assertEqual(r_changed_filt.status_code, 400)
+        self.assertEqual(r_changed_filt.json()["error"]["code"], "invalid_cursor")
+
 
 if __name__ == "__main__":
     unittest.main()
