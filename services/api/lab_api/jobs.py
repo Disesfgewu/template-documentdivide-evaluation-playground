@@ -2,9 +2,12 @@
 
 Read-only and operational: status, stage, attempts and the recent
 transitions. Lease owner, lease token and expiry are never returned, since a
-token would let a caller act as the worker. Transition reasons are redacted
-of credential-shaped text via ``lab_db.logs.redact`` while preserving benign context
-(original audit records in the database remain unchanged).
+token would let a caller act as the worker. Transition reasons are bounded
+in characters (UTF-8 max 4x bytes) at both the SQL and API projection layers.
+Short reasons are redacted of credential-shaped text via ``lab_db.logs.redact``
+while preserving benign context (original audit records in the database remain unchanged).
+Overlong reasons fail closed to a fixed omission marker with explicit truncation
+flag to prevent boundary secret leaks.
 The role matrix has no job action yet, so access is scoped to staff roles
 via ``read_gold_trace_and_lineage`` (owner, maintainer, reviewer), confirmed
 by PM on Issue #6 as conservative scope pending participant run-binding;
@@ -26,6 +29,8 @@ from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
 router = APIRouter()
 JOB_ACTION = "read_gold_trace_and_lineage"
 MAX_TRANSITIONS = 50
+MAX_REASON_CHARS = 2000
+REASON_TRUNCATED_MARKER = "[omitted: reason exceeds maximum length]"
 
 
 def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -> dict:
@@ -43,10 +48,16 @@ def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -
 
     rows = conn.execute(
         "SELECT j.project_id, j.kind, j.stage, j.status::text, j.row_version, j.attempt, j.max_attempts, j.retryable, "
-        "t.from_status::text, t.to_status::text, t.reason, t.occurred_at "
+        "t.from_status::text, t.to_status::text, t.reason, t.occurred_at, t.reason_truncated "
         "FROM jobs j "
         "LEFT JOIN ("
-        "    SELECT id, job_id, from_status, to_status, reason, occurred_at "
+        "    SELECT id, job_id, from_status, to_status, "
+        "           CASE "
+        "               WHEN char_length(reason) > %s THEN %s "
+        "               ELSE reason "
+        "           END AS reason, "
+        "           occurred_at, "
+        "           (char_length(reason) > %s) AS reason_truncated "
         "    FROM job_transitions "
         "    WHERE job_id = %s "
         "    ORDER BY id DESC "
@@ -54,7 +65,7 @@ def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -
         ") t ON t.job_id = j.id "
         "WHERE j.id = %s AND j.project_id = %s "
         "ORDER BY t.id DESC NULLS LAST",
-        (job_id, MAX_TRANSITIONS + 1, job_id, project_id),
+        (MAX_REASON_CHARS, REASON_TRUNCATED_MARKER, MAX_REASON_CHARS, job_id, MAX_TRANSITIONS + 1, job_id, project_id),
     ).fetchall()
     if not rows:
         raise missing
@@ -63,10 +74,25 @@ def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -
     transitions = []
     for r in rows:
         if r[8] is not None:
+            raw_reason = r[10]
+            db_truncated = bool(r[12]) if len(r) > 12 and r[12] is not None else False
+            if db_truncated or (isinstance(raw_reason, str) and len(raw_reason) > MAX_REASON_CHARS):
+                out_reason = REASON_TRUNCATED_MARKER
+                is_truncated = True
+            else:
+                redacted = redact(raw_reason) if isinstance(raw_reason, str) else (raw_reason or "")
+                if len(redacted) > MAX_REASON_CHARS:
+                    out_reason = REASON_TRUNCATED_MARKER
+                    is_truncated = True
+                else:
+                    out_reason = redacted
+                    is_truncated = False
+
             transitions.append({
                 "from": r[8],
                 "to": r[9],
-                "reason": redact(r[10]) if isinstance(r[10], str) else (r[10] or ""),
+                "reason": out_reason,
+                "reason_truncated": is_truncated,
                 "occurred_at": r[11].isoformat() if hasattr(r[11], "isoformat") else str(r[11]),
             })
 
@@ -88,7 +114,9 @@ def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -
 async def get_job_handler(job_id: uuid.UUID, request: Request,
                           conn: psycopg.Connection = Depends(get_db),
                           actor_id: uuid.UUID = Depends(get_authenticated_actor)) -> JSONResponse:
+    """Get job status and recent transitions without lease tokens."""
     return JSONResponse(status_code=200, content=await _run_blocking(request, "meta", _get_job, conn, actor_id, job_id))
 
 
-router.add_api_route("/api/v1/jobs/{job_id}", get_job_handler, methods=["GET"], name="get_job_v1")
+router.add_api_route("/api/v1/jobs/{job_id}", get_job_handler, methods=["GET"], name="get_job_v1",
+                     summary="Get job status and recent transitions")
