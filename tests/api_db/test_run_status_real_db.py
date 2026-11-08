@@ -101,7 +101,7 @@ class RunStatusRealDbTests(FreshDatabase):
                         with writer.transaction():
                             attempt = f.attempt(run, f.q)
                             f.submission(run, attempt, f.q)
-                            writer.execute("UPDATE runs SET status = 'preparing' WHERE id = %s", (run,))
+                            writer.execute("UPDATE runs SET status = 'preparing', row_version = row_version + 1 WHERE id = %s", (run,))
                     return result
 
             proxy = CommitAfterAttempts()
