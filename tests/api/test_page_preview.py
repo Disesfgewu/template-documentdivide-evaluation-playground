@@ -77,6 +77,9 @@ class PagePreviewApiUnitTests(unittest.TestCase):
 
         self.mock_conn = MagicMock()
         self.mock_store = MagicMock()
+        store_patch = patch("lab_api.documents.get_store", return_value=self.mock_store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
         self.app.dependency_overrides[get_db] = lambda: self.mock_conn
         self.app.dependency_overrides[get_store] = lambda: self.mock_store
         self.app.dependency_overrides[get_authenticated_actor] = lambda: self.actor_id
@@ -513,3 +516,35 @@ class PagePreviewApiUnitTests(unittest.TestCase):
 
             block_evt.set()
             t.join(timeout=3.0)
+
+    def test_json_geometry_does_not_require_artifact_storage(self):
+        with patch("lab_api.documents.get_store", side_effect=RuntimeError("unavailable")) as store, \
+             patch("lab_api.documents.authorize", return_value=Decision(role="owner", condition=None)):
+            response = self.client.get(f"/api/v1/documents/{self.doc_id}/pages/0")
+        self.assertEqual(response.status_code, 200)
+        store.assert_not_called()
+
+    def test_child_environment_excludes_credentials(self):
+        import subprocess
+        original = subprocess.run
+        with patch.dict(os.environ, {"LAB_AUTH_SECRET": "private-canary", "PROVIDER_KEY": "private-canary"}), \
+             patch("lab_api.preview.subprocess.run", wraps=original) as run:
+            result = render_preview_in_subprocess(self.f01_pdf, 0)
+        self.assertTrue(result.png.startswith(PNG_SIGNATURE))
+        self.assertEqual(set(run.call_args.kwargs["env"]), {"PYTHONPATH", "LANG"})
+        self.assertNotIn("preexec_fn", run.call_args.kwargs)
+
+    def test_png_parent_rejects_corruption_truncation_and_excess_pixels(self):
+        from lab_api.preview import _validate_png
+        from lab_parser.render import encode_png_rgb
+        png = encode_png_rgb(1, 1, bytes([10, 20, 30]))
+        _validate_png(png, 1, 1)
+        for bad in (png[:-12], png + b"extra", png[:32] + bytes([png[32] ^ 1]) + png[33:],
+                    png[:33] + png[-12:]):
+            with self.subTest(size=len(bad)), self.assertRaises(PreviewError):
+                _validate_png(bad, 1, 1)
+
+    def test_openapi_declares_preview_response_headers(self):
+        response = self.app.openapi()["paths"]["/api/v1/documents/{document_id}/pages/{page_index}"]["get"]["responses"]["200"]
+        self.assertIn("X-Image-Sha256", response["headers"])
+        self.assertNotIn("headers", response["content"]["image/png"])

@@ -961,7 +961,6 @@ def _prefers_png_preview(accept_header: str) -> bool:
 
 async def _preview_response(
     request: Request,
-    store: LocalArtifactStore,
     conn: psycopg.Connection,
     actor_id: uuid.UUID,
     document_id: uuid.UUID,
@@ -977,6 +976,8 @@ async def _preview_response(
     # 2. Acquire admission slot BEFORE PDF read
     slot = _take_slot(request, "preview", DEFAULT_PREVIEW_CONCURRENCY, "page previews")
     try:
+        store = await _run_blocking(request, "preview", get_store, request)
+
         # 3. Read artifact bytes under the preview pool
         pdf_bytes = await _run_blocking(request, "preview", _read_artifact, store, doc, server_max_bytes)
 
@@ -1021,14 +1022,13 @@ async def get_page_handler(
     page_index: int,
     request: Request,
     conn: psycopg.Connection = Depends(get_db),
-    store: LocalArtifactStore = Depends(get_store),
     actor_id: uuid.UUID = Depends(get_authenticated_actor),
 ) -> Response:
     """Get per-page normalized geometry (JSON) or rendered page preview (Accept: image/png)."""
     if _prefers_png_preview(request.headers.get("Accept", "")):
         server_max_bytes = getattr(request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES)
         return await _preview_response(
-            request, store, conn, actor_id, document_id, page_index, server_max_bytes
+            request, conn, actor_id, document_id, page_index, server_max_bytes
         )
 
     content = await _run_blocking(request, "meta", _get_page, conn, actor_id, document_id, page_index)
@@ -1076,6 +1076,9 @@ PAGE_RESPONSES = {
     503: {"description": "Server busy or renderer temporarily unavailable."},
     504: {"description": "Page rendering timed out."},
 }
+
+# Response headers belong to the response object, not a media type object.
+PAGE_RESPONSES[200]["headers"] = PAGE_RESPONSES[200]["content"]["image/png"].pop("headers")
 
 # Route registrations
 router.add_api_route(

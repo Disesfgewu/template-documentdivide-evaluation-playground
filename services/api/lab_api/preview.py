@@ -10,6 +10,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -78,12 +79,8 @@ def render_preview_in_subprocess(
             "150",
         ]
 
-        env = dict(os.environ)
-        parser_path = str(_REPO_ROOT / "services" / "parser")
-        if "PYTHONPATH" in env and env["PYTHONPATH"]:
-            env["PYTHONPATH"] = f"{parser_path}:{env['PYTHONPATH']}"
-        else:
-            env["PYTHONPATH"] = parser_path
+        # Native parser receives no database, signing or provider credentials.
+        env = {"PYTHONPATH": str(_REPO_ROOT / "services" / "parser"), "LANG": "C.UTF-8"}
 
         try:
             # DEVNULL prevents unbounded buffer exhaustion in parent from untrusted output
@@ -94,6 +91,7 @@ def render_preview_in_subprocess(
                 stderr=subprocess.DEVNULL,
                 timeout=timeout_s,
                 env=env,
+                cwd=tmp_dir,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -164,7 +162,7 @@ def render_preview_in_subprocess(
         manifest_page = manifest.get("page_index")
         manifest_dpi = manifest.get("dpi")
 
-        if manifest_page != page_index or manifest_dpi != 150:
+        if type(manifest_page) is not int or type(manifest_dpi) is not int or manifest_page != page_index or manifest_dpi != 150:
             raise PreviewError(500, "storage_corruption", "preview manifest metadata mismatch")
 
         # Reject booleans or non-integers for dimensions
@@ -185,7 +183,7 @@ def render_preview_in_subprocess(
         if (
             not isinstance(manifest_sha256, str)
             or len(manifest_sha256) != 64
-            or not all(c in "0123456789abcdef" for c in manifest_sha256.lower())
+            or not all(c in "0123456789abcdef" for c in manifest_sha256)
         ):
             raise PreviewError(500, "storage_corruption", "invalid preview manifest checksum")
 
@@ -227,6 +225,8 @@ def render_preview_in_subprocess(
         if actual_sha256 != manifest_sha256:
             raise PreviewError(500, "storage_corruption", "preview output checksum mismatch")
 
+        _validate_png(png_bytes, width_px, height_px)
+
         return PreviewAsset(
             png=png_bytes,
             sha256=actual_sha256,
@@ -234,3 +234,51 @@ def render_preview_in_subprocess(
             height_px=height_px,
             page_index=page_index,
         )
+
+
+def _validate_png(data: bytes, width: int, height: int) -> None:
+    """Validate the fixed RGB8 noninterlaced renderer format and bounded pixels."""
+    def invalid():
+        raise PreviewError(500, "storage_corruption", "invalid rendered PNG structure")
+
+    pos = 8
+    compressed = bytearray()
+    types = []
+    while pos < len(data):
+        if pos + 12 > len(data):
+            invalid()
+        size = struct.unpack(">I", data[pos:pos + 4])[0]
+        end = pos + 12 + size
+        if end > len(data):
+            invalid()
+        kind = data[pos + 4:pos + 8]
+        payload = data[pos + 8:pos + 8 + size]
+        crc = struct.unpack(">I", data[pos + 8 + size:end])[0]
+        if zlib.crc32(kind + payload) & 0xffffffff != crc:
+            invalid()
+        if kind == b"IHDR":
+            if types or payload != struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0):
+                invalid()
+        elif kind == b"IDAT":
+            if not types or types[-1] not in (b"IHDR", b"IDAT"):
+                invalid()
+            compressed.extend(payload)
+        elif kind == b"IEND":
+            if size or end != len(data) or not compressed:
+                invalid()
+        else:
+            invalid()
+        types.append(kind)
+        pos = end
+    if not types or types[-1] != b"IEND":
+        invalid()
+    expected = height * (1 + width * 3)
+    try:
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, expected + 1)
+        if len(raw) != expected or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+            invalid()
+        if any(raw[row * (1 + width * 3)] != 0 for row in range(height)):
+            invalid()
+    except zlib.error:
+        invalid()
