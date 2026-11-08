@@ -59,6 +59,8 @@ scripts/check.sh --scope "parser governance"
   - Prior results remain immutable; newly constructed `BatchResultInput` objects reflect updated retry outcomes while retaining original successful pages and their original per-page provenance across multiple rounds (>= 2 rounds).
   - Mixed batches with multiple producer operations do not assert a single batch `operation_id` (`None`).
   - Tracks full operation attempt history (`OperationAttemptRecord`) across initial and multi-round retry operations.
+  - For later rounds, pass the `MergedRetryResult` to `derive_retry_plan`, or explicitly carry its `operation_history` with merged results. Captured history cannot be replaced; supplied history must account for every known current page producer. Digests detect changed snapshots; they do not authenticate caller-supplied records.
+  - These reports preserve outcome metadata and producer references. They do not persist or verify parsed artifacts; parser integration must retain those artifacts and enforce durable recovery separately.
   - Re-evaluates coverage using the existing `evaluate_coverage` contract.
   - Failed or missing pages that fail again on retry remain visible (`status="incomplete"`).
   - Honest completion flags: `can_claim_complete` requires all physical pages to reach `ok`; `can_freeze_benchmark` remains `False`.

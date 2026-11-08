@@ -322,8 +322,12 @@ def derive_retry_plan(
     att = _require_strict_int(attempt, "attempt", minimum=1)
 
     if isinstance(prior_results, MergedRetryResult):
-        if not prior_history:
-            prior_history = prior_results.operation_history
+        if (prior_results.plan_id != plan.plan_id
+                or prior_results.plan_sha256 != plan.plan_sha256):
+            raise ValueError("cross_document_or_plan_mismatch: merged source belongs to another plan")
+        if prior_history and tuple(prior_history) != prior_results.operation_history:
+            raise ValueError("prior_history_mismatch: cannot replace captured merged history")
+        prior_history = prior_results.operation_history
         prior_results = prior_results.merged_results
 
     if not isinstance(prior_results, (list, tuple)):
@@ -370,6 +374,21 @@ def derive_retry_plan(
         raise ValueError(
             f"invalid_attempt_progression: attempt {att} must be > max prior attempt {max_prior_attempt}"
         )
+
+    # A nonempty history must account for every known current producer. Bounds
+    # alone cannot prevent an unrelated but well-formed history dropping lineage.
+    if prior_history:
+        history_by_operation = {h.operation_id: h for h in prior_history}
+        for result in prior_results:
+            for page in result.pages:
+                producer = page.operation_id or result.operation_id
+                if producer is None:
+                    continue
+                record = history_by_operation.get(producer)
+                if (record is None or page.page_index not in record.page_indices
+                        or result.batch_id not in record.batch_ids
+                        or (page.attempt is not None and page.attempt != record.attempt)):
+                    raise ValueError("prior_history_mismatch: known source provenance is missing or inconsistent")
 
     eval_report = evaluate_coverage(plan, prior_results)
     if prior_report is not None:
