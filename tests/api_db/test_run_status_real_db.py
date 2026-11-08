@@ -88,6 +88,7 @@ class RunStatusRealDbTests(FreshDatabase):
         with self.connect() as writer, self.connect() as reader:
             f = RunFixture(self, writer)
             run = f.run()
+            writer.commit()  # publish the fixture before the reader starts
 
             class CommitAfterAttempts:
                 def __init__(self):
