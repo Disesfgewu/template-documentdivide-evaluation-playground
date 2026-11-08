@@ -6,9 +6,15 @@ cursor bound to the project. Only events of the requested project are
 returned (events without a project are never reachable here). ``attributes``
 and ``error_message`` are not returned: they can carry participant-reported
 text, and the redaction applied at write time is not a reason to expose them
-through a list endpoint. ``message`` is free text; sensitive credentials
-are redacted on retrieval according to the redaction policy while the append-only
-database logs remain unchanged. There is no attempt filter because attempts are not
+through a list endpoint. ``message`` and the structured text fields (``event_name``, ``service``,
+``component``, ``operation_name``, ``status``, ``error_code``) are free text in the
+database, so a row written by an older or imported writer may carry a credential
+or a huge value. Every one of them is redacted on retrieval according to the
+redaction policy and bounded in bytes (SQL ``octet_length`` before the value is
+fetched, and again on the raw and the redacted text in Python): a value over its
+limit is omitted whole, never cut, so no tail of a secret can be left behind, and
+the item lists it in ``omitted_fields``. The append-only database logs remain
+unchanged. There is no attempt filter because attempts are not
 a column of ``log_events``.
 
 Access reuses ``read_gold_trace_and_lineage`` like ``/jobs`` and
@@ -72,17 +78,59 @@ COLUMNS = ("id", "event_id", "occurred_at", "level", "event_name", "message", "t
            "duration_ms", "error_code", "telemetry_origin")
 UUID_COLUMNS = {"event_id", "operation_id", "job_id", "run_id", "question_id"}
 
+# Free-text columns: redacted on read, and bounded in bytes. Longer values are omitted whole.
+MAX_MESSAGE_BYTES = 8192
+MAX_FIELD_BYTES = 256
+BOUNDED_BYTES = {"message": MAX_MESSAGE_BYTES, "event_name": MAX_FIELD_BYTES, "service": MAX_FIELD_BYTES,
+                 "component": MAX_FIELD_BYTES, "operation_name": MAX_FIELD_BYTES, "status": MAX_FIELD_BYTES,
+                 "error_code": MAX_FIELD_BYTES}
+OMITTED_FIELD_MARKER = "[omitted: exceeds maximum length]"
+
+
+def _select_list() -> str:
+    """The column list. A bounded column is fetched as NULL when it is over its byte limit and
+    a flag says so, so an oversize value never leaves the database."""
+    cols = []
+    for name in COLUMNS:
+        if name in BOUNDED_BYTES:
+            cols.append(f"CASE WHEN octet_length({name}) > {BOUNDED_BYTES[name]} THEN NULL ELSE {name} END AS {name}")
+        else:
+            cols.append(name)
+    flags = [f"(octet_length({n}) > {limit}) AS {n}_omitted" for n, limit in BOUNDED_BYTES.items()]
+    return ", ".join(cols + flags)
+
+
+def _bounded_text(name: str, value, sql_omitted: bool):
+    """(value to return, omitted?) for one free-text field."""
+    limit = BOUNDED_BYTES[name]
+    if sql_omitted:
+        return OMITTED_FIELD_MARKER, True
+    if not isinstance(value, str):
+        return value, False
+    if len(value.encode("utf-8", "surrogatepass")) > limit:
+        return OMITTED_FIELD_MARKER, True
+    redacted = redact(value)
+    if len(redacted.encode("utf-8", "surrogatepass")) > limit:  # masking can lengthen a value
+        return OMITTED_FIELD_MARKER, True
+    return redacted, False
+
 
 def _item(row: tuple) -> dict:
     item = {}
+    flags = row[len(COLUMNS):]
+    flag_by_name = dict(zip(BOUNDED_BYTES, flags)) if flags else {}
+    omitted = []
     for name, value in zip(COLUMNS, row):
         if name == "occurred_at":
             value = value.isoformat()
         elif name in UUID_COLUMNS and value is not None:
             value = str(value)
-        elif name == "message" and isinstance(value, str):
-            value = redact(value)
+        elif name in BOUNDED_BYTES:
+            value, was_omitted = _bounded_text(name, value, bool(flag_by_name.get(name)))
+            if was_omitted:
+                omitted.append(name)
         item[name] = value
+    item["omitted_fields"] = omitted
     return item
 
 
@@ -105,7 +153,7 @@ def _list_logs(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.U
     if cursor is not None:
         where.append("id < %s")
         args.append(decode_cursor(cursor, project_id, endpoint="logs", filters=filters, ordering="id_desc"))
-    rows = conn.execute(f"SELECT {', '.join(COLUMNS)} FROM log_events WHERE " + " AND ".join(where) +
+    rows = conn.execute(f"SELECT {_select_list()} FROM log_events WHERE " + " AND ".join(where) +
                         " ORDER BY id DESC LIMIT %s", (*args, limit + 1)).fetchall()
     page = rows[:limit]
     return {"items": [_item(r) for r in page],

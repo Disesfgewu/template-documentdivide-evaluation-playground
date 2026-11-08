@@ -145,6 +145,97 @@ class LogQueryRealDbTests(FreshDatabase):
             row = c.execute("SELECT message FROM log_events WHERE event_id = %s", (evt_id,)).fetchone()
             self.assertEqual(row[0], raw_message)
 
+    def insert_raw(self, c, project, evt_id, **over):
+        """A row written by a legacy or imported writer: no log_event, no write-time masking or bound."""
+        cols = dict(event_name="job.failed", message="m", service="api", component="c", operation_name="op",
+                    status=None, error_code=None)
+        cols.update(over)
+        with c.transaction():
+            c.execute(
+                "INSERT INTO log_events (event_id, schema_version, occurred_at, level, event_name, message, "
+                "service, component, operation_name, status, error_code, project_id, telemetry_origin, "
+                "redaction_policy) VALUES (%s, 1, now(), 'ERROR', %s, %s, %s, %s, %s, %s, %s, %s, 'lab_observed', 'v1')",
+                (evt_id, cols["event_name"], cols["message"], cols["service"], cols["component"],
+                 cols["operation_name"], cols["status"], cols["error_code"], project))
+
+    def test_every_free_text_field_is_redacted_on_read_and_the_raw_row_is_kept(self):
+        p, owner, *_ = self.seed()
+        ids = {}
+        with self.connect() as c:
+            for field in ("service", "component", "operation_name", "status", "error_code"):
+                ids[field] = uuid.uuid4()
+                self.insert_raw(c, p, ids[field], **{field: f"Authorization: Bearer synthetic-{field}-canary"})
+        res = self.get(owner, p, level="ERROR", limit="200")
+        self.assertEqual(res.status_code, 200)
+        for field, evt_id in ids.items():
+            self.assertNotIn(f"synthetic-{field}-canary", res.text)
+            item = next(i for i in res.json()["items"] if i["event_id"] == str(evt_id))
+            self.assertIn("[REDACTED]", item[field])
+            self.assertEqual(item["omitted_fields"], [])
+        with self.connect() as c:  # the append-only rows keep the verbatim text
+            for field, evt_id in ids.items():
+                raw = c.execute(f"SELECT {field} FROM log_events WHERE event_id = %s", (evt_id,)).fetchone()[0]
+                self.assertEqual(raw, f"Authorization: Bearer synthetic-{field}-canary")
+
+    def test_oversize_values_never_leave_the_database_and_are_omitted_whole(self):
+        from lab_api.logs import MAX_MESSAGE_BYTES, OMITTED_FIELD_MARKER, _list_logs
+
+        p, owner, *_ = self.seed()
+        evt = uuid.uuid4()
+        huge = "z" * 4_194_304
+        with self.connect() as c:
+            self.insert_raw(c, p, evt, message=huge + " Bearer secret-tail-canary", service="s" * 1_000_000,
+                            error_code="e" * 100_000)
+            # an exactly-at-the-limit message is returned in full, one byte more is omitted
+            at_limit, over = uuid.uuid4(), uuid.uuid4()
+            self.insert_raw(c, p, at_limit, event_name="job.atlimit", message="y" * MAX_MESSAGE_BYTES)
+            self.insert_raw(c, p, over, event_name="job.overlimit", message="y" * (MAX_MESSAGE_BYTES + 1))
+            self.insert_raw(c, p, uuid.uuid4(), event_name="job.multibyte", message="你" * (MAX_MESSAGE_BYTES // 3 + 1))
+
+            class Spy:
+                """Records every cell the log query fetched, before any Python projection."""
+
+                def __init__(self, conn):
+                    self.conn, self.cells = conn, []
+
+                def __getattr__(self, name):  # transaction(), cursor(), ... pass through untouched
+                    return getattr(self.conn, name)
+
+                def execute(self, sql, params=None):
+                    cursor = self.conn.execute(sql, params) if params is not None else self.conn.execute(sql)
+                    if "FROM log_events" not in str(sql):
+                        return cursor
+                    spy = self
+
+                    class Recording:
+                        def fetchall(self):
+                            rows = cursor.fetchall()
+                            spy.cells.extend(cell for row in rows for cell in row)
+                            return rows
+
+                    return Recording()
+
+            spy = Spy(c)
+            out = _list_logs(spy, owner, p, {"level": "ERROR"}, None, 50)
+        biggest = max(len(cell) if isinstance(cell, str) else 0 for cell in spy.cells)
+        self.assertLessEqual(biggest, max(MAX_MESSAGE_BYTES, 64), "an oversize value was fetched from the database")
+        by_name = {i["event_name"]: i for i in out["items"]}
+        big = next(i for i in out["items"] if i["event_id"] == str(evt))
+        self.assertEqual(sorted(big["omitted_fields"]), ["error_code", "message", "service"])
+        self.assertEqual(big["message"], OMITTED_FIELD_MARKER)
+        self.assertEqual(by_name["job.atlimit"]["message"], "y" * MAX_MESSAGE_BYTES)
+        self.assertEqual(by_name["job.overlimit"]["omitted_fields"], ["message"])
+        self.assertEqual(by_name["job.multibyte"]["omitted_fields"], ["message"])
+
+        res = self.get(owner, p, level="ERROR", limit="200")
+        self.assertEqual(res.status_code, 200)
+        self.assertLess(len(res.content), 64 * 1024)
+        self.assertNotIn("secret-tail-canary", res.text)
+        with self.connect() as c:  # the raw values are still stored in full
+            row = c.execute("SELECT octet_length(message), octet_length(service), octet_length(error_code) "
+                            "FROM log_events WHERE event_id = %s", (evt,)).fetchone()
+        self.assertEqual(row, (4_194_304 + len(" Bearer secret-tail-canary"), 1_000_000, 100_000))
+
     def test_cursor_and_limit_regressions_real_db(self):
         p, owner, *_ = self.seed()
 

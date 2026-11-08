@@ -298,5 +298,127 @@ class HttpLogQueryNegativeTests(unittest.TestCase):
         self.assertEqual(res.json()["error"]["code"], "not_found")
 
 
+
+class FreeTextBoundsTests(unittest.TestCase):
+    """Free-text fields are redacted on read and bounded in bytes, whatever wrote the row."""
+
+    FIELDS = ("service", "component", "operation_name", "status", "error_code")
+
+    def setUp(self):
+        self.auth = patch.object(l, "authorize", return_value=Decision("owner", None))
+        self.auth.start()
+        self.addCleanup(self.auth.stop)
+        app = FastAPI()
+        app.include_router(l.router)
+
+        @app.exception_handler(ApiError)
+        async def handler(request, exc: ApiError):
+            return JSONResponse(status_code=exc.status_code, content={"error": {"code": exc.code, "message": exc.message}})
+
+        self.conn = MagicMock()
+        app.dependency_overrides[l.get_db] = lambda: self.conn
+        app.dependency_overrides[l.get_authenticated_actor] = lambda: uuid.uuid4()
+        self.client = TestClient(app)
+
+    @staticmethod
+    def row(**over):
+        base = dict(id=1, event_id=uuid.uuid4(), occurred_at=T, level="INFO", event_name="job.started", message="m",
+                    trace_id="a" * 32, span_id=None, parent_span_id=None, service="api", component="c",
+                    operation_name="op", operation_id=None, job_id=None, run_id=None, question_id=None,
+                    status="ok", duration_ms=1.5, error_code=None, telemetry_origin="lab_observed")
+        base.update(over)
+        return tuple(base[c] for c in l.COLUMNS)
+
+    def get(self, *rows):
+        self.conn.execute.return_value.fetchall.return_value = list(rows)
+        return self.client.get(f"/api/v1/logs?project_id={P}&limit=1")
+
+    def test_every_free_text_field_is_redacted_in_the_response(self):
+        for field in self.FIELDS:
+            with self.subTest(field=field):
+                canary = f"Authorization: Bearer synthetic-{field}-canary"
+                res = self.get(self.row(**{field: canary}))
+                self.assertEqual(res.status_code, 200)
+                self.assertNotIn(f"synthetic-{field}-canary", res.text)
+                self.assertIn("[REDACTED]", res.json()["items"][0][field])
+                self.assertEqual(res.json()["items"][0]["omitted_fields"], [])
+
+    def test_a_credential_shaped_event_name_is_redacted_too(self):
+        res = self.get(self.row(event_name="key=abcdef.started"))
+        self.assertNotIn("abcdef", res.text)
+
+    def test_the_select_list_bounds_every_free_text_column_in_sql(self):
+        self.get(self.row())
+        sql = self.conn.execute.call_args.args[0]
+        for name, limit in l.BOUNDED_BYTES.items():
+            self.assertIn(f"CASE WHEN octet_length({name}) > {limit} THEN NULL ELSE {name} END AS {name}", sql)
+            self.assertIn(f"(octet_length({name}) > {limit}) AS {name}_omitted", sql)
+
+    def test_an_oversize_value_flagged_by_sql_is_omitted_whole(self):
+        flags = tuple(n == "message" for n in l.BOUNDED_BYTES)
+        res = self.get(self.row(message=None) + flags)
+        item = res.json()["items"][0]
+        self.assertEqual((item["message"], item["omitted_fields"]), (l.OMITTED_FIELD_MARKER, ["message"]))
+
+    def test_a_four_mebibyte_message_cannot_reach_the_response_even_if_sql_returns_it(self):
+        res = self.get(self.row(message="z" * 4_194_304 + " Bearer secret-tail-canary"))
+        self.assertLess(len(res.content), 4096)
+        item = res.json()["items"][0]
+        self.assertEqual((item["message"], item["omitted_fields"]), (l.OMITTED_FIELD_MARKER, ["message"]))
+        self.assertNotIn("secret-tail-canary", res.text)
+
+    def test_the_byte_limit_is_exact_and_a_credential_at_the_edge_is_never_cut(self):
+        limit = l.MAX_MESSAGE_BYTES
+        exact = "x" * limit
+        self.assertEqual(self.get(self.row(message=exact)).json()["items"][0]["message"], exact)
+        # one byte over, with a credential straddling the limit: omitted whole, no tail left behind
+        over = "x" * (limit - 8) + " Bearer secret-edge-canary"
+        res = self.get(self.row(message=over))
+        self.assertEqual(res.json()["items"][0]["omitted_fields"], ["message"])
+        self.assertNotIn("secret-edge-canary", res.text)
+        self.assertNotIn("Bearer", res.text)
+
+    def test_the_limit_counts_bytes_not_characters(self):
+        limit = l.MAX_MESSAGE_BYTES
+        fits = "你" * (limit // 3)
+        self.assertEqual(self.get(self.row(message=fits)).json()["items"][0]["omitted_fields"], [])
+        over_in_bytes = "你" * (limit // 3 + 1)  # fewer characters than the limit, more bytes
+        self.assertLess(len(over_in_bytes), limit)
+        self.assertEqual(self.get(self.row(message=over_in_bytes)).json()["items"][0]["omitted_fields"], ["message"])
+
+    def test_an_oversize_raw_value_is_omitted_even_if_masking_would_make_it_short(self):
+        # raw is far over the limit, but redaction shrinks it to a few bytes: still omitted, as SQL would have
+        raw = "Bearer " + "A" * 20_000
+        self.assertLess(len(l.redact(raw).encode()), l.MAX_MESSAGE_BYTES)
+        item = self.get(self.row(message=raw)).json()["items"][0]
+        self.assertEqual((item["message"], item["omitted_fields"]), (l.OMITTED_FIELD_MARKER, ["message"]))
+
+    def test_masking_that_lengthens_a_value_over_the_limit_omits_it(self):
+        raw = "bearer a " * (l.MAX_MESSAGE_BYTES // 9)  # each 9 bytes become 18 once masked
+        self.assertLessEqual(len(raw.encode()), l.MAX_MESSAGE_BYTES)
+        res = self.get(self.row(message=raw))
+        item = res.json()["items"][0]
+        self.assertEqual((item["message"], item["omitted_fields"]), (l.OMITTED_FIELD_MARKER, ["message"]))
+        self.assertLess(len(res.content), 4096)
+
+    def test_structured_fields_have_their_own_smaller_limit(self):
+        limit = l.MAX_FIELD_BYTES
+        self.assertEqual(self.get(self.row(service="s" * limit)).json()["items"][0]["omitted_fields"], [])
+        item = self.get(self.row(service="s" * (limit + 1), component="c" * 10_000)).json()["items"][0]
+        self.assertEqual(item["omitted_fields"], ["service", "component"])
+        self.assertEqual((item["service"], item["component"]), (l.OMITTED_FIELD_MARKER, l.OMITTED_FIELD_MARKER))
+
+    def test_non_text_and_null_values_are_left_alone(self):
+        item = self.get(self.row(status=None, error_code=None)).json()["items"][0]
+        self.assertEqual((item["status"], item["error_code"], item["omitted_fields"]), (None, None, []))
+        self.assertEqual(item["duration_ms"], 1.5)
+
+    def test_response_size_is_bounded_for_a_full_page_of_oversize_rows(self):
+        self.conn.execute.return_value.fetchall.return_value = [
+            self.row(id=i, message="z" * 1_000_000, service="s" * 100_000) for i in range(3, 0, -1)]
+        res = self.client.get(f"/api/v1/logs?project_id={P}&limit=2")
+        self.assertLess(len(res.content), 8192)
+
+
 if __name__ == "__main__":
     unittest.main()
