@@ -64,9 +64,8 @@ class PublicQuestionTests(unittest.TestCase):
                    "distractors": [3], "gold": {"x": 1}, "visual_object_refs": ["figure_1"], "question_text": "overridden?"}
         item = b.public_question(self.row(payload))
         self.assertEqual(item["language"], "en")
-        self.assertEqual(item["tags"], ["t"])
         self.assertEqual(item["question_text"], "What?")  # the column wins
-        for leaked in ("answer", "facts", "evidence_sets", "distractors", "gold", "visual_object_refs"):
+        for leaked in ("answer", "facts", "evidence_sets", "distractors", "gold", "visual_object_refs", "tags", "question_key", "ordinal", "question_hash", "quota_bucket", "modality_requirements", "reasoning_type"):
             self.assertNotIn(leaked, item)
 
     def test_nested_values_in_public_fields_fail_closed(self):
@@ -76,20 +75,16 @@ class PublicQuestionTests(unittest.TestCase):
                     b.public_question(self.row({name: {"answer": "synthetic-secret"}}))
                 self.assertEqual(ctx.exception.status_code, 500)
                 self.assertNotIn("synthetic-secret", str(ctx.exception))
-        with self.assertRaises(ApiError):
-            b.public_question(self.row({"tags": [{"answer": "synthetic-secret"}]}))
 
     def test_valid_contract_fields_remain_public(self):
-        payload = {"language": "en", "tags": ["tag"], "modality_requirements": ["text"],
-                   "reasoning_type": "value_lookup"}
+        payload = {"language": "en"}
         item = b.public_question(self.row(payload))
         for name, value in payload.items():
             self.assertEqual(item[name], value)
 
     def test_non_object_payload_is_ignored(self):
         for p in (None, [], "x", 3):
-            self.assertEqual(set(b.public_question(self.row(p))), {"id", "question_key", "ordinal", "question_text",
-                                                                    "question_hash", "quota_bucket"})
+            self.assertEqual(set(b.public_question(self.row(p))), {"id", "question_text"})
 
 
 class AuthorizationOrderTests(unittest.TestCase):
@@ -134,7 +129,7 @@ class AuthorizationOrderTests(unittest.TestCase):
         conn.execute.return_value.fetchall.return_value = rows
         with patch.object(b, "authorize", return_value=Decision("owner", None)):
             out = b._list_public_questions(conn, uuid.uuid4(), uuid.uuid4(), "bench", 1, None, 2)
-        self.assertEqual([i["ordinal"] for i in out["items"]], [0, 1])
+        self.assertEqual([i["id"] for i in out["items"]], [str(row[0]) for row in rows[:2]])
         self.assertEqual(b.decode_cursor(out["next_cursor"], BID), 1)
         self.assertEqual(out["status"], "draft")
         # the query asks for limit + 1 rows to know whether there is a next page

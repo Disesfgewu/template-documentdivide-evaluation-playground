@@ -53,10 +53,13 @@ class PublicQuestionsRealDbTests(FreshDatabase):
                                        "facts": ["SECRET-FACT"]}), f.q))
             for i in range(1, n):
                 f.question(f"q_{i + 1}", i)
+            expected_ids = [str(row[0]) for row in c.execute(
+                "SELECT id FROM questions WHERE benchmark_id = %s ORDER BY ordinal", (f.bench,)).fetchall()]
             f.evidence_set(f.q, "s1", [f.e1])
             roles = {r: self.add_member(c, f.p, r) for r in ("participant", "reviewer", "observer")}
             if freeze:
                 f.freeze()
+        f.expected_question_ids = expected_ids
         return f, roles
 
     def get(self, actor, project, path="/api/v1/benchmarks/bench_1/revisions/1/questions", **params):
@@ -74,12 +77,12 @@ class PublicQuestionsRealDbTests(FreshDatabase):
             res = self.get(roles["participant"], f.p, **params)
             self.assertEqual(res.status_code, 200, res.text)
             body = res.json()
-            seen += [i["ordinal"] for i in body["items"]]
+            seen += [i["id"] for i in body["items"]]
             self.assertLessEqual(len(body["items"]), 2)
             cursor = body["next_cursor"]
             if not cursor:
                 break
-        self.assertEqual(seen, [0, 1, 2, 3, 4])
+        self.assertEqual(seen, f.expected_question_ids)
         whole = self.get(roles["participant"], f.p).json()
         self.assertEqual(whole["status"], "frozen")
         self.assertEqual(len(whole["items"]), 5)
