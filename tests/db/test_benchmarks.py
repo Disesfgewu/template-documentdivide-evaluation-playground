@@ -326,7 +326,29 @@ class StateMachineTests(FreshDatabase):
                         "frozen_at = now(), row_version = %s WHERE id = %s",
                         (v + 1, f.bench),
                     )
-            self.assertIn("app role cannot bypass benchmark freeze gate", str(ctx.exception))
+            self.assertIn("only superuser sessions and roles may bypass benchmark freeze gate", str(ctx.exception))
+
+            # Application roles are arbitrary names, not necessarily lab_app_*.
+            other_role = f"worker_{uuid.uuid4().hex[:10]}"
+            with c.transaction():
+                c.execute(f'CREATE ROLE "{other_role}" NOLOGIN')
+            grant_app_privileges(c, other_role)
+
+            def _cleanup_other():
+                with psycopg.connect(self.url, autocommit=True) as cleanup_c:
+                    cleanup_c.execute(f'DROP OWNED BY "{other_role}"')
+                    cleanup_c.execute(f'DROP ROLE IF EXISTS "{other_role}"')
+            self.addCleanup(_cleanup_other)
+            with self.assertRaises(errors.InsufficientPrivilege):
+                with c.transaction():
+                    c.execute(f'SET LOCAL ROLE "{other_role}"')
+                    c.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', 'app bypass', true)", (str(f.a),))
+                    c.execute("SELECT set_config('lab.test_allow_legacy_freeze', 'true', true)")
+                    c.execute(
+                        "UPDATE benchmark_revisions SET status = 'frozen', compliance = 'partial', "
+                        "frozen_at = now(), row_version = %s WHERE id = %s",
+                        (v + 1, f.bench),
+                    )
 
             # Verify rollback
             st, ver, frozen_at = c.execute(

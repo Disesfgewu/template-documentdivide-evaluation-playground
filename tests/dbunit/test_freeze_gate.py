@@ -31,7 +31,8 @@ class MockConnection:
         row_version: int = 6,
         current_compliance: str | None = None,
         resource_id: uuid.UUID | None = None,
-        user: str = "lab_admin",
+        current_superuser: bool = True,
+        session_superuser: bool = True,
         allow_legacy_freeze: bool = False,
     ) -> None:
         self.role = role
@@ -39,7 +40,8 @@ class MockConnection:
         self.row_version = row_version
         self.current_compliance = current_compliance
         self.resource_id = resource_id or uuid.uuid4()
-        self.user = user
+        self.current_superuser = current_superuser
+        self.session_superuser = session_superuser
         self.allow_legacy_freeze = allow_legacy_freeze
         self.executed: list[tuple[str, tuple | None]] = []
 
@@ -61,8 +63,8 @@ class MockConnection:
             to_status = params[0] if params else None
             if to_status == "frozen":
                 if self.allow_legacy_freeze:
-                    if self.user.startswith("lab_app_"):
-                        raise errors.InsufficientPrivilege("app role cannot bypass benchmark freeze gate")
+                    if not self.current_superuser or not self.session_superuser:
+                        raise errors.InsufficientPrivilege("only superuser sessions and roles may bypass benchmark freeze gate")
                 else:
                     raise errors.CheckViolation(
                         f"cannot freeze benchmark revision {self.resource_id}: "
@@ -249,7 +251,7 @@ class BenchmarkFreezeGateUnitTests(unittest.TestCase):
             role="owner",
             from_status="ready_to_freeze",
             row_version=6,
-            user="lab_app_worker",
+            current_superuser=False,
             allow_legacy_freeze=True,
         )
         with self.assertRaises(errors.InsufficientPrivilege) as ctx:
@@ -263,7 +265,7 @@ class BenchmarkFreezeGateUnitTests(unittest.TestCase):
                 self.actor_id,
                 compliance="partial",
             )
-        self.assertIn("app role cannot bypass benchmark freeze gate", str(ctx.exception))
+        self.assertIn("only superuser sessions and roles may bypass benchmark freeze gate", str(ctx.exception))
 
     def test_non_frozen_transitions_unaffected(self) -> None:
         conn = MockConnection(role="maintainer", from_status="planning", row_version=2)

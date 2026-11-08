@@ -7,7 +7,7 @@
 -- human review gates, and verified quotas) is implemented in persistent schema.
 -- No app-accessible bypass.
 -- Legacy frozen fixtures in existing test suites are preserved via a restricted,
--- test-only setting accessible only to non-app database owners.
+-- test-only setting accessible only when both session and effective roles are superusers.
 --
 -- Migration version collision coordination:
 -- Note: PR #74 (issue-11-pgvector-index) concurrently introduces 0010_vectors.sql,
@@ -81,8 +81,9 @@ BEGIN
 
     IF NEW.status = 'frozen' AND OLD.status <> 'frozen' THEN
         IF current_setting('lab.test_allow_legacy_freeze', true) = 'true' THEN
-            IF current_user LIKE 'lab_app_%' OR session_user LIKE 'lab_app_%' THEN
-                RAISE EXCEPTION 'app role cannot bypass benchmark freeze gate'
+            IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = current_user AND rolsuper)
+               OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = session_user AND rolsuper) THEN
+                RAISE EXCEPTION 'only superuser sessions and roles may bypass benchmark freeze gate'
                     USING ERRCODE = 'insufficient_privilege';
             END IF;
 
