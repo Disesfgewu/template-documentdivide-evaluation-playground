@@ -1,6 +1,8 @@
 """Real PostgreSQL tests for GET /api/v1/resources/{id}/lineage (SPEC 8, 10.2, 16.4)."""
 from __future__ import annotations
 
+import base64
+import json
 import os
 import sys
 import tempfile
@@ -19,6 +21,7 @@ for _sub in (_REPO_ROOT, _REPO_ROOT / "services" / "api", _REPO_ROOT / "db", _RE
 from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
 from lab_api.main import create_app
+from lab_db import lineage as lineage_db
 from lab_db.repo import Change, record_change
 
 try:
@@ -182,3 +185,136 @@ class RealLineageEndpointTests(FreshDatabase):
                 self.assertEqual((res.status_code, res.json()["error"]["code"]), (400, "bad_request"))
         repeated = self.client.get(f"/api/v1/resources/{ids[1]}/lineage?depth=1&depth=2", headers=head)
         self.assertEqual(repeated.status_code, 400)
+
+    def test_cursor_tampering_with_preserved_query_hash_rejected_400(self) -> None:
+        """P2 regression: preserving q while altering depth or id returns 400 on real DB."""
+        with self.connect() as conn:
+            project_id, owner = self.make_project(conn, role="owner")
+            ids = self.chain(conn, project_id, owner, 4)
+        head = self.token(owner)
+
+        # Get a legitimate signed cursor from page 1
+        page1 = self.get(head, ids[3], depth=3, limit=1)
+        self.assertEqual(page1.status_code, 200, page1.text)
+        cursor1 = page1.json()["next_cursor"]
+        self.assertIsNotNone(cursor1)
+
+        # Tamper: decode legitimate cursor, keep q, modify d to 10 and id to non-existent UUID
+        raw = base64.urlsafe_b64decode(cursor1 + "=" * (-len(cursor1) % 4))
+        payload = json.loads(raw)
+        payload["d"] = 10
+        payload["id"] = str(uuid.uuid4())
+        tampered_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        tampered_cursor = base64.urlsafe_b64encode(tampered_bytes).rstrip(b"=").decode("ascii")
+
+        res = self.get(head, ids[3], depth=3, limit=1, cursor=tampered_cursor)
+        self.assertEqual(res.status_code, 400, "Tampered cursor with preserved q must return 400")
+        self.assertEqual(res.json()["error"]["code"], "bad_request")
+        self.assertIn("cursor", res.json()["error"]["message"])
+
+        # Also test: tampered signature returns 400
+        payload["s"] = "0" * 32
+        tampered_sig_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        tampered_sig_cursor = base64.urlsafe_b64encode(tampered_sig_bytes).rstrip(b"=").decode("ascii")
+        res_sig = self.get(head, ids[3], depth=3, limit=1, cursor=tampered_sig_cursor)
+        self.assertEqual(res_sig.status_code, 400)
+
+    def test_high_fanout_resource_bounds_database_reads_and_frontier(self) -> None:
+        """P1 regression: high fanout resource enforces bounded reads and frontier."""
+        with self.connect() as conn:
+            project_id, owner = self.make_project(conn, role="owner")
+            root_id = self.resource(conn, project_id, owner, "root")
+            # Create 60 downstream resources derived from root
+            downstream_ids = []
+            for i in range(60):
+                d_id = self.resource(
+                    conn, project_id, owner, f"child_{i}", lineage=[(root_id, "derived_from")]
+                )
+                downstream_ids.append(d_id)
+
+        head = self.token(owner)
+
+        # 1. max_nodes=1 & limit=1 on root downstream:
+        # DB reads and frontier must be bounded; truncated must be True.
+        res = self.get(head, root_id, direction="downstream", max_nodes=1, limit=1)
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertEqual(len(body["nodes"]), 1)
+        self.assertEqual(body["nodes"][0]["id"], str(root_id))
+        self.assertEqual(body["edges"], [])
+        self.assertTrue(body["truncated"])
+        self.assertLessEqual(body["frontier_count"], lineage_db.MAX_FRONTIER)
+        self.assertEqual(body["frontier_count"], 60)
+
+        # 2. Direct walk with max_frontier bound:
+        with self.connect() as conn:
+            walk_res = lineage_db.walk(
+                conn, project_id, root_id, direction="downstream", max_nodes=1, max_frontier=10
+            )
+            self.assertEqual(len(walk_res.frontier), 10)
+            self.assertTrue(walk_res.truncated)
+
+        # 3. Paging over high-fanout graph with limit=20
+        pages = []
+        cursor = None
+        while True:
+            params = {"direction": "downstream", "depth": 1, "limit": 20}
+            if cursor:
+                params["cursor"] = cursor
+            p = self.get(head, root_id, **params)
+            self.assertEqual(p.status_code, 200)
+            p_data = p.json()
+            pages.append(p_data)
+            cursor = p_data["next_cursor"]
+            if cursor is None:
+                break
+        total_nodes = [n["id"] for page in pages for n in page["nodes"]]
+        self.assertEqual(len(total_nodes), 61)  # root + 60 children
+        self.assertEqual(len(pages), 4)  # ceil(61/20) = 4
+
+    def test_multi_operation_duplicate_edges_bounded(self) -> None:
+        """P1 regression: multi-operation duplicate edges between endpoints are strictly bounded."""
+        with self.connect() as conn:
+            project_id, owner = self.make_project(conn, role="owner")
+            parent_id = self.resource(conn, project_id, owner, "parent")
+            child_id = self.resource(
+                conn, project_id, owner, "child", lineage=[(parent_id, "derived_from")]
+            )
+            # Insert 50 additional operations and lineage_edges between parent and child
+            with conn.transaction():
+                for i in range(50):
+                    op_id = uuid.uuid4()
+                    conn.execute(
+                        "INSERT INTO operations (id, project_id, kind, actor_id, status) "
+                        "VALUES (%s, %s, %s, %s, 'succeeded')",
+                        (op_id, project_id, f"test.multi_op_{i}", owner),
+                    )
+                    conn.execute(
+                        "INSERT INTO lineage_edges (project_id, upstream_id, downstream_id, relation, operation_id) "
+                        "VALUES (%s, %s, %s, 'derived_from', %s)",
+                        (project_id, parent_id, child_id, op_id),
+                    )
+
+        head = self.token(owner)
+
+        # 1. Direct walk with max_edges=10 bounds edges read and returned
+        with self.connect() as conn:
+            walk_res = lineage_db.walk(
+                conn, project_id, child_id, direction="upstream", max_edges=10
+            )
+            self.assertEqual(len(walk_res.edges), 10)
+            self.assertTrue(walk_res.truncated)
+
+        # 2. API query with max_edges=10 bounds response edges
+        res = self.get(head, child_id, direction="upstream", max_edges=10)
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertEqual(len(body["edges"]), 10)
+        self.assertTrue(body["truncated"])
+
+        # 3. API query with max_edges=25
+        res25 = self.get(head, child_id, direction="upstream", max_edges=25)
+        self.assertEqual(res25.status_code, 200)
+        body25 = res25.json()
+        self.assertEqual(len(body25["edges"]), 25)
+        self.assertTrue(body25["truncated"])

@@ -46,7 +46,7 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 
 `GET /api/v1/resources/{resource_id}/lineage`（亦有 `/resources/{id}/lineage`）回傳某個資源版本的上游或下游血緣，實際走訪由 `lab_db.lineage.walk` 完成。
 
-- 參數（全部嚴格驗證，錯誤一律 400 `bad_request`，重複或未知的參數也拒絕）：`direction`（`upstream` 預設／`downstream`）、`depth`（1–10，預設 3）、`max_nodes`（1–1000，預設 1000）、`limit`（每頁節點數 1–200，預設 100）、`cursor`。
+- 參數（全部嚴格驗證，錯誤一律 400 `bad_request`，重複或未知的參數也拒絕）：`direction`（`upstream` 預設／`downstream`）、`depth`（1–10，預設 3）、`max_nodes`（1–1000，預設 1000）、`max_edges`（1–10000，預設 2000）、`limit`（每頁節點數 1–200，預設 100）、`cursor`。
 - 權限：`read_gold_trace_and_lineage`，只有 owner、maintainer、reviewer 可讀；participant 與 observer 回 403（血緣可能暴露由 gold 衍生的資源）。資源不存在、或屬於呼叫者不是成員的 project，兩者都回完全相同的 404 `resource not found`，不洩漏存在與否。
-- 回應：`nodes`（`id`、`resource_type`、`logical_id`、`revision`、`content_hash`、`depth`）、`edges`（`upstream_id`、`downstream_id`、`relation`、`operation_id`）、`next_cursor`、`truncated`（深度或節點上限之外還有未走訪的鄰居）、`frontier_count`。
-- 分頁順序固定：節點依（depth, id）排序；每條 edge 只列在其「較遠端」節點所在的那一頁，所以逐頁收集剛好得到每個節點與每條 edge 各一次。`cursor` 是不透明字串並綁定該次查詢（資源、方向、depth、max_nodes），換條件或竄改一律 400；`limit` 可在翻頁之間改變。每一頁都重新走訪，翻頁期間若有新血緣寫入，結果可能不同。
+- 回應：`nodes`（`id`、`resource_type`、`logical_id`、`revision`、`content_hash`、`depth`）、`edges`（`upstream_id`、`downstream_id`、`relation`、`operation_id`）、`next_cursor`、`truncated`（深度、節點、邊數或 frontier 上限之外還有未走訪的鄰居或未回傳的邊）、`frontier_count`（有界未走訪鄰居數，上限 1000）。
+- 資源與分頁語意：資料庫讀取與回應均設強制上限（edge 與 frontier 查詢均帶 SQL `LIMIT`，避免高扇出與同端點多 operation 消耗大量記憶體）。分頁以節點（depth, id）為主序；每條已走訪 edge 列在其較遠端節點所在頁面。若達深度、max_nodes、max_edges 或 max_frontier 上限，`truncated: true`。`cursor` 採 HMAC 簽章並綁定該次查詢（資源、方向、depth、max_nodes、max_edges），竄改任何欄位（包含保留 q 但變更 depth 或 node id）一律 400；`limit` 可在翻頁間改變。

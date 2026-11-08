@@ -186,6 +186,16 @@ class LineageWalkTests(FreshDatabase):
                     with self.assertRaises(ValueError):
                         walk(conn, project_1, res_1, max_nodes=bad_nodes)
 
+            for bad_edges in (0, 10001, -1, True):
+                with self.subTest(max_edges=bad_edges):
+                    with self.assertRaises(ValueError):
+                        walk(conn, project_1, res_1, max_edges=bad_edges)
+
+            for bad_frontier in (0, 1001, -1, False):
+                with self.subTest(max_frontier=bad_frontier):
+                    with self.assertRaises(ValueError):
+                        walk(conn, project_1, res_1, max_frontier=bad_frontier)
+
             with self.assertRaises(ValueError):
                 walk(conn, project_1, res_1, direction="invalid")  # type: ignore[arg-type]
 
@@ -260,6 +270,46 @@ class LineageWalkTests(FreshDatabase):
             )
             self.assertTrue(res_two.truncated)
             self.assertEqual(res_two.frontier, [b2_id, b3_id, a_id])
+
+    def test_max_frontier_truncation(self) -> None:
+        """Walk truncates frontier collection at max_frontier."""
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            b1 = self._create_resource(conn, project_id, actor_id, "mf_b1")
+            b2 = self._create_resource(conn, project_id, actor_id, "mf_b2")
+            b3 = self._create_resource(conn, project_id, actor_id, "mf_b3")
+            d = self._create_resource(
+                conn, project_id, actor_id, "mf_d",
+                lineage=[(b1, "derived_from"), (b2, "derived_from"), (b3, "derived_from")],
+            )
+
+            res = walk(conn, project_id, d, direction="upstream", max_nodes=1, max_frontier=2)
+            self.assertEqual(len(res.frontier), 2)
+            self.assertTrue(res.truncated)
+
+    def test_multi_operation_edges_truncation(self) -> None:
+        """Walk truncates edges collection at max_edges when multiple operations connect nodes."""
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            p = self._create_resource(conn, project_id, actor_id, "mo_parent")
+            c = self._create_resource(conn, project_id, actor_id, "mo_child", lineage=[(p, "derived_from")])
+            with conn.transaction():
+                for i in range(20):
+                    op_id = uuid.uuid4()
+                    conn.execute(
+                        "INSERT INTO operations (id, project_id, kind, actor_id, status) "
+                        "VALUES (%s, %s, %s, %s, 'succeeded')",
+                        (op_id, project_id, f"test.mo_{i}", actor_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO lineage_edges (project_id, upstream_id, downstream_id, relation, operation_id) "
+                        "VALUES (%s, %s, %s, 'derived_from', %s)",
+                        (project_id, p, c, op_id),
+                    )
+
+            res = walk(conn, project_id, c, direction="upstream", max_edges=5)
+            self.assertEqual(len(res.edges), 5)
+            self.assertTrue(res.truncated)
 
 
 if __name__ == "__main__":

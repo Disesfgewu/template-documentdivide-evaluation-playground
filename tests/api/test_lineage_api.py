@@ -50,11 +50,14 @@ def diamond(order=None) -> LineageResult:
 class ParameterTests(unittest.TestCase):
     def test_defaults(self):
         got = q()
-        self.assertEqual((got.direction, got.depth, got.max_nodes, got.limit, got.cursor), ("upstream", 3, 1000, 100, None))
+        self.assertEqual(
+            (got.direction, got.depth, got.max_nodes, got.limit, got.cursor, got.max_edges),
+            ("upstream", 3, 1000, 100, None, 2000),
+        )
 
     def test_valid_values_and_bounds(self):
-        got = q(direction="downstream", depth="10", max_nodes="1", limit="200")
-        self.assertEqual((got.direction, got.depth, got.max_nodes, got.limit), ("downstream", 10, 1, 200))
+        got = q(direction="downstream", depth="10", max_nodes="1", limit="200", max_edges="50")
+        self.assertEqual((got.direction, got.depth, got.max_nodes, got.limit, got.max_edges), ("downstream", 10, 1, 200, 50))
         self.assertEqual(q(depth="1").depth, 1)
 
     def test_invalid_values_are_400_bad_request(self):
@@ -64,6 +67,7 @@ class ParameterTests(unittest.TestCase):
             {"depth": " 2"}, {"depth": ""}, {"depth": "2.0"}, {"depth": "٣"},  # Arabic-indic digit three
             {"depth": "0000001"},  # longer than the digit cap
             {"max_nodes": "0"}, {"max_nodes": "1001"}, {"limit": "0"}, {"limit": "201"}, {"limit": "x"},
+            {"max_edges": "0"}, {"max_edges": "10001"},
             {"cursor": ""}, {"cursor": "a" * 257},
             {"surprise": "1"},
         ]
@@ -86,14 +90,41 @@ class CursorTests(unittest.TestCase):
         cursor = api.encode_cursor(query, 2, uid(7))
         self.assertEqual(api.decode_cursor(query, cursor), (2, str(uid(7))))
 
+    def test_round_trip_with_custom_secret(self):
+        secret = b"custom-secret-key-12345678"
+        query = q(depth="4")
+        cursor = api.encode_cursor(query, 2, uid(7), secret=secret)
+        self.assertEqual(api.decode_cursor(query, cursor, secret=secret), (2, str(uid(7))))
+
     def forge(self, **overrides):
-        payload = {"v": 1, "q": q().binding(), "d": 1, "id": str(uid(3))}
+        binding = q().binding()
+        sig = api._cursor_signature(api.DEFAULT_CURSOR_SECRET, binding, 1, str(uid(3)))
+        payload = {"v": 1, "q": binding, "d": 1, "id": str(uid(3)), "s": sig}
         payload.update(overrides)
         raw = json.dumps(payload, separators=(",", ":")).encode()
         return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
-    def test_a_forged_but_well_formed_cursor_is_accepted_only_with_the_right_binding(self):
+    def test_a_signed_cursor_is_accepted_with_the_right_binding_and_signature(self):
         self.assertEqual(api.decode_cursor(q(), self.forge()), (1, str(uid(3))))
+
+    def test_tampered_cursor_preserving_q_is_refused_with_400(self):
+        """P2 regression: preserving q while modifying depth or node id must fail with 400."""
+        valid = api.encode_cursor(q(), 1, uid(3))
+        raw = base64.urlsafe_b64decode(valid + "=" * (-len(valid) % 4))
+        payload = json.loads(raw)
+        # Preserve q, alter depth and id to unvisited / non-existent target
+        payload["d"] = 10
+        payload["id"] = str(uid(999))
+        tampered = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+        with self.assertRaises(ApiError) as ctx:
+            api.decode_cursor(q(), tampered)
+        self.assertEqual((ctx.exception.status_code, ctx.exception.code), (400, "bad_request"))
+
+    def test_cursor_signed_with_different_secret_is_refused(self):
+        cursor = api.encode_cursor(q(), 1, uid(3), secret=b"secret-one")
+        with self.assertRaises(ApiError) as ctx:
+            api.decode_cursor(q(), cursor, secret=b"secret-two")
+        self.assertEqual((ctx.exception.status_code, ctx.exception.code), (400, "bad_request"))
 
     def test_tampered_or_foreign_cursors_are_400(self):
         base = q()
@@ -111,6 +142,10 @@ class CursorTests(unittest.TestCase):
             "id not a uuid": self.forge(id="zzz"),
             "id not canonical": self.forge(id=str(uid(0xabc)).upper()),
             "extra key": self.forge(extra=1),
+            "missing signature": base64.urlsafe_b64encode(
+                json.dumps({"v": 1, "q": base.binding(), "d": 1, "id": str(uid(3))}).encode()
+            ).rstrip(b"=").decode(),
+            "wrong signature": self.forge(s="0" * 32),
         }
         for label, cursor in cases.items():
             with self.subTest(label):
@@ -120,7 +155,7 @@ class CursorTests(unittest.TestCase):
 
     def test_a_cursor_from_another_depth_or_direction_does_not_transfer(self):
         cursor = api.encode_cursor(q(depth="3"), 1, uid(2))
-        for other in (q(depth="4"), q(direction="downstream"), q(max_nodes="10")):
+        for other in (q(depth="4"), q(direction="downstream"), q(max_nodes="10"), q(max_edges="50")):
             with self.assertRaises(ApiError):
                 api.decode_cursor(other, cursor)
         # The page size is not part of the traversal, so it may change between pages.
@@ -175,11 +210,12 @@ class PagingTests(unittest.TestCase):
         self.assertEqual((page["next_cursor"], page["truncated"], page["frontier_count"]), (None, True, 2))
         self.assertEqual((page["direction"], page["depth_limit"], page["max_nodes"]), ("upstream", 3, 1000))
 
-    def test_a_cursor_past_the_end_gives_an_empty_final_page(self):
+    def test_cursor_referencing_nonexistent_node_in_graph_is_refused(self):
         query = api.LineageQuery(RID, "upstream", 3, 1000, 5, None)
         cursor = api.encode_cursor(query, 2, uid(2 ** 100))
-        page = api.build_page(api.LineageQuery(RID, "upstream", 3, 1000, 5, cursor), diamond())
-        self.assertEqual((page["nodes"], page["edges"], page["next_cursor"]), ([], [], None))
+        with self.assertRaises(ApiError) as ctx:
+            api.build_page(api.LineageQuery(RID, "upstream", 3, 1000, 5, cursor), diamond())
+        self.assertEqual((ctx.exception.status_code, ctx.exception.code), (400, "bad_request"))
 
     def test_a_foreign_cursor_is_refused_by_build_page(self):
         other = api.LineageQuery(RID, "downstream", 3, 1000, 5, None)
@@ -194,6 +230,15 @@ class PagingEdgeCaseTests(unittest.TestCase):
         result = LineageResult(nodes={uid(1): node(0), uid(2): node(1)}, edges=[e, e, e], truncated=False, frontier=[])
         page = api.build_page(api.LineageQuery(RID, "upstream", 3, 1000, 10, None), result)
         self.assertEqual(len(page["edges"]), 1)
+
+    def test_multi_operation_edges_bounded_by_max_edges(self):
+        e1 = edge(2, 1)
+        e2 = EdgeInfo(uid(2), uid(1), "derived_from", uuid.UUID(int=9999))
+        result = LineageResult(nodes={uid(1): node(0), uid(2): node(1)}, edges=[e1, e2], truncated=False, frontier=[])
+        query = api.LineageQuery(RID, "upstream", 3, 1000, 10, None, max_edges=1)
+        page = api.build_page(query, result)
+        self.assertEqual(len(page["edges"]), 1)
+        self.assertTrue(page["truncated"])
 
     def test_order_is_depth_first_even_when_a_deeper_node_has_the_smaller_id(self):
         result = LineageResult(
