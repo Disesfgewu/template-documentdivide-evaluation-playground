@@ -63,7 +63,7 @@ class RunResultsRealDbTests(FreshDatabase):
             # created_at is explicit: now() is the same for everything inside one outer transaction
             old, ev = uuid.uuid4(), uuid.uuid4()
             with c.transaction():
-                c.execute("INSERT INTO evaluations VALUES (%s, %s, %s, 'grader@1', 'published', '2026-01-01T00:00:00Z')",
+                c.execute("INSERT INTO evaluations VALUES (%s, %s, %s, 'grader@1', 'provisional', '2026-01-01T00:00:00Z')",
                           (old, run, f.bench))
                 c.execute("INSERT INTO evaluations VALUES (%s, %s, %s, 'grader@2', 'provisional', '2026-01-02T00:00:00Z')",
                           (ev, run, f.bench))
@@ -88,7 +88,7 @@ class RunResultsRealDbTests(FreshDatabase):
         res = self.get(f.a, run)
         self.assertEqual(res.status_code, 200, res.text)
         body = res.json()
-        self.assertEqual(body["evaluation"]["id"], str(ev))
+        self.assertEqual((body["evaluation"]["id"], body["evaluation"]["status"]), (str(ev), "provisional"))
         metrics = {m["metric_name"]: m for m in body["metrics"]}
         self.assertEqual(metrics["correctness"], {"metric_name": "correctness", "scored": 2, "not_applicable": 0,
                                                    "pending": 0, "error": 0, "mean": 50.0})
