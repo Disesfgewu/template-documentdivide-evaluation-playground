@@ -42,7 +42,7 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
 
-## 血緣查詢（#5 增量，疊在 #73 之上）
+## 血緣查詢（#5 增量）
 
 `GET /api/v1/resources/{resource_id}/lineage`（亦有 `/resources/{id}/lineage`）回傳某個資源版本的上游或下游血緣，實際走訪由 `lab_db.lineage.walk` 完成。
 
