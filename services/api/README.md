@@ -43,3 +43,28 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 - **下載**：授權與 artifact 狀態、大小上限、checksum 都先在資料庫層檢查，才讀取檔案；讀檔受 `max_pdf_bytes` 限制並驗證 sha256。
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
+
+## Implemented runtime OpenAPI
+
+`GET /openapi.json` describes the current document upload, metadata, JSON page
+geometry, original PDF download, public benchmark-question listing and probe
+routes, including compatibility aliases. Swagger at `/docs` can supply the
+signed actor Bearer token. Upload accepts raw PDF or strict multipart; project
+and logical-ID selection, role restrictions, successful replay versus original
+rejection, size/page limits and error statuses are documented per operation.
+Configured limits are captured when OpenAPI is first requested (the normal
+FastAPI schema cache); configure application state before serving requests.
+
+Response schemas describe observed HTTP behavior; they do not replace runtime
+validation or claim every SPEC endpoint exists. In particular, framework 422
+`detail` errors coexist with business `error` envelopes, observer grants are
+not implemented, and page previews on this main-based increment are JSON
+geometry only. The current error handler echoes `X-Request-Id` without the
+versioned contract's length validation and can emit messages longer than its
+2,000-character bound; the runtime schema records those existing gaps instead
+of promising unenforced limits. Multipart MIME/exactly-one-PDF constraints are
+checked by the parser and described in prose because property schemas alone
+cannot express part-header rules. No authentication token or database URL is
+included in the schema. Remaining SPEC routes and strict-error convergence
+remain tracked under #4 and requirement R22; this increment completes neither
+parent acceptance nor release validation.

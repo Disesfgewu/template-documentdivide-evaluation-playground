@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from .benchmarks import router as benchmarks_router
 from .config import Settings, load_settings
 from .documents import ApiError, DownloadAdmissionMiddleware, router as documents_router
+from .openapi import configure_openapi
 from .readiness import Check, default_checks, run_checks
 
 API_VERSION = "0.1.0"
@@ -46,5 +47,7 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
 
     app.include_router(documents_router)
     app.include_router(benchmarks_router)
+
+    configure_openapi(app)
 
     return app
