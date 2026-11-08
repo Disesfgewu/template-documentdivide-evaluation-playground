@@ -117,13 +117,26 @@ class PublicQuestionsRealDbTests(FreshDatabase):
         body = self.get(roles["participant"], f.p, path=path).json()
         self.assertEqual(body["status"], "frozen")
         self.assertEqual(body["question_count"], 5)
-        self.assertEqual(body["quota_counts"], {"general": 5, "cross_page": 0, "chart_table": 0, "confusable": 0})
+        self.assertNotIn("quota_counts", body)
         self.assertEqual((body["n_target"], body["q_min"], body["compliance"]), (20, 2, "partial"))
         self.assertIsNotNone(body["frozen_at"])
         text = json.dumps(body)
         self.assertNotIn("SECRET", text)
         self.assertEqual(self.get(roles["observer"], f.p, path=path).status_code, 403)
         self.assertEqual(self.get(f.a, f.p, path="/api/v1/benchmarks/bench_1/revisions/2").status_code, 404)
+
+    def test_single_question_partial_quota_is_gold_only(self):
+        f, roles = self.seed(n=1)
+        path = "/api/v1/benchmarks/bench_1/revisions/1"
+        participant = self.get(roles["participant"], f.p, path=path)
+        self.assertEqual(participant.status_code, 200)
+        self.assertEqual(participant.json()["question_count"], 1)
+        self.assertNotIn("quota_counts", participant.json())
+        for actor in (f.a, roles["reviewer"]):
+            response = self.get(actor, f.p, path=path)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["quota_counts"],
+                             {"general": 1, "cross_page": 0, "chart_table": 0, "confusable": 0})
 
     def test_detail_of_a_draft_is_hidden_from_participants(self):
         f, roles = self.seed(freeze=False)
@@ -136,6 +149,9 @@ class PublicQuestionsRealDbTests(FreshDatabase):
         f, roles = self.seed()
         self.assertEqual(self.get(f.a, f.p, cursor="garbage").status_code, 400)
         self.assertEqual(self.get(f.a, f.p, cursor="").status_code, 400)
+        cursor = self.get(f.a, f.p, limit="2").json()["next_cursor"]
+        self.assertTrue(cursor)
+        self.assertEqual(self.get(f.a, f.p, cursor=cursor + "!!!!").status_code, 400)
         self.assertEqual(self.get(f.a, f.p, limit="0").status_code, 400)
         self.assertEqual(self.get(f.a, f.p, limit="9999").status_code, 400)
 

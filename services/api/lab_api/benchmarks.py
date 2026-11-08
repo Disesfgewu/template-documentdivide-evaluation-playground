@@ -49,7 +49,10 @@ def decode_cursor(cursor: str, benchmark_id: uuid.UUID) -> int:
     try:
         if len(cursor) > 200:
             raise bad
-        data = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        if base64.urlsafe_b64encode(raw).decode().rstrip("=") != cursor:
+            raise bad
+        data = json.loads(raw)
     except (ValueError, binascii.Error):
         raise bad from None
     if (not isinstance(data, dict) or set(data) != {"b", "o"} or data["b"] != str(benchmark_id)
@@ -86,7 +89,7 @@ def public_question(row: tuple) -> dict:
 def _resolve_visible(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
                      logical_id: str, revision: int) -> tuple:
     """Authorize, then find the benchmark revision this caller may see.
-    Returns the revision row (id, status, n_target, q_min, compliance, frozen_at)."""
+    Returns the revision row and whether the caller can read gold."""
     try:
         decision = authorize(conn, project_id, actor_id, "read_licensed_pdf_and_public_questions")
         if decision.condition == "explicit_grant":
@@ -109,21 +112,24 @@ def _resolve_visible(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: 
     # A caller without gold access gets the same 404 for a draft as for a missing revision.
     if row is None or (row[1] != "frozen" and not sees_unfrozen):
         raise ApiError(404, "not_found", "benchmark revision not found")
-    return row
+    return (*row, sees_unfrozen)
 
 
 def _get_benchmark(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
                    logical_id: str, revision: int) -> dict:
-    bid, status, n_target, q_min, compliance, frozen_at = _resolve_visible(conn, actor_id, project_id, logical_id, revision)
+    bid, status, n_target, q_min, compliance, frozen_at, sees_gold = _resolve_visible(conn, actor_id, project_id, logical_id, revision)
     counts = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
                                (bid,)).fetchall())
     buckets = {k: int(counts.get(k, 0)) for k in QUOTA_BUCKETS}
-    return {
+    result = {
         "benchmark_revision_id": str(bid), "logical_id": logical_id, "revision": revision, "status": status,
         "n_target": n_target, "q_min": q_min, "compliance": compliance,
         "frozen_at": frozen_at.isoformat() if frozen_at else None,
-        "question_count": sum(buckets.values()), "quota_counts": buckets,
+        "question_count": sum(buckets.values()),
     }
+    if sees_gold:
+        result["quota_counts"] = buckets
+    return result
 
 
 def _list_public_questions(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,

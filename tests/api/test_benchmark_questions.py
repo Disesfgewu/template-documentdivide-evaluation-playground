@@ -32,7 +32,7 @@ class CursorTests(unittest.TestCase):
     def test_malformed_cursors_are_refused(self):
         import base64, json
         enc = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode()
-        bad = ["", "!!!", "e30", enc([1]), enc({"b": str(BID)}), enc({"b": str(BID), "o": -1}),
+        bad = ["", "!!!", b.encode_cursor(BID, 7) + "!!!!", b.encode_cursor(BID, 7) + "=", "e30", enc([1]), enc({"b": str(BID)}), enc({"b": str(BID), "o": -1}),
                enc({"b": str(BID), "o": True}), enc({"b": str(BID), "o": 2**31}), enc({"b": str(BID), "o": "1"}),
                enc({"b": str(BID), "o": 1, "x": 1}), "A" * 300]
         for c in bad:
@@ -167,6 +167,16 @@ class BenchmarkDetailTests(unittest.TestCase):
         self.assertEqual(out["frozen_at"], "2026-01-02T00:00:00+00:00")
         self.assertEqual(set(out), {"benchmark_revision_id", "logical_id", "revision", "status", "n_target", "q_min",
                                     "compliance", "frozen_at", "question_count", "quota_counts"})
+
+    def test_participant_does_not_receive_quota_breakdown(self):
+        def auth(conn, project, actor, action):
+            if action == "read_gold_and_generation_context":
+                raise PermissionDenied("participant")
+            return Decision("participant", None)
+        with patch.object(b, "authorize", side_effect=auth):
+            out = b._get_benchmark(self.conn(), uuid.uuid4(), uuid.uuid4(), "bench", 1)
+        self.assertEqual(out["question_count"], 15)
+        self.assertNotIn("quota_counts", out)
 
     def test_draft_has_no_frozen_at_and_is_hidden_from_participants(self):
         with patch.object(b, "authorize", return_value=Decision("owner", None)):
