@@ -4,7 +4,17 @@
   - 每個檔案和它在 `schema_migrations` 的紀錄（版本、sha256、deployment）放在同一個交易，失敗時整個回滾。
   - 已套用的檔案若內容被改動，migration 會拒絕執行。
   - 用 advisory lock 確保同時只有一個 migrator。
-- 執行 migration：`LAB_MIGRATION_DATABASE_URL=… PYTHONPATH=db python -m lab_db.migrate --deployment <id>`。連線字串只從環境變數讀取，不放在命令列。
+- **PostgreSQL 用 Docker 執行，schema 由 Alembic 套用。**
+  - 啟動資料庫：`docker compose -f deploy/compose.dev.yml up -d --wait`（PostgreSQL 17 + pgvector，映像以 digest 鎖定）。
+  - 在容器裡套用：`docker compose -f deploy/compose.dev.yml --profile tools run --rm migrate`（建置 `deploy/Dockerfile.migrate`：只含 Alembic 與 `lab_db`，非 root；預設 `-x deployment=local upgrade head`，要換 deployment id 可改成 `run --rm migrate -x deployment=<id> upgrade head`）。
+  - 在本機套用：`pip install -r db/requirements.lock`，然後 `cd db && LAB_MIGRATION_DATABASE_URL=postgresql://… alembic -x deployment=<id> upgrade head`（`alembic.ini` 用 `%(here)s`，從任何目錄都能執行）。等價的舊入口 `PYTHONPATH=db python -m lab_db.migrate --deployment <id>` 仍可用。
+  - 連線字串只從環境變數 `LAB_MIGRATION_DATABASE_URL` 讀取（migration 角色），不放在設定檔或命令列；必須指定 deployment id。
+- **Alembic 的用法與限制。**
+  - SQL 檔案仍是唯一的事實來源（`lab_db/migrations/NNNN_*.sql`）。每個檔案在 `lab_db/schema/versions/` 有一個薄的 revision（`NNNN_*.py`），revision id 就是四位數版本號，鏈必須是單一線性鏈且與 SQL 檔一一對應（`tests/dbunit/test_alembic_schema.py` 驗證）。
+  - 每個 migration 仍是各自的交易（連同 `schema_migrations` 的紀錄與 `alembic_version` 的更新），失敗整個回滾；用 advisory lock 保證同時只有一個 migrator；已套用的 SQL 若 checksum 改變，或資料庫比程式碼新，都會拒絕。
+  - **只能向前**：沒有 downgrade（`alembic downgrade` 會失敗且不改資料），回復請用備份。不支援 `--sql` 離線輸出（無法驗證 checksum）。
+  - **既有資料庫**：只有 `schema_migrations`、沒有 `alembic_version` 的資料庫（舊 runner 套用的）會先驗證 checksum，再標記到目前版本，不會重跑任何 migration。
+  - **新增 migration**：新增下一號的 SQL 檔，並在 `lab_db/schema/versions/` 新增對應的 revision（複製前一個、改 `revision`、`down_revision` 與檔名）。版本號必須連續且不可跳號；兩個 PR 同時新增同一號時，後合併的要改成下一號。
 - `0001_core`：projects、actors、project_members（角色 enum）、resource_versions、operations、lineage_edges、artifacts、idempotency_keys、audit_events、outbox_events。
   - 跨專案的關聯用 `(project_id, id)` 複合外鍵阻擋；刪除一律 RESTRICT，不用 cascade。
   - resource_versions 由 trigger 保護：
