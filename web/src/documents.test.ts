@@ -215,6 +215,12 @@ describe("parseUploadResponse strict validation (fail closed)", () => {
     expect(parseUploadResponse({ ...validBase, logical_id: "" }, VALID_UUID_2)).toBeNull();
     expect(parseUploadResponse({ ...validBase, logical_id: "a".repeat(129) }, VALID_UUID_2)).toBeNull();
   });
+
+  it("counts logical IDs in Unicode code points like the API", () => {
+    const accepted = "😀".repeat(128);
+    expect(parseUploadResponse({ ...validBase, logical_id: accepted }, VALID_UUID_2)?.logicalId).toBe(accepted);
+    expect(parseUploadResponse({ ...validBase, logical_id: "😀".repeat(129) }, VALID_UUID_2)).toBeNull();
+  });
 });
 
 describe("uploadDocument", () => {

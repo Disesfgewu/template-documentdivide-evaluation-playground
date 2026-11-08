@@ -176,8 +176,8 @@ export function parseUploadResponse(
     return null;
   }
 
-  // 4. Logical ID check (1-128 chars)
-  if (!logicalId || logicalId.length < 1 || logicalId.length > 128) {
+  // The API counts Unicode code points, not JavaScript UTF-16 code units.
+  if (!logicalId || Array.from(logicalId).length > 128) {
     return null;
   }
 
