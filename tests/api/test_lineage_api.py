@@ -266,3 +266,37 @@ class PagingEdgeCaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CursorAdmissionTests(unittest.TestCase):
+    def test_invalid_cursor_is_rejected_before_graph_walk(self):
+        from unittest.mock import MagicMock, patch
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (uid(99),)
+        cursors = ["invalid!", api.encode_cursor(q(), 1, uid(2), secret=b"wrong-secret"),
+                   api.encode_cursor(q(direction="downstream"), 1, uid(2))]
+        for cursor in cursors:
+            with self.subTest(cursor=cursor), patch.object(api, "authorize"), \
+                 patch.object(api.lineage_db, "walk", side_effect=RuntimeError("walk invoked")) as walk:
+                with self.assertRaises(ApiError) as raised:
+                    api._lineage_core(conn, uid(9), q(cursor=cursor))
+                self.assertEqual(raised.exception.status_code, 400)
+                walk.assert_not_called()
+
+    def test_http_invalid_cursor_does_not_walk(self):
+        from unittest.mock import MagicMock, patch
+        from fastapi.testclient import TestClient
+        from lab_api.config import Settings
+        from lab_api.main import create_app
+        from lab_api.documents import get_db, get_authenticated_actor
+        settings = Settings(env="test", provider_mode="mock", database_url="postgresql://lab:test@localhost/lab",
+                            artifact_root="/tmp/lineage-cursor-tests", auth_secret="cursor-test-secret-32-characters-long")
+        app = create_app(settings, checks={})
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = (uid(99),)
+        app.dependency_overrides[get_db] = lambda: conn
+        app.dependency_overrides[get_authenticated_actor] = lambda: uid(9)
+        with patch.object(api, "authorize"), patch.object(api.lineage_db, "walk") as walk:
+            response = TestClient(app).get(f"/api/v1/resources/{RID}/lineage?cursor=invalid!")
+        self.assertEqual(response.status_code, 400)
+        walk.assert_not_called()

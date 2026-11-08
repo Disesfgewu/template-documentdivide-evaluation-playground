@@ -259,6 +259,10 @@ def _lineage_core(
         raise ApiError(404, "not_found", "resource not found")
     except PermissionDenied as exc:
         raise ApiError(403, "permission_denied", str(exc))
+    # Validate format, signature and query binding only after authorization,
+    # but before paying for graph traversal. Membership is still checked by build_page.
+    if query.cursor is not None:
+        decode_cursor(query, query.cursor, secret)
     try:
         result = lineage_db.walk(
             conn,
@@ -271,8 +275,7 @@ def _lineage_core(
         )
     except LookupError:
         raise ApiError(404, "not_found", "resource not found")
-    # The cursor is checked after authorization so an unauthorized caller
-    # learns nothing, and before any data is returned.
+    # The authenticated cursor must also name a node in this walk result.
     page = build_page(query, result, secret=secret)
     page["project_id"] = str(project_id)
     return page

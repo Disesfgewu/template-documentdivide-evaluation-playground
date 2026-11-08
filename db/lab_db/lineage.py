@@ -118,7 +118,9 @@ def _fetch_boundary_frontier(
     """Fetch unvisited neighbor node IDs directly adjacent to source_ids.
 
     Uses GROUP BY in SQL to deduplicate multi-operation edges between endpoints
-    and LIMIT to strictly bound database read volume. Returns (frontier_ids, has_more).
+    and LIMIT to bound returned rows and retained frontier memory. PostgreSQL may
+    scan/aggregate additional rows before LIMIT; latency requires a measured DB
+    profile. Returns (frontier_ids, has_more).
     """
     if not source_ids or limit <= 0:
         return [], False
@@ -168,7 +170,9 @@ def walk(
 
     Each reachable resource version is expanded at most once in breadth-first
     order so DAG diamonds record shortest distance and cycles terminate cleanly.
-    Traversal, database reads, and frontier collection are strictly bounded.
+    Traversal output, retained nodes/edges and frontier memory are bounded.
+    SQL scans/aggregation work are not bounded by the returned-row LIMIT;
+    query latency remains subject to database statement timeout and profiling.
     """
     _validate_args(direction, max_depth, max_nodes, max_edges, max_frontier)
 
