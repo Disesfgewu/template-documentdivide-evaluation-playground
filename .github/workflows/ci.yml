@@ -46,6 +46,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           LAB_TEST_REPORT_DIR: ${{ runner.temp }}/test-reports
           LAB_PDF_FIXTURE_REPORT_DIR: ${{ runner.temp }}/pdf-fixture-evidence
+          LAB_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/browser-acceptance-evidence
         if: github.event_name == 'pull_request'
         run: scripts/check.sh --scope auto --base "origin/${{ github.base_ref }}"
       - name: Full checks (main / manual)
@@ -54,6 +55,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           LAB_TEST_REPORT_DIR: ${{ runner.temp }}/test-reports
           LAB_PDF_FIXTURE_REPORT_DIR: ${{ runner.temp }}/pdf-fixture-evidence
+          LAB_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/browser-acceptance-evidence
         if: github.event_name != 'pull_request'
         run: scripts/check.sh --scope all
       - name: Upload per-test reports (traceability execution evidence)
@@ -63,6 +65,14 @@ jobs:
           name: test-reports
           path: ${{ runner.temp }}/test-reports/
           if-no-files-found: warn
+          retention-days: 90
+      - name: Upload browser acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-acceptance-evidence
+          path: ${{ runner.temp }}/browser-acceptance-evidence/
+          if-no-files-found: ignore
           retention-days: 90
       - name: Upload synthetic PDFium fixture evidence
         if: always()

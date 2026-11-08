@@ -77,6 +77,31 @@ def find_browser_executable() -> str | None:
     return None
 
 
+def ensure_web_dist_fresh(repo_root: Path) -> Path:
+    web_dir = repo_root / "web"
+    dist_index = web_dir / "dist" / "index.html"
+    if not dist_index.exists():
+        subprocess.run(["npm", "run", "build"], cwd=web_dir, check=True)
+        return web_dir / "dist"
+
+    dist_mtime = dist_index.stat().st_mtime
+    needs_build = False
+    for p in (web_dir / "src").rglob("*"):
+        if p.is_file() and p.stat().st_mtime > dist_mtime:
+            needs_build = True
+            break
+    if not needs_build:
+        for extra in ("index.html", "vite.config.ts", "package.json"):
+            f = web_dir / extra
+            if f.exists() and f.stat().st_mtime > dist_mtime:
+                needs_build = True
+                break
+
+    if needs_build:
+        subprocess.run(["npm", "run", "build"], cwd=web_dir, check=True)
+    return web_dir / "dist"
+
+
 @unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
 class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
     """Real headless browser acceptance test suite against real FastAPI and PostgreSQL."""
@@ -146,10 +171,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
             settings = load_settings()
 
         app = create_app(settings=settings, checks={})
-        web_dist = _REPO_ROOT / "web" / "dist"
-        if not web_dist.exists() or not (web_dist / "index.html").exists():
-            subprocess.run(["npm", "run", "build"], cwd=_REPO_ROOT / "web", check=True)
-
+        web_dist = ensure_web_dist_fresh(_REPO_ROOT)
         app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="static")
 
         port = find_free_port()
@@ -166,6 +188,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
 
         download_tmp = Path(self.tmp.name) / "downloads"
         download_tmp.mkdir(parents=True, exist_ok=True)
+        evidence_tmp = Path(self.tmp.name) / "evidence.json"
 
         # Pass sensitive parameters via stdin JSON (no tokens in process arguments)
         payload = {
@@ -179,6 +202,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
             "otherToken": other_token,
             "browserPath": self.browser_bin,
             "downloadDir": str(download_tmp),
+            "evidenceOutputPath": str(evidence_tmp),
         }
 
         cmd = [
@@ -230,3 +254,34 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
         stored_bytes = self.store.open(art["object_key"], expected_size=self.f01_size)
         self.assertEqual(hashlib.sha256(stored_bytes).hexdigest(), self.f01_sha256)
         self.assertEqual(stored_bytes, self.f01_21)
+
+        # Read machine-readable evidence, attach DB verification metrics, and save to target report paths
+        if evidence_tmp.exists():
+            evidence = json.loads(evidence_tmp.read_text(encoding="utf-8"))
+        else:
+            # Fallback parse from stdout
+            out = res.stdout
+            start = out.find("JSON_EVIDENCE_START") + len("JSON_EVIDENCE_START")
+            end = out.find("JSON_EVIDENCE_END")
+            evidence = json.loads(out[start:end].strip())
+
+        evidence["actual"]["database"] = {
+            "document_versions_count": len(versions),
+            "pages_count": page_cnt,
+            "artifact_state": art["state"],
+            "artifact_sha256": art["sha256"],
+        }
+        # Mark final acceptance verdict passed only after all assertions succeeded
+        evidence["status"] = "passed"
+
+        # Write to report directories
+        target_dirs = []
+        if os.environ.get("LAB_TEST_REPORT_DIR"):
+            target_dirs.append(Path(os.environ["LAB_TEST_REPORT_DIR"]))
+        if os.environ.get("LAB_BROWSER_EVIDENCE_DIR"):
+            target_dirs.append(Path(os.environ["LAB_BROWSER_EVIDENCE_DIR"]))
+
+        evidence_json = json.dumps(evidence, indent=2)
+        for d in target_dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "document_ui_browser_evidence.json").write_text(evidence_json, encoding="utf-8")
