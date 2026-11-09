@@ -1,0 +1,7 @@
+# Only what the migrate image needs; keeps secrets, .git and the rest out of the build context.
+*
+!db/requirements.lock
+!db/alembic.ini
+!db/lab_db
+**/__pycache__
+**/*.pyc
