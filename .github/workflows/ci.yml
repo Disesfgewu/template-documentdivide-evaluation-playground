@@ -159,5 +159,17 @@ jobs:
     name: e2e-parse (synthetic, manual)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.e2e }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start PostgreSQL + pgvector (deploy/compose.dev.yml)
+        run: docker compose -f deploy/compose.dev.yml up -d --wait
+      - name: Throwaway venv with the repo locks and the pinned package
+        run: |
+          python -m venv "$RUNNER_TEMP/e2e-venv"
+          "$RUNNER_TEMP/e2e-venv/bin/pip" install -r services/api/requirements.lock -r services/parser/requirements.lock -r contracts/requirements.lock -r db/requirements.lock
+          "$RUNNER_TEMP/e2e-venv/bin/pip" install "unstructured[pdf]==0.27.36"
+          "$RUNNER_TEMP/e2e-venv/bin/pip" freeze > "$RUNNER_TEMP/e2e-freeze.txt"
