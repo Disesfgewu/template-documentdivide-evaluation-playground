@@ -22,6 +22,53 @@ from lab_parser.isolation import InspectionError, ProcessLimits, inspect_geometr
 from tests.parser.pdfgen import build_pdf
 
 
+def crafted(kids, count, distinct=True):
+    """Hand-built PDF with a correct xref. kids pages listed under /Kids, claimed /Count."""
+    objs = {}
+    page_ids = list(range(4, 4 + (kids if distinct else 1)))
+    for i in page_ids:
+        objs[i] = f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {100+i} 100] >>"
+    refs = [page_ids[j if distinct else 0] for j in range(kids)]
+    objs[1] = "<< /Type /Catalog /Pages 2 0 R >>"
+    objs[2] = "<< /Type /Pages /Kids [" + " ".join(f"{r} 0 R" for r in refs) + f"] /Count {count} >>"
+    out = bytearray(b"%PDF-1.4\n"); offs = {}
+    for n in sorted(objs):
+        offs[n] = len(out); out += f"{n} 0 obj\n{objs[n]}\nendobj\n".encode()
+    size = max(objs) + 1; x = len(out)
+    out += f"xref\n0 {size}\n0000000000 65535 f \n".encode()
+    for n in range(1, size):
+        out += (f"{offs[n]:010d} 00000 n \n" if n in offs else "0000000000 65535 f \n").encode()
+    out += f"trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n".encode()
+    return bytes(out)
+
+
+class PageCountDisagreementTests(unittest.TestCase):
+    """pypdf trusts /Kids, PDFium trusts /Count: a lying /Count must not yield geometry."""
+
+    CASES = {"count_below_kids": (3, 1, True), "count_above_kids": (3, 99, True),
+             "one_page_listed_three_times": (3, 1, False)}
+
+    def test_fixtures_really_differ_between_pypdf_and_pdfium(self):
+        import pypdfium2
+        from pypdf import PdfReader
+        for name, (kids, count, distinct) in self.CASES.items():
+            with self.subTest(name=name):
+                data = crafted(kids, count, distinct)
+                self.assertEqual(len(PdfReader(io.BytesIO(data)).pages), 3)
+                self.assertNotEqual(len(pypdfium2.PdfDocument(data)), 3)
+
+    def test_disagreeing_page_counts_are_rejected_in_the_isolated_child(self):
+        for name, (kids, count, distinct) in self.CASES.items():
+            with self.subTest(name=name), self.assertRaises(InspectionError) as caught:
+                inspect_geometry(crafted(kids, count, distinct))
+            self.assertEqual(caught.exception.code, "invalid_pdf")
+
+    def test_honest_page_count_is_still_accepted(self):
+        result = inspect_geometry(crafted(3, 3, True))
+        self.assertEqual(result.page_count, 3)
+        self.assertEqual([p.page_index for p in result.pages], [0, 1, 2])
+
+
 class IsolatedGeometryTests(unittest.TestCase):
     def setUp(self):
         self.pdf = build_pdf([{"mediabox": (0, 0, 200, 100)},
@@ -193,6 +240,11 @@ class IsolatedGeometryTests(unittest.TestCase):
         (root / "pypdf.py").write_text(
             "class PdfReader:\n"
             " def __init__(self, *a, **kw): self.is_encrypted=False; self.pages=[1]\n")
+        (root / "pypdfium2.py").write_text(  # the renderer's page count, consistent with the fake reader
+            "class PdfDocument:\n"
+            " def __init__(self, data): pass\n"
+            " def __len__(self): return 1\n"
+            " def close(self): pass\n")
         (package / "pages.py").write_text("def extract_pages(data):\n" + behavior)
         return child
 

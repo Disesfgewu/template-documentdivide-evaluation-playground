@@ -72,3 +72,19 @@ explicit fakes; they are not real-parser quality or performance evidence. Tests
 also cover cancellation, wall expiry, strict result validation, diagnostic
 secrecy, environment/FD exclusion and temporary cleanup. Runtime dependencies
 are unchanged; the existing pinned pypdf environment is used.
+
+## Page-count agreement with the renderer
+
+The child counts pages with pypdf (which follows `/Kids`) and then opens the same
+bytes with PDFium (which trusts `/Count`). A file whose `/Count` disagrees with
+`/Kids` gives different counts (for example three pages for pypdf and one or
+ninety-nine for PDFium), so geometry from pypdf would describe pages the
+renderer does not see. The child therefore requires the pypdf page count, the
+number of extracted geometry rows and the PDFium page count to be equal, and
+otherwise reports `invalid_pdf` (no geometry is published, no new error code).
+The check opens the bytes with PDFium inside the same resource-limited process.
+A PDF that pypdf accepts but PDFium cannot open is rejected as `invalid_pdf` too.
+Regressions use hand-built PDFs with a correct xref (`/Count` below and above
+`/Kids`, one page object listed three times) and an honest control. Related
+Issue #7. The non-zero exit versus signal distinction (resource kills) is
+unchanged and still reported as `child_failed`.

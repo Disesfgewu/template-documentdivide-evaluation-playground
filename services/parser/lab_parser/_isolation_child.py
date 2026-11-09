@@ -50,6 +50,17 @@ def main() -> int:
                 result = {"error": "page_limit_exceeded"}
             else:
                 pages = extract_pages(data)
+                # The renderer (PDFium) is the other reader of these bytes. A /Count that
+                # disagrees with /Kids gives pypdf and PDFium different page counts, so the
+                # geometry would describe pages the renderer does not see. Fail closed.
+                import pypdfium2
+                document = pypdfium2.PdfDocument(data)
+                try:
+                    renderer_pages = len(document)
+                finally:
+                    document.close()
+                if not len(reader.pages) == len(pages) == renderer_pages:
+                    raise ValueError("page_count_disagreement")
                 result = {
                     "schema_version": "isolated-geometry-1",
                     "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
