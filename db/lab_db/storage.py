@@ -23,7 +23,7 @@ Threat model and operational limits:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import errno
 import hashlib
 import os
@@ -31,6 +31,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+from typing import Callable
 import uuid
 
 import psycopg
@@ -44,12 +45,27 @@ class StorageCorruption(ArtifactError):
     """Raised when stored artifact bytes do not match their content-addressed SHA-256."""
 
 
+class PublicationDurabilityUnknown(ArtifactError):
+    """The final object exists, but syncing its directory failed.
+
+    Preserve the object: the caller must reconcile/retry by content identity,
+    rather than treating this as proof that publication did not occur.
+    """
+
+
+class StreamTooLarge(ArtifactError):
+    """The streamed source is longer than ``max_bytes`` (nothing is published)."""
+
+
 @dataclass(frozen=True)
 class StoredObject:
     object_key: str
     object_version: str
     sha256: str
     size_bytes: int
+    # True when ``put_stream`` found the identical, verified object already stored.
+    # Not part of equality: two stores of the same bytes are the same object.
+    reused_existing: bool = field(default=False, compare=False)
 
 
 def _dir_id(fd: int) -> tuple[int, int]:
@@ -442,17 +458,10 @@ class LocalArtifactStore:
                 f"got ({actual_sha256}, {actual_size})"
             )
 
-    def put(self, data: bytes) -> StoredObject:
-        if not isinstance(data, bytes):
-            raise TypeError("data must be bytes")
-        digest = hashlib.sha256(data).hexdigest()
-        size_bytes = len(data)
-        object_key = f"sha256/{digest[:2]}/{digest}"
-        prefix = digest[:2]
-        target, _ = self._resolve_key(object_key)
-
+    def _open_root_checked(self) -> int:
+        """Open the store root without following symlinks; failures are StorageCorruption."""
         try:
-            root_fd = _open_root_no_follow(self.root)
+            return _open_root_no_follow(self.root)
         except ValueError as e:
             raise StorageCorruption(
                 f"root directory traversal failed or contains symlink: {e}"
@@ -463,6 +472,17 @@ class LocalArtifactStore:
                     f"root directory is invalid or symlink: {self.root!r}"
                 ) from e
             raise
+
+    def put(self, data: bytes) -> StoredObject:
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        digest = hashlib.sha256(data).hexdigest()
+        size_bytes = len(data)
+        object_key = f"sha256/{digest[:2]}/{digest}"
+        prefix = digest[:2]
+        target, _ = self._resolve_key(object_key)
+
+        root_fd = self._open_root_checked()
         root_id = _dir_id(root_fd)
         try:
             sha256_fd = _ensure_dir_no_follow(root_fd, "sha256", "sha256")
@@ -598,6 +618,169 @@ class LocalArtifactStore:
                 raise
         finally:
             os.close(prefix_fd)
+
+    def put_stream(
+        self,
+        source_fd: int,
+        *,
+        max_bytes: int,
+        inspect: Callable[[int, str, int], None] | None = None,
+    ) -> StoredObject:
+        """Publish the rest of an open file without holding it in memory.
+
+        The caller opens the source (``O_NOFOLLOW``, regular file) and owns the
+        descriptor. At most ``max_bytes + 1`` bytes are read; a longer source
+        raises ``StreamTooLarge`` and nothing is published. The bytes are
+        staged privately (0600) under ``sha256/``, hashed as they are written
+        and fsynced. ``inspect(stage_fd, sha256, size_bytes)`` may reject the
+        content by raising; it runs before anything is published and may read
+        the staged descriptor. Immediately before publication the staged
+        descriptor and its directory entry are checked again (same inode, one
+        link, mode, size and SHA-256), so a swapped or rewritten stage file
+        fails closed with ``StorageCorruption``. Publication, the check of an
+        already stored identical object and the final canonical-path check are
+        the same as ``put``. The stage file is removed on every path; a stage
+        file left by a crash is never published.
+        """
+        if not isinstance(source_fd, int) or isinstance(source_fd, bool) or source_fd < 0:
+            raise ValueError("source_fd must be an open file descriptor")
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
+            raise ValueError("max_bytes must be a non-negative integer")
+
+        root_fd = self._open_root_checked()
+        root_id = _dir_id(root_fd)
+        try:
+            sha256_fd = _ensure_dir_no_follow(root_fd, "sha256", "sha256")
+            sha256_id = _dir_id(sha256_fd)
+        finally:
+            os.close(root_fd)
+
+        stage_name = None
+        stage_fd = -1
+        prefix_fd = -1
+        durability_error = None
+        try:
+            for _ in range(128):
+                candidate = f".stage-{uuid.uuid4().hex}"
+                try:
+                    stage_fd = os.open(
+                        candidate,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        mode=0o600,
+                        dir_fd=sha256_fd,
+                    )
+                    stage_name = candidate
+                    break
+                except FileExistsError:
+                    continue
+                except OSError as e:
+                    if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise StorageCorruption("sha256 directory descriptor is invalid or symlink") from e
+                    raise
+            if stage_name is None:
+                raise StorageCorruption("failed to create staging file in store")
+
+            hasher = hashlib.sha256()
+            size_bytes = 0
+            while size_bytes <= max_bytes:
+                chunk = os.read(source_fd, min(65536, max_bytes + 1 - size_bytes))
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(stage_fd, view)
+                    if written <= 0:
+                        raise StorageCorruption("staging write made no progress")
+                    view = view[written:]
+                hasher.update(chunk)
+                size_bytes += len(chunk)
+            if size_bytes > max_bytes:
+                raise StreamTooLarge(f"source is longer than {max_bytes} bytes")
+            os.fsync(stage_fd)
+            digest = hasher.hexdigest()
+
+            if inspect is not None:
+                inspect(stage_fd, digest, size_bytes)
+
+            self._verify_stage(sha256_fd, stage_name, stage_fd, digest, size_bytes)
+
+            object_key = f"sha256/{digest[:2]}/{digest}"
+            prefix = digest[:2]
+            self._resolve_key(object_key)
+            prefix_fd = _ensure_dir_no_follow(sha256_fd, prefix, "prefix")
+            prefix_id = _dir_id(prefix_fd)
+
+            reused = False
+            try:
+                os.link(stage_name, digest, src_dir_fd=sha256_fd, dst_dir_fd=prefix_fd, follow_symlinks=False)
+            except FileExistsError:
+                reused = True
+            if reused:
+                self._verify_existing_in_prefix(prefix_fd, object_key, digest, size_bytes)
+            else:
+                try:
+                    os.fsync(prefix_fd)
+                except OSError as exc:
+                    durability_error = PublicationDurabilityUnknown("publication_durability_unknown")
+                    raise durability_error from exc
+            self._verify_canonical_completion(
+                object_key, prefix, digest, size_bytes, root_id, sha256_id, prefix_id
+            )
+            return StoredObject(
+                object_key=object_key,
+                object_version="1",
+                sha256=digest,
+                size_bytes=size_bytes,
+                reused_existing=reused,
+            )
+        finally:
+            try:
+                if stage_name is not None:
+                    try:
+                        os.unlink(stage_name, dir_fd=sha256_fd)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as e:
+                        if durability_error is not None:
+                            durability_error.add_note("staging cleanup also failed")
+                        else:
+                            raise StorageCorruption("failed to remove staging file") from e
+            finally:
+                for fd in (stage_fd, prefix_fd, sha256_fd):
+                    if fd >= 0:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+
+    @staticmethod
+    def _verify_stage(sha256_fd: int, stage_name: str, stage_fd: int, digest: str, size_bytes: int) -> None:
+        try:
+            fst = os.fstat(stage_fd)
+            dst = os.stat(stage_name, dir_fd=sha256_fd, follow_symlinks=False)
+        except OSError as e:
+            raise StorageCorruption("staging file is missing or unreadable before publication") from e
+        if (
+            (fst.st_dev, fst.st_ino) != (dst.st_dev, dst.st_ino)
+            or not stat.S_ISREG(dst.st_mode)
+            or dst.st_nlink != 1
+            or stat.S_IMODE(dst.st_mode) != 0o600
+            or dst.st_size != size_bytes
+        ):
+            raise StorageCorruption("staging file was replaced or modified before publication")
+        reader = -1
+        try:
+            reader = os.dup(stage_fd)
+            os.lseek(reader, 0, os.SEEK_SET)
+            with os.fdopen(reader, "rb", closefd=False) as f:
+                actual, actual_size = _bounded_file_hash(f, size_bytes)
+        except OSError as e:
+            raise StorageCorruption("staging file is unreadable before publication") from e
+        finally:
+            if reader >= 0:
+                os.close(reader)
+        if actual != digest or actual_size != size_bytes:
+            raise StorageCorruption("staging file content changed before publication")
 
     def open(
         self,

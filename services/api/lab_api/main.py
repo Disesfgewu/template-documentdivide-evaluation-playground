@@ -7,8 +7,18 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .audit import router as audit_router
+from .benchmarks import router as benchmarks_router
 from .config import Settings, load_settings
 from .documents import ApiError, DownloadAdmissionMiddleware, router as documents_router
+from .openapi import configure_openapi
+from .comparisons import router as comparisons_router
+from .logs import router as logs_router
+from .results import router as results_router
+from .runs import router as runs_router
+from .jobs import router as jobs_router
+from .parse_jobs import router as parse_jobs_router
+from .lineage import router as lineage_router
 from .readiness import Check, default_checks, run_checks
 
 API_VERSION = "0.1.0"
@@ -44,5 +54,16 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
         return JSONResponse(body, status_code=200 if ready else 503)
 
     app.include_router(documents_router)
+    app.include_router(audit_router)
+    app.include_router(logs_router)
+    app.include_router(runs_router)
+    app.include_router(results_router)
+    app.include_router(comparisons_router)
+    app.include_router(jobs_router)
+    app.include_router(parse_jobs_router)
+    app.include_router(lineage_router)
+    app.include_router(benchmarks_router)
+
+    configure_openapi(app)
 
     return app

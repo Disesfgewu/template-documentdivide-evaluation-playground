@@ -217,3 +217,44 @@ def load_checkpoint(
         return None
     keys = ("seq", "workflow_revision", "state_schema_version", "state", "steps", "last_node")
     return dict(zip(keys, row))
+
+
+def enqueue_parse_job(
+    conn: psycopg.Connection,
+    *,
+    project_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    operation_id: uuid.UUID,
+    document_version_id: uuid.UUID,
+    profile: str,
+    page_selection: Optional[list[int]] = None,
+    budget_ref: Optional[str] = None,
+    max_attempts: int = 3,
+) -> uuid.UUID:
+    """Create a queued ``document.parse`` job bound to its input, in the caller's transaction.
+
+    The operation (kind ``document.parse``, status ``intent``) was created by the
+    caller together with its idempotency key; it is marked succeeded here with
+    its audit event, so a request is either fully recorded or not at all. The
+    job is retryable up to ``max_attempts``. Page indices are checked against
+    the document by the database (ascending, inside the page count).
+    """
+    job_id = uuid.uuid4()
+    with conn.transaction():
+        conn.execute(
+            "INSERT INTO jobs (id, project_id, kind, stage, max_attempts, retryable) "
+            "VALUES (%s, %s, 'document.parse', 'queued', %s, true)",
+            (job_id, project_id, max_attempts),
+        )
+        conn.execute(
+            "INSERT INTO parse_jobs (job_id, project_id, document_version_id, profile, page_selection, "
+            "budget_ref, operation_id, requested_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (job_id, project_id, document_version_id, profile, page_selection, budget_ref, operation_id, actor_id),
+        )
+        conn.execute("UPDATE operations SET status = 'succeeded', finished_at = now() WHERE id = %s", (operation_id,))
+        conn.execute(
+            "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, "
+            "outcome, operation_id) VALUES (%s, %s, %s, 'parse.requested', 'parse_job', %s, 'succeeded', %s)",
+            (uuid.uuid4(), project_id, actor_id, job_id, operation_id),
+        )
+    return job_id

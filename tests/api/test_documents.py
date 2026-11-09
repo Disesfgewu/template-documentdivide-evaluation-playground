@@ -674,11 +674,12 @@ class UploadTransactionActorContextUnitTests(unittest.TestCase):
         mock_conn.execute.side_effect = fake_execute
 
         pdf_payload = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        with patch("lab_api.documents.inspect_pdf") as mock_inspect, \
-             patch("lab_api.documents.extract_pages") as mock_extract, \
+        with patch("lab_api.documents.inspect_pdf_isolated") as mock_inspect, \
              patch("lab_api.documents.ingest_document") as mock_ingest:
-            mock_inspect.return_value = MagicMock(outcome="accept", sha256="abc", size_bytes=len(pdf_payload), page_count=1, warnings=())
-            mock_extract.return_value = [MagicMock(page_index=0, page_label="1", rotation=0, display_width_pt=612.0, display_height_pt=792.0)]
+            mock_inspect.return_value = (
+                MagicMock(outcome="accept", sha256="abc", size_bytes=len(pdf_payload), page_count=1, warnings=()),
+                (MagicMock(page_index=0, page_label="1", rotation=0, width_pt=612.0, height_pt=792.0),),
+            )
             mock_ingest.return_value = uuid.uuid4()
 
             res = self.client.post(

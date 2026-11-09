@@ -6,6 +6,7 @@ import dataclasses
 import functools
 import hashlib
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -25,8 +26,8 @@ from psycopg.types.json import Jsonb
 from lab_db.ingest import IngestRejected, Inspection, PageGeometry, ingest_document
 from lab_db.repo import NotFound, PermissionDenied, authorize
 from lab_db.storage import LocalArtifactStore, StorageCorruption
-from lab_parser.importer import Limits, inspect_pdf
-from lab_parser.pages import extract_pages
+from lab_parser.artifacts import inspect_pdf_isolated
+from lab_parser.importer import Limits
 
 from .auth import AuthError, get_signing_secret, verify_actor_token
 from .config import Settings
@@ -36,6 +37,7 @@ from .pdf_body import (
     PdfRequestBodyError,
     read_pdf_request_body,
 )
+from .preview import DEFAULT_PREVIEW_TIMEOUT_S, PreviewError, render_preview_in_subprocess
 from .readiness import connect
 
 DEFAULT_MAX_PDF_PAGES = 2000
@@ -279,6 +281,7 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 DEFAULT_UPLOAD_CONCURRENCY = 2
 DEFAULT_DOWNLOAD_CONCURRENCY = 2
+DEFAULT_PREVIEW_CONCURRENCY = 2
 DEFAULT_METADATA_CONCURRENCY = 8
 MULTIPART_OVERHEAD_BYTES = 65536
 # An admitted upload must deliver its body within this many seconds, or it
@@ -301,13 +304,20 @@ def _positive_int(request: Request, name: str, default: int) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else default
 
 
-async def _run_blocking(request: Request, pool: str, fn, *args):
-    """Run ``fn(*args)`` in a worker thread; cancellation is deferred until it ends."""
+async def _run_blocking(request: Request, pool: str, fn, *args, cancel: "threading.Event | None" = None):
+    """Run ``fn(*args)`` in a worker thread; cancellation is deferred until it ends.
+
+    ``cancel`` (optional) is set the moment the request is cancelled (client disconnect,
+    shutdown, timeout) so a long worker, for example the PDF isolation child, can stop early
+    instead of running to its own deadline while the request waits for it.
+    """
     size = DEFAULT_METADATA_CONCURRENCY
     if pool == "upload":
         size = _positive_int(request, "upload_concurrency", DEFAULT_UPLOAD_CONCURRENCY)
     elif pool == "download":
         size = _positive_int(request, "download_concurrency", DEFAULT_DOWNLOAD_CONCURRENCY)
+    elif pool == "preview":
+        size = _positive_int(request, "preview_concurrency", DEFAULT_PREVIEW_CONCURRENCY)
     limiter = _state_object(request, f"{pool}_threads", lambda: anyio.CapacityLimiter(size))
     # The thread runs as its own task so that cancelling *this* task, by
     # anyio's cancel scopes or by a plain task.cancel(), cannot abandon it:
@@ -319,6 +329,8 @@ async def _run_blocking(request: Request, pool: str, fn, *args):
     try:
         await asyncio.wait({job})  # cancelling this wait never cancels the job
     except asyncio.CancelledError:
+        if cancel is not None:
+            cancel.set()
         with anyio.CancelScope(shield=True):
             while not job.done():
                 try:
@@ -425,6 +437,7 @@ class _UploadContext:
     idempotency_key: Optional[str]
     request_id: str
     logical_hint: Optional[str]  # query parameter or X-Logical-Id header
+    cancel: Optional[threading.Event] = None  # set when the client goes away
 
 
 def _authorize_upload(conn: psycopg.Connection, project_id: uuid.UUID, actor_id: uuid.UUID) -> None:
@@ -595,22 +608,24 @@ def _upload_core(
                 (proj_id, idempotency_key, request_hash, op_intent_id),
             )
 
-        inspection = inspect_pdf(data, limits=Limits(max_bytes=ctx.max_bytes, max_pages=ctx.max_pages))
+        # Untrusted PDF structure is parsed only in the resource-limited isolation child
+        # (RLIMIT memory/CPU, wall deadline, PDFium page-count cross-check), never in this
+        # process. Any pypdf warning (for example a repaired xref) is an invalid PDF there.
+        inspection, page_infos = inspect_pdf_isolated(
+            data, Limits(max_bytes=ctx.max_bytes, max_pages=ctx.max_pages),
+            cancelled=ctx.cancel.is_set if ctx.cancel is not None else None)
+
+        if inspection.reason == "inspection_cancelled":
+            # The client went away: abort and roll back. Nothing is persisted, in particular no
+            # failed operation, so a retry with the same Idempotency-Key is not answered with
+            # a cached failure.
+            raise ApiError(503, "request_cancelled", "request cancelled before inspection finished", retryable=True)
 
         if inspection.outcome == "reject":
             return reject(
                 inspection.reason or "", sha256=inspection.sha256, size_bytes=inspection.size_bytes,
                 page_count=inspection.page_count, warnings=inspection.warnings,
-                db_reason=inspection.reason,  # as before: the inspector's own value, even None
-            )
-
-        try:
-            page_infos = extract_pages(data)
-        except Exception as exc:
-            return reject(
-                "invalid_page_geometry", sha256=inspection.sha256, size_bytes=inspection.size_bytes,
-                page_count=inspection.page_count, error_type=type(exc).__name__,
-                warnings=inspection.warnings,
+                db_reason=inspection.reason,
             )
 
         pages = [
@@ -618,8 +633,8 @@ def _upload_core(
                 page_index=p.page_index,
                 page_label=p.page_label,
                 rotation=p.rotation,
-                display_width_pt=p.display_width_pt,
-                display_height_pt=p.display_height_pt,
+                display_width_pt=p.width_pt,
+                display_height_pt=p.height_pt,
             )
             for p in page_infos
         ]
@@ -695,6 +710,7 @@ async def upload_document_handler(
         idempotency_key=idempotency_key or None,
         request_id=request.headers.get("X-Request-Id", "req-1"),
         logical_hint=request.query_params.get("logical_id") or request.headers.get("X-Logical-Id"),
+        cancel=threading.Event(),
     )
 
     # Authorize before a single body byte is read or a slot is taken (and again
@@ -704,7 +720,8 @@ async def upload_document_handler(
     slot = _take_slot(request, "upload", DEFAULT_UPLOAD_CONCURRENCY, "uploads")
     try:
         raw = await _read_upload_within_deadline(request, max_bytes)
-        status, content = await _run_blocking(request, "upload", _upload_core, conn, store, ctx, raw)
+        status, content = await _run_blocking(request, "upload", _upload_core, conn, store, ctx, raw,
+                                              cancel=ctx.cancel)
     finally:
         slot.release()
     return JSONResponse(status_code=status, content=content)
@@ -914,17 +931,167 @@ def _get_page(conn: psycopg.Connection, actor_id: uuid.UUID, document_id: uuid.U
     }
 
 
+def _prefers_png_preview(accept_header: str) -> bool:
+    """Parse HTTP Accept header with bounded media-range and quality weights.
+
+    Preserves default JSON when JSON is preferred or equal quality; returns True
+    only when image/png is explicitly acceptable with higher quality than JSON.
+    """
+    if not accept_header or not isinstance(accept_header, str):
+        return False
+
+    raw = accept_header[:1024].strip()
+    if not raw:
+        return False
+
+    png_q = 0.0
+    json_q = 0.0
+
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = [t.strip() for t in part.split(";")]
+        media_type = tokens[0].lower()
+
+        q_val = 1.0
+        for param in tokens[1:]:
+            if param.lower().startswith("q="):
+                try:
+                    q_val = float(param[2:].strip())
+                    if not (0.0 <= q_val <= 1.0):
+                        q_val = 0.0
+                except (ValueError, TypeError):
+                    q_val = 0.0
+
+        if media_type == "image/png":
+            png_q = max(png_q, q_val)
+        elif media_type in ("application/json", "text/json"):
+            json_q = max(json_q, q_val)
+
+    return png_q > 0.0 and png_q > json_q
+
+
+async def _preview_response(
+    request: Request,
+    conn: psycopg.Connection,
+    actor_id: uuid.UUID,
+    document_id: uuid.UUID,
+    page_index: int,
+    server_max_bytes: int,
+) -> Response:
+    """Authorized PDF page preview rendering at fixed 150 DPI in an isolated subprocess."""
+    # 1. Authorize document access and validate committed artifact state BEFORE slot or render
+    doc = await _run_blocking(request, "meta", _readable_document, conn, actor_id, document_id, server_max_bytes)
+    if page_index < 0 or page_index >= doc.page_count:
+        raise ApiError(404, "not_found", f"page_index {page_index} out of range")
+
+    # 2. Acquire admission slot BEFORE PDF read
+    slot = _take_slot(request, "preview", DEFAULT_PREVIEW_CONCURRENCY, "page previews")
+    try:
+        store = await _run_blocking(request, "preview", get_store, request)
+
+        # 3. Read artifact bytes under the preview pool
+        pdf_bytes = await _run_blocking(request, "preview", _read_artifact, store, doc, server_max_bytes)
+
+        # 4. Supervised subprocess preview rendering under the preview pool
+        timeout_s = getattr(request.app.state, "preview_timeout_s", DEFAULT_PREVIEW_TIMEOUT_S)
+        try:
+            asset = await _run_blocking(
+                request,
+                "preview",
+                render_preview_in_subprocess,
+                pdf_bytes,
+                page_index,
+                timeout_s,
+            )
+        except PreviewError as exc:
+            raise ApiError(exc.status_code, exc.code, exc.message, retryable=exc.retryable) from exc
+
+        response = Response(
+            content=asset.png,
+            media_type="image/png",
+            headers={
+                "Content-Length": str(len(asset.png)),
+                "Cache-Control": "no-store",
+                "Vary": "Accept",
+                "ETag": f'"{asset.sha256}"',
+                "X-Document-Sha256": doc.doc_sha,
+                "X-Page-Index": str(page_index),
+                "X-Image-Sha256": asset.sha256,
+                "X-Image-Width": str(asset.width_px),
+                "X-Image-Height": str(asset.height_px),
+            },
+        )
+        request.scope["lab.download_release_callbacks"].append(slot.release)
+        return response
+    except BaseException:
+        slot.release()
+        raise
+
+
 async def get_page_handler(
     document_id: uuid.UUID,
     page_index: int,
     request: Request,
     conn: psycopg.Connection = Depends(get_db),
     actor_id: uuid.UUID = Depends(get_authenticated_actor),
-) -> JSONResponse:
-    """Get per-page normalized geometry and dimensions (SPEC 8)."""
-    content = await _run_blocking(request, "meta", _get_page, conn, actor_id, document_id, page_index)
-    return JSONResponse(status_code=200, content=content)
+) -> Response:
+    """Get per-page normalized geometry (JSON) or rendered page preview (Accept: image/png)."""
+    if _prefers_png_preview(request.headers.get("Accept", "")):
+        server_max_bytes = getattr(request.app.state, "max_pdf_bytes", DEFAULT_MAX_PDF_BYTES)
+        return await _preview_response(
+            request, conn, actor_id, document_id, page_index, server_max_bytes
+        )
 
+    content = await _run_blocking(request, "meta", _get_page, conn, actor_id, document_id, page_index)
+    return JSONResponse(
+        status_code=200,
+        content=content,
+        headers={"Vary": "Accept", "Cache-Control": "no-store"},
+    )
+
+
+PAGE_RESPONSES = {
+    200: {
+        "description": "Normalized page geometry (JSON) or rendered page preview (PNG).",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "document_version_id": {"type": "string", "format": "uuid"},
+                        "page_index": {"type": "integer"},
+                        "page_label": {"type": "string", "nullable": True},
+                        "rotation": {"type": "integer"},
+                        "width_pt": {"type": "number"},
+                        "height_pt": {"type": "number"},
+                    },
+                    "required": ["document_version_id", "page_index", "page_label", "rotation", "width_pt", "height_pt"],
+                }
+            },
+            "image/png": {
+                "schema": {"type": "string", "format": "binary"},
+                "headers": {
+                    "X-Document-Sha256": {"schema": {"type": "string"}, "description": "Actual document SHA-256"},
+                    "X-Page-Index": {"schema": {"type": "integer"}, "description": "0-based page index"},
+                    "X-Image-Sha256": {"schema": {"type": "string"}, "description": "Actual rendered PNG SHA-256"},
+                    "X-Image-Width": {"schema": {"type": "integer"}, "description": "Actual PNG width in pixels"},
+                    "X-Image-Height": {"schema": {"type": "integer"}, "description": "Actual PNG height in pixels"},
+                    "Cache-Control": {"schema": {"type": "string"}, "description": "no-store"},
+                },
+            },
+        },
+    },
+    403: {"description": "Observer or cross-project permission denied."},
+    404: {"description": "Document not found or page index out of range."},
+    422: {"description": "Malformed path or render pixel limit exceeded."},
+    503: {"description": "Server busy or renderer temporarily unavailable."},
+    504: {"description": "Page rendering timed out."},
+}
+
+# Response headers belong to the response object, not a media type object.
+PAGE_RESPONSES[200]["headers"] = PAGE_RESPONSES[200]["content"]["image/png"].pop("headers")
 
 # Route registrations
 router.add_api_route(
@@ -989,10 +1156,12 @@ router.add_api_route(
     get_page_handler,
     methods=["GET"],
     name="get_document_page_v1",
+    responses=PAGE_RESPONSES,
 )
 router.add_api_route(
     "/documents/{document_id}/pages/{page_index}",
     get_page_handler,
     methods=["GET"],
     name="get_document_page_compat",
+    responses=PAGE_RESPONSES,
 )
