@@ -4,7 +4,7 @@ This increment exercises the existing geometry/render library with the fixed
 registry artifacts. `lab_parser.importer` is the prepared `issue-5-db` inspector,
 extracted without its HTTP endpoint or DB changes. It computes the raw-byte hash,
 size, strict pypdf validity, encryption status and page limit; repaired xrefs are
-flagged with diagnostics. Positive integer limits are required. Its temporary
+flagged with diagnostics (importer and CLI diagnostic only; the authenticated upload path runs the isolation child, #97, which rejects any pypdf warning, including a repaired xref, as 422 `corrupt_pdf`, so T02 evidence for uploads must not claim a flag path). Positive integer limits are required. Its temporary
 pypdf warning capture is serialized and limited to the inspecting thread.
 
 ## Reproduce
