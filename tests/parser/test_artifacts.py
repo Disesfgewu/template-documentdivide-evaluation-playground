@@ -24,7 +24,9 @@ from lab_parser.artifacts import (
 )
 from lab_db.storage import LocalArtifactStore
 from lab_parser.importer import Limits
+from lab_parser.isolation import InspectionError
 from tests.parser.pdfgen import build_pdf
+from tests.parser.test_isolation import crafted
 
 
 class TestPdfArtifactIngestion(unittest.TestCase):
@@ -116,13 +118,23 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         for path in self._stage_files():
             path.unlink()
 
-    def test_inspection_seek_failure_closes_duplicate_and_source(self) -> None:
+    def test_staged_read_failure_closes_descriptors_and_publishes_nothing(self) -> None:
         before = len(os.listdir("/proc/self/fd"))
-        for _ in range(8):
-            with patch.object(artifacts.os, "lseek", side_effect=OSError(errno.EIO, "secret-path")):
+        real_pread = os.pread
+        for failing_call in (1, 2):  # the header read, then the whole-file read for the child
+            calls = []
+
+            def pread(fd, n, offset, _calls=calls, _failing=failing_call):
+                _calls.append(1)
+                if len(_calls) == _failing:
+                    raise OSError(errno.EIO, "secret-path")
+                return real_pread(fd, n, offset)
+
+            with patch.object(artifacts.os, "pread", side_effect=pread):
                 self._assert_fail("artifact_root_unavailable")
             self.assertEqual(len(os.listdir("/proc/self/fd")), before)
         self.assertEqual(self._objects(), [])
+        self.assertEqual(self._stage_files(), [])
 
     def test_valid_pdf_published_content_addressed_and_immutable_modes(self) -> None:
         res = ingest_pdf_artifact(self.source, self.store)
@@ -292,7 +304,7 @@ class TestPdfArtifactIngestion(unittest.TestCase):
             limits=Limits(max_bytes=1024 * 1024, max_pages=1),
         )
         self.assertIsNotNone(err.inspection)
-        self.assertEqual(err.inspection.page_count, 2)
+        self.assertIsNone(err.inspection.page_count)  # the child reports the limit, not a count
         self.assertEqual(self._objects(), [])
 
         ok = ingest_pdf_artifact(
@@ -334,33 +346,62 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         self.assertEqual(self._objects(), [])
         self.assertEqual(self._stage_files(), [])
 
-    def test_flagged_xref_repaired_rejected_by_default_and_optional_gate(self) -> None:
+    def test_repaired_xref_is_rejected_with_nothing_published(self) -> None:
+        """The isolation child treats any pypdf warning as an invalid PDF, so there is no
+        flagged-publish path any more (allow_flagged is gone)."""
         from fixtures import registry_check as rc
 
         doc = rc.load()
         f05 = next(e for e in doc["fixtures"] if e["id"] == "F05")
-        bad_xref_item = next(
-            it for it in f05["items"] if it["id"] == "F05.bad_xref"
-        )
-        repaired_bytes = rc.item_bytes(bad_xref_item)
-        self.source.write_bytes(repaired_bytes)
-
-        # Default allow_flagged=False rejects xref_repaired and leaves no artifact
-        err = self._assert_fail("xref_repaired")
-        self.assertIsNotNone(err.inspection)
-        self.assertEqual(err.inspection.outcome, "flag")
-        self.assertEqual(err.inspection.reason, "xref_repaired")
+        bad_xref_item = next(it for it in f05["items"] if it["id"] == "F05.bad_xref")
+        self.source.write_bytes(rc.item_bytes(bad_xref_item))
+        err = self._assert_fail("corrupt_pdf")
+        self.assertEqual(err.inspection.outcome, "reject")
         self.assertEqual(self._objects(), [])
+        self.assertEqual(self._stage_files(), [])
+        with self.assertRaises(TypeError):
+            ingest_pdf_artifact(self.source, self.store, allow_flagged=True)  # type: ignore[call-arg]
 
-        # Explicit allow_flagged=True publishes the original raw bytes and preserves warnings
-        res = ingest_pdf_artifact(
-            self.source, self.store, allow_flagged=True
-        )
-        self.assertEqual(res.outcome, "flag")
-        self.assertEqual(res.reason, "xref_repaired")
-        self.assertEqual(res.page_count, 2)
-        self.assertGreater(len(res.warnings), 0)
-        self.assertEqual(res.artifact_path.read_bytes(), repaired_bytes)
+    def test_a_count_that_disagrees_with_kids_is_rejected_by_the_pdfium_cross_check(self) -> None:
+        """pypdf follows /Kids (3 pages) while PDFium trusts /Count (1 or 99); the page_count
+        stored must be the one both agree on, so a lying /Count publishes nothing."""
+        for name, (kids, count, distinct) in {"below": (3, 1, True), "above": (3, 99, True),
+                                              "repeated": (3, 1, False)}.items():
+            with self.subTest(name=name):
+                self.source.write_bytes(crafted(kids, count, distinct))
+                self._assert_fail("corrupt_pdf")
+                self.assertEqual(self._objects(), [])
+        self.source.write_bytes(crafted(3, 3, True))  # the honest document of the same shape
+        self.assertEqual(ingest_pdf_artifact(self.source, self.store).page_count, 3)
+
+    def test_inspection_runs_in_the_isolation_child_with_scaled_limits(self) -> None:
+        seen = []
+        real = artifacts.inspect_geometry
+
+        def spy(data, limits, **kwargs):
+            seen.append((len(data), limits))
+            return real(data, limits, **kwargs)
+
+        with patch.object(artifacts, "inspect_geometry", side_effect=spy), \
+                patch("pypdf.PdfReader", side_effect=AssertionError("parsed in the caller process")):
+            res = ingest_pdf_artifact(self.source, self.store)
+        self.assertEqual(res.page_count, 1)
+        self.assertEqual(len(seen), 1)
+        size, limits = seen[0]
+        self.assertEqual(size, len(self.pdf_1p))
+        self.assertGreaterEqual(limits.memory_bytes, 512 * 1024 * 1024)
+        big = artifacts._process_limits(512 * 1024 * 1024, Limits())
+        self.assertEqual((big.memory_bytes, big.cpu_seconds), (4 * 512 * 1024 ** 2 + 256 * 1024 ** 2, 69))
+        self.assertLessEqual(big.wall_seconds, 180)
+
+    def test_child_failures_map_to_fixed_codes_and_publish_nothing(self) -> None:
+        for child_code, expected in (("timeout", "inspection_timeout"), ("memory_limit", "inspection_failed"),
+                                     ("cancelled", "inspection_failed"), ("invalid_child_result", "inspection_failed"),
+                                     ("encrypted_pdf", "encrypted_pdf"), ("page_limit_exceeded", "page_limit_exceeded")):
+            with self.subTest(child_code=child_code):
+                with patch.object(artifacts, "inspect_geometry", side_effect=InspectionError(child_code)):
+                    self._assert_fail(expected)
+                self.assertEqual(self._objects(), [])
 
     def test_symlink_directory_fifo_and_missing_source_rejected(self) -> None:
         # Missing source
@@ -384,9 +425,8 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         self._assert_fail("invalid_path", source=str(self.source) + "\0evil")
         self._assert_fail("invalid_path", source=b"bytes-path")  # type: ignore[arg-type]
 
-        # Invalid limits or allow_flagged types
+        # Invalid limits
         self._assert_fail("invalid_limits", limits="not-a-limits")  # type: ignore[arg-type]
-        self._assert_fail("invalid_options", allow_flagged="yes")  # type: ignore[arg-type]
 
         # Not a store: refused before the source is opened
         for bad in (None, object(), str(self.artifact_root)):

@@ -4,9 +4,11 @@ Opens a regular local PDF without following symlinks and hands it to the
 store's ``put_stream``, which stages, hashes and publishes it (the single
 publisher for the ``sha256/<xx>/<sha256>`` layout; this module has no second
 copy of staging, verification or publication). Before anything is published a
-hook validates the staged bytes strictly with pypdf (size, ``%PDF-`` header,
-structure, encryption, page limit, xref repair), so a rejected PDF never
-reaches the store.
+hook inspects the staged bytes in the resource-limited isolation child
+(``lab_parser.isolation.inspect_geometry``: strict pypdf, encryption, page limit,
+and a PDFium page-count cross-check under RLIMIT memory/CPU and a wall deadline),
+so a rejected PDF never reaches the store and untrusted structure never parses in
+the caller's process.
 
 The ``store`` argument is any object with ``root`` and ``put_stream(fd,
 max_bytes=..., inspect=...)``, in practice ``lab_db.storage.LocalArtifactStore``;
@@ -17,22 +19,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import errno
-import io
-import logging
 import os
 from pathlib import Path
 import stat
 from typing import Any, Literal
 
-from pypdf import PdfReader
-from pypdf.errors import FileNotDecryptedError
-
-from .importer import (
-    ImportResult,
-    Limits,
-    _INSPECTION_LOCK,
-    _WarningCollector,
-)
+from .importer import ImportResult, Limits
+from .isolation import InspectionError, ProcessLimits, inspect_geometry
 
 __all__ = [
     "OBJECT_VERSION",
@@ -66,7 +59,7 @@ class PdfArtifactError(ValueError):
 class IngestedPdfArtifact:
     """Published content-addressed original PDF artifact metadata."""
 
-    outcome: Literal["accept", "flag"]
+    outcome: Literal["accept"]
     reason: str | None
     sha256: str
     size_bytes: int
@@ -91,9 +84,7 @@ def _validate_path_arg(value: str | Path, error_code: str) -> Path:
     return path
 
 
-def _validate_limits(limits: Limits | None, allow_flagged: bool) -> Limits:
-    if not isinstance(allow_flagged, bool):
-        raise PdfArtifactError("invalid_options")
+def _validate_limits(limits: Limits | None) -> Limits:
     if limits is None:
         return Limits()
     if not isinstance(limits, Limits):
@@ -130,6 +121,40 @@ def _open_regular_nofollow(
     return fd
 
 
+_CHILD_CODES = {
+    "invalid_pdf": "corrupt_pdf",
+    "encrypted_pdf": "encrypted_pdf",
+    "page_limit_exceeded": "page_limit_exceeded",
+    "timeout": "inspection_timeout",
+    "memory_limit": "inspection_failed",
+}
+
+
+def _process_limits(size_bytes: int, limits: Limits) -> ProcessLimits:
+    """Scale the child's budget with the file, inside the isolation module's bounds."""
+    mebibytes = size_bytes // (1024 * 1024)
+    memory = min(4 * 1024 ** 3, max(512 * 1024 ** 2, 4 * size_bytes + 256 * 1024 ** 2))
+    cpu = min(120, 5 + mebibytes // 8)
+    return ProcessLimits(
+        memory_bytes=memory,
+        cpu_seconds=cpu,
+        wall_seconds=min(180, 2 * cpu),
+        max_pdf_bytes=max(1, min(limits.max_bytes, 512 * 1024 * 1024)),
+        max_pages=min(limits.max_pages, 2000),
+    )
+
+
+def _read_staged(stage_fd: int, size_bytes: int) -> bytes:
+    chunks, offset = [], 0
+    while offset < size_bytes:
+        chunk = os.pread(stage_fd, min(1 << 20, size_bytes - offset), offset)
+        if not chunk:
+            raise PdfArtifactError("artifact_corrupted")
+        chunks.append(chunk)
+        offset += len(chunk)
+    return b"".join(chunks)
+
+
 def _inspect_staged_fd(
     stage_fd: int,
     *,
@@ -138,136 +163,27 @@ def _inspect_staged_fd(
     head: bytes,
     limits: Limits,
 ) -> ImportResult:
+    def rejected(reason: str, page_count: int | None = None) -> ImportResult:
+        return ImportResult(outcome="reject", reason=reason, sha256=sha256, size_bytes=size_bytes,
+                            page_count=page_count, warnings=())
+
     if size_bytes > limits.max_bytes:
-        return ImportResult(
-            outcome="reject",
-            reason="file_too_large",
-            sha256=sha256,
-            size_bytes=size_bytes,
-            page_count=None,
-            warnings=(),
-        )
+        return rejected("file_too_large")
     if size_bytes == 0:
-        return ImportResult(
-            outcome="reject",
-            reason="empty_file",
-            sha256=sha256,
-            size_bytes=size_bytes,
-            page_count=None,
-            warnings=(),
-        )
-
+        return rejected("empty_file")
     stripped = head.lstrip(b" \t\r\n\f\v\0")
-    leading_ws = len(head) - len(stripped)
-    if leading_ws >= 1024 or not stripped.startswith(b"%PDF-"):
-        return ImportResult(
-            outcome="reject",
-            reason="not_a_pdf",
-            sha256=sha256,
-            size_bytes=size_bytes,
-            page_count=None,
-            warnings=(),
-        )
-
-    dup_fd = -1
-    stream = None
+    if len(head) - len(stripped) >= 1024 or not stripped.startswith(b"%PDF-"):
+        return rejected("not_a_pdf")
     try:
-        dup_fd = os.dup(stage_fd)
-        os.lseek(dup_fd, 0, os.SEEK_SET)
-        stream = io.FileIO(dup_fd, mode="rb", closefd=True)
-        dup_fd = -1  # FileIO now owns the descriptor, including wrapper failures.
-        buffered = io.BufferedReader(stream)
+        data = _read_staged(stage_fd, size_bytes)
     except OSError:
-        if stream is not None:
-            stream.close()
         raise PdfArtifactError("artifact_root_unavailable") from None
-    finally:
-        if dup_fd >= 0:
-            os.close(dup_fd)
-
-    with buffered:
-        with _INSPECTION_LOCK:
-            pypdf_logger = logging.getLogger("pypdf")
-            collector = _WarningCollector()
-            pypdf_logger.addHandler(collector)
-            old_level = pypdf_logger.level
-            if pypdf_logger.level == logging.NOTSET or pypdf_logger.level > logging.WARNING:
-                pypdf_logger.setLevel(logging.WARNING)
-
-            try:
-                try:
-                    reader = PdfReader(buffered, strict=True)
-                    if reader.is_encrypted:
-                        return ImportResult(
-                            outcome="reject",
-                            reason="encrypted_pdf",
-                            sha256=sha256,
-                            size_bytes=size_bytes,
-                            page_count=None,
-                            warnings=tuple(collector.warnings),
-                        )
-                    page_count = len(reader.pages)
-                except FileNotDecryptedError:
-                    return ImportResult(
-                        outcome="reject",
-                        reason="encrypted_pdf",
-                        sha256=sha256,
-                        size_bytes=size_bytes,
-                        page_count=None,
-                        warnings=tuple(collector.warnings),
-                    )
-                except Exception:
-                    return ImportResult(
-                        outcome="reject",
-                        reason="corrupt_pdf",
-                        sha256=sha256,
-                        size_bytes=size_bytes,
-                        page_count=None,
-                        warnings=tuple(collector.warnings),
-                    )
-
-                warnings_tuple = tuple(collector.warnings)
-                if page_count < 1:
-                    return ImportResult(
-                        outcome="reject",
-                        reason="corrupt_pdf",
-                        sha256=sha256,
-                        size_bytes=size_bytes,
-                        page_count=None,
-                        warnings=warnings_tuple,
-                    )
-                if page_count > limits.max_pages:
-                    return ImportResult(
-                        outcome="reject",
-                        reason="page_limit_exceeded",
-                        sha256=sha256,
-                        size_bytes=size_bytes,
-                        page_count=page_count,
-                        warnings=warnings_tuple,
-                    )
-
-                if any("repaired" in w.lower() for w in warnings_tuple):
-                    return ImportResult(
-                        outcome="flag",
-                        reason="xref_repaired",
-                        sha256=sha256,
-                        size_bytes=size_bytes,
-                        page_count=page_count,
-                        warnings=warnings_tuple,
-                    )
-
-                return ImportResult(
-                    outcome="accept",
-                    reason=None,
-                    sha256=sha256,
-                    size_bytes=size_bytes,
-                    page_count=page_count,
-                    warnings=warnings_tuple,
-                )
-            finally:
-                pypdf_logger.removeHandler(collector)
-                pypdf_logger.setLevel(old_level)
-
+    try:
+        inspection = inspect_geometry(data, _process_limits(size_bytes, limits))
+    except InspectionError as exc:
+        return rejected(_CHILD_CODES.get(exc.code, "inspection_failed"))
+    return ImportResult(outcome="accept", reason=None, sha256=sha256, size_bytes=size_bytes,
+                        page_count=inspection.page_count, warnings=())
 
 
 def ingest_pdf_artifact(
@@ -275,7 +191,6 @@ def ingest_pdf_artifact(
     store: Any,
     *,
     limits: Limits | None = None,
-    allow_flagged: bool = False,
 ) -> IngestedPdfArtifact:
     """Stream, strictly validate, and publish a regular local PDF.
 
@@ -283,9 +198,10 @@ def ingest_pdf_artifact(
         source: Path to the local regular PDF file (symlinks/FIFOs rejected).
         store: The artifact store (``LocalArtifactStore``) that publishes it.
         limits: Byte and page bounds (defaults to SPEC 16.6: 512 MiB, 2000 pages).
-        allow_flagged: Whether ``xref_repaired`` flagged PDFs may be published.
-            Defaults to False so repaired PDFs are not published without an
-            explicit caller gate.
+
+        A PDF the isolation child cannot read cleanly (including any repaired
+        xref or other pypdf warning) is rejected as ``corrupt_pdf``; there is no
+        flagged-publish path until a repaired-PDF review flow exists.
 
     Raises:
         PdfArtifactError: With a sanitized reason code on validation, size,
@@ -293,7 +209,7 @@ def ingest_pdf_artifact(
     """
     if not hasattr(store, "put_stream") or not hasattr(store, "root"):
         raise PdfArtifactError("invalid_store")
-    checked_limits = _validate_limits(limits, allow_flagged)
+    checked_limits = _validate_limits(limits)
     source_path = _validate_path_arg(source, "invalid_path")
 
     inspected: list[ImportResult] = []
@@ -308,8 +224,6 @@ def ingest_pdf_artifact(
         )
         if inspection.outcome == "reject":
             raise PdfArtifactError(inspection.reason or "corrupt_pdf", inspection=inspection)
-        if inspection.outcome == "flag" and not allow_flagged:
-            raise PdfArtifactError(inspection.reason or "xref_repaired", inspection=inspection)
         if inspection.page_count is None or inspection.page_count < 1:
             raise PdfArtifactError("corrupt_pdf", inspection=inspection)
         inspected.append(inspection)
