@@ -1,4 +1,4 @@
--- 0012: fail-closed benchmark freeze gate and safe draft initialization (SPEC 10, R05, R06, issue #10).
+-- 0013: fail-closed benchmark freeze gate and safe draft initialization (SPEC 10, R05, R06, issue #10).
 --
 -- Direct INSERT into benchmark_revisions must begin in 'draft' status with
 -- row_version 1, null frozen_at, and null compliance.

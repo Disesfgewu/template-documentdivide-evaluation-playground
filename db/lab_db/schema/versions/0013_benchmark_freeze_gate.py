@@ -1,12 +1,12 @@
-"""0012_benchmark_freeze_gate.sql"""
+"""0013_benchmark_freeze_gate.sql"""
 from lab_db.migrate import apply_migration, read_migration
 
-revision = "0012"
-down_revision = "0011"
+revision = "0013"
+down_revision = "0012"
 branch_labels = None
 depends_on = None
 
-MIGRATION = read_migration("0012_benchmark_freeze_gate.sql")
+MIGRATION = read_migration("0013_benchmark_freeze_gate.sql")
 
 
 def upgrade() -> None:
