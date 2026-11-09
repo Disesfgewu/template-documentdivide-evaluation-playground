@@ -23,9 +23,17 @@ PIXEL = {"system": "PixelSpace", "points": [[40, 30], [40, 60], [80, 60], [80, 3
 LIB = str(Path(unstructured_runner.__file__).parent.parent)
 
 
-def child_source(version="0.27.36", elements=(ELEMENT,), pages="[True, True]", extra=""):
+PLAIN = {"rotation": 0, "mediabox": [0, 0, 612, 792], "cropbox": [0, 0, 612, 792]}
+SMALL = {"rotation": 0, "mediabox": [0, 0, 300, 400], "cropbox": [0, 0, 300, 400]}
+
+
+def child_source(version="0.27.36", elements=(ELEMENT,), pages="[True, True]", extra="", geometry=None):
+    """A double child. ``geometry`` is what the real child reports per page (default: the two plain
+    pages of the standard test PDF); a child that reports none attests nothing."""
+    geometry = [PLAIN, SMALL] if geometry is None else geometry
     return ("import json\n"
-            f"open('meta.json','xb').write(json.dumps({{'unstructured': {version!r}, 'attestable_pages': {pages}}}).encode())\n"
+            f"open('meta.json','xb').write(json.dumps({{'unstructured': {version!r}, 'attestable_pages': {pages}, "
+            f"'page_geometry': {geometry!r}}}).encode())\n"
             f"open('elements.json','xb').write(json.dumps({list(elements)!r}).encode())\n" + extra)
 
 
@@ -92,7 +100,7 @@ class RunnerTests(Base):
         el = self.element(1, (300, 400))
         batch = run_unstructured_fast(self.pdf, document_id="doc-synthetic", budget_ref="b", operation_id="op",
                                       geometry=geometry, page_indices=[1],
-                                      _child=self.child(child_source(elements=(el,), pages="[True]")))
+                                      _child=self.child(child_source(elements=(el,), pages="[True]", geometry=[SMALL])))
         self.assertIsNone(batch.quarantine_reason)
         self.assertEqual(batch.manifest.page_selection, [1])
         self.assertEqual([m.page_index for m in batch.manifest.page_index_map], [1])
@@ -116,8 +124,7 @@ class RunnerTests(Base):
         el = dict(ELEMENT, metadata={"page_number": 1, "coordinates": {
             "system": "PixelSpace", "layout_width": 612, "layout_height": 792,
             "points": [[72, 60.9], [72, 110.9], [191.8, 110.9], [191.8, 60.9]]}})
-        source = child_source(elements=(el,), pages=pages).replace(
-            "'attestable_pages': " + pages, "'attestable_pages': " + pages + f", 'page_geometry': {info!r}")
+        source = child_source(elements=(el,), pages=pages, geometry=info)
         return self.child(source)
 
     def test_a_crop_box_page_is_attested_with_the_translated_box(self):
@@ -130,6 +137,18 @@ class RunnerTests(Base):
         self.assertAlmostEqual(x0, 22 / 562)
         self.assertAlmostEqual(y0, 60.9 / 742)
         self.assertAlmostEqual(x1, (191.8 - 50) / 562)
+
+    def test_a_child_that_reports_no_page_boxes_attests_nothing(self):
+        el = self.element(1, (612, 792))
+        for meta_pages in ("[True, True]",):
+            source = ("import json\nopen('meta.json','xb').write(json.dumps({'unstructured': '0.27.36', "
+                      f"'attestable_pages': {meta_pages}}}).encode())\n"
+                      f"open('elements.json','xb').write(json.dumps([{el!r}]).encode())\n")
+            batch = self.run_it(source)
+            self.assertEqual((len(batch.evidence), len(batch.observations)), (0, 1))
+            for junk in ("'x'", "{}", "None"):
+                source = source.replace("}).encode())\nopen('elements", f", 'page_geometry': {junk}}}).encode())\nopen('elements", 1)
+                self.assertEqual(len(self.run_it(source).evidence), 0)
 
     def test_a_child_whose_boxes_do_not_match_the_inspected_page_gets_no_frame(self):
         pdf = build_pdf([{"mediabox": (0, 0, 612, 792), "cropbox": (50, 50, 662, 842)}])
@@ -147,8 +166,7 @@ class RunnerTests(Base):
         info = [{"rotation": 90, "mediabox": [0, 0, 612, 792], "cropbox": [0, 0, 612, 792]}]
         el = dict(ELEMENT, metadata={"page_number": 1, "coordinates": {
             "system": "PixelSpace", "layout_width": 792, "layout_height": 612, "points": [[681, 72], [681, 190], [731, 190], [731, 72]]}})
-        source = child_source(elements=(el,), pages="[False]").replace(
-            "'attestable_pages': [False]", "'attestable_pages': [False], 'page_geometry': " + repr(info))
+        source = child_source(elements=(el,), pages="[False]", geometry=info)
         batch = run_unstructured_fast(pdf, document_id="d", budget_ref="b", operation_id="o", _child=self.child(source))
         self.assertEqual((len(batch.evidence), len(batch.observations)), (0, 1))
 

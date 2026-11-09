@@ -122,16 +122,14 @@ def run_unstructured_fast(
     # transform computed from its boxes reproduces the L0 display size. Everything else keeps its text
     # but claims no region (and so no evidence unit).
     geometry_info = meta.get("page_geometry")
+    if type(geometry_info) is not list:
+        geometry_info = []   # a child that reports no page boxes attests nothing: no frame, text only
     frames = {}
     for k, (page_index, ok) in enumerate(zip(page_indices, attestable)):
         if not ok:
             continue
         page = pages_by_index[page_index]
         transform_ref = f"l0:{sha[:16]}:p{page_index}"
-        if geometry_info is None:  # a child that reports no boxes: the layout must be the frame itself
-            frames[page_index] = DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=page.width_pt,
-                                              height=page.height_pt, transform_ref=transform_ref)
-            continue
         try:
             info = geometry_info[k]
             ft = display_transform(info["mediabox"], info["cropbox"], info["rotation"])

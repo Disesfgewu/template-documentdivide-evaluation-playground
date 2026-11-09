@@ -37,7 +37,8 @@ def synthetic_pdf(pages=None) -> bytes:
         stream = "\n".join(ops).encode("ascii")
         page_id = 3 + 2 * i
         kids.append(page_id)
-        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {extra} /Contents {page_id + 1} 0 R "
+        media = "" if "/MediaBox" in extra else "/MediaBox [0 0 612 792]"
+        objs.append(f"<< /Type /Page /Parent 2 0 R {media} {extra} /Contents {page_id + 1} 0 R "
                     f"/Resources << /Font << /F1 {font_id} 0 R >> >> >>".encode())
         objs.append(b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream")
     objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
