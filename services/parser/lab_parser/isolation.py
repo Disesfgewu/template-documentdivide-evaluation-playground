@@ -93,7 +93,7 @@ def _run_child(command: list[str], cwd: str, deadline: float,
         if time.monotonic() >= deadline:
             raise InspectionError("timeout")
         process = subprocess.Popen(
-            command, cwd=cwd, env=env or {"LANG": "C.UTF-8"}, stdin=subprocess.DEVNULL,
+            command, cwd=cwd, env={"LANG": "C.UTF-8"} if env is None else env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, start_new_session=True,
         )

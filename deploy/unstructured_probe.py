@@ -26,21 +26,23 @@ SYNTHETIC_LINES = [
 ]
 
 
-def synthetic_pdf() -> bytes:
-    """One US-Letter page, Helvetica text, hand-built so no extra dependency is needed."""
-    ops = ["BT", "/F1 14 Tf", "72 720 Td", "18 TL"]
-    for line in SYNTHETIC_LINES:
-        ops.append(f"({line}) Tj T*")
-    ops.append("ET")
-    stream = "\n".join(ops).encode("ascii")
-    objs = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-        b"/Resources << /Font << /F1 5 0 R >> >> >>",
-        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ]
+def synthetic_pdf(pages=None) -> bytes:
+    """Hand-built Helvetica-text PDF. ``pages`` is a list of (text lines, extra page dict entries)."""
+    pages = pages or [(SYNTHETIC_LINES, "")]
+    objs = [b"", b""]  # catalog, pages tree: filled in below
+    kids = []
+    font_id = 3 + 2 * len(pages)
+    for i, (lines, extra) in enumerate(pages):
+        ops = ["BT", "/F1 14 Tf", "72 720 Td", "18 TL"] + [f"({line}) Tj T*" for line in lines] + ["ET"]
+        stream = "\n".join(ops).encode("ascii")
+        page_id = 3 + 2 * i
+        kids.append(page_id)
+        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {extra} /Contents {page_id + 1} 0 R "
+                    f"/Resources << /Font << /F1 {font_id} 0 R >> >> >>".encode())
+        objs.append(b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream")
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objs[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objs[1] = f"<< /Type /Pages /Kids [{' '.join(f'{k} 0 R' for k in kids)}] /Count {len(kids)} >>".encode()
     out, offsets = bytearray(b"%PDF-1.4\n"), []
     for i, body in enumerate(objs, 1):
         offsets.append(len(out))
@@ -111,6 +113,7 @@ def main() -> int:
     ok = batch.quarantine_reason is None and len(batch.evidence) > 0
     # Second, stricter leg: the same PDF through the isolation-child runner, with frames
     # derived from real page geometry (no hand-set frame).
+    from lab_parser.isolation import InspectionError, ProcessLimits
     from lab_parser.unstructured_runner import run_unstructured_fast
     t1 = time.monotonic()
     isolated = run_unstructured_fast(data, python=sys.executable, document_id="doc-synthetic-f01-probe",
@@ -121,9 +124,44 @@ def main() -> int:
         "evidence_units": len(isolated.evidence),
         "evidence_text": [e.raw_content for e in isolated.evidence][:10],
         "bbox": [list(e.regions[0].bbox) for e in isolated.evidence][:10],
-        "frame_source": "inspect_geometry",
+        "frames_from": "lab_parser.isolation.inspect_geometry (see unstructured_runner.py)",
     }
     ok = ok and isolated.quarantine_reason is None and len(isolated.evidence) > 0
+
+    # Real-library legs for the pages the runner must NOT attest (PM review #105): a plain
+    # page, a /Rotate 90 page and a CropBox-offset page, same size as the MediaBox so the
+    # layout-size check alone would accept it. Text must survive; only the plain page may
+    # produce a region.
+    multi = synthetic_pdf([(["Plain page alpha"], ""),
+                           (["Rotated page bravo"], "/Rotate 90"),
+                           (["Cropped page charlie"], "/CropBox [50 50 662 842]")])
+    mixed = run_unstructured_fast(multi, document_id="doc-synthetic-mixed", budget_ref="b-probe",
+                                  operation_id="op-probe-mixed")
+    by_page = {}
+    for e in mixed.evidence:
+        by_page.setdefault(e.regions[0].page_index, []).append(e.raw_content)
+    seen_text = " ".join(o.raw_content for o in mixed.observations)
+    report["mixed_pages"] = {
+        "synthetic": True, "quarantine_reason": mixed.quarantine_reason,
+        "evidence_pages": sorted(by_page), "observation_pages": sorted({o.page_index for o in mixed.observations}),
+        "evidence_bbox_page0": [list(e.regions[0].bbox) for e in mixed.evidence if e.regions[0].page_index == 0],
+    }
+    ok = (ok and mixed.quarantine_reason is None and sorted(by_page) == [0]
+          and all(word in seen_text for word in ("alpha", "bravo", "charlie"))
+          and sorted({o.page_index for o in mixed.observations}) == [0, 1, 2])
+
+    # Evidence for the 4 GiB address-space ceiling: does the real child fit in less?
+    sweep = {}
+    for gib in (1, 2, 4):
+        try:
+            run_unstructured_fast(data, document_id="doc-synthetic-f01-probe", budget_ref="b-probe",
+                                  operation_id=f"op-probe-mem{gib}",
+                                  limits=ProcessLimits(memory_bytes=gib * 1024 ** 3, cpu_seconds=60,
+                                                       wall_seconds=120, output_bytes=16 * 1024 * 1024))
+            sweep[f"{gib}GiB"] = "ok"
+        except InspectionError as exc:
+            sweep[f"{gib}GiB"] = exc.code
+    report["address_space_sweep"] = sweep
     report["result"] = "pass" if ok else "fail"
     print(json.dumps(report, indent=2))
     return 0 if ok else 1

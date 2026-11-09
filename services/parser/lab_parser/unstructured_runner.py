@@ -67,10 +67,6 @@ def run_unstructured_fast(
     geometry = inspect_geometry(data, cancelled=cancelled)
     sha = geometry.sha256
     page_indices = [p.page_index for p in geometry.pages]
-    frames = {p.page_index: DisplayFrame(coordinate_frame="rotated_cropbox_top_left",
-                                         width=p.width_pt, height=p.height_pt,
-                                         transform_ref=f"l0:{sha[:16]}:p{p.page_index}")
-              for p in geometry.pages}
     started = datetime.now(timezone.utc)
     deadline = time.monotonic() + limits.wall_seconds
     try:
@@ -97,6 +93,18 @@ def run_unstructured_fast(
         raise InspectionError("invalid_child_result") from None
     if type(meta) is not dict or meta.get("unstructured") != _VERSION or len(raw) > limits.output_bytes:
         raise InspectionError("version_mismatch")
+    attestable = meta.get("attestable_pages")
+    if (type(attestable) is not list or len(attestable) != len(page_indices)
+            or any(type(v) is not bool for v in attestable)):
+        # The child and the geometry inspector must agree on the page count.
+        raise InspectionError("invalid_child_result")
+    # Unstructured fast takes coordinates from pdfminer, which ignores /CropBox and
+    # /Rotate. Only pages where both are trivial can be attested; elsewhere the text is
+    # kept but no region (and so no evidence unit) is claimed.
+    frames = {p.page_index: DisplayFrame(coordinate_frame="rotated_cropbox_top_left",
+                                         width=p.width_pt, height=p.height_pt,
+                                         transform_ref=f"l0:{sha[:16]}:p{p.page_index}")
+              for p, ok in zip(geometry.pages, attestable) if ok}
     request = ParseRequest(document_artifact_ref="sha256:" + sha, page_indices=page_indices,
                            profile_revision="unstructured-oss-fast",
                            budget_ref=budget_ref, operation_id=operation_id)
