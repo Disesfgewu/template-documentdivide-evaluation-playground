@@ -156,7 +156,7 @@ jobs:
             ${{ runner.temp }}/probe-freeze.txt
 
   e2e-parse:
-    name: e2e-parse (real PostgreSQL + real Unstructured, synthetic, manual)
+    name: e2e-parse (synthetic, manual)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.e2e }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
