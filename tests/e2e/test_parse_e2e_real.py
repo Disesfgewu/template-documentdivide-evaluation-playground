@@ -156,6 +156,17 @@ class ParseEndToEndTests(FreshDatabase):
         self.assertEqual(res.status_code, 200, res.text)
         return res.json()
 
+    def test_the_consumer_defaults_are_the_real_batcher_and_runner(self):
+        """The acceptance tests call ``process_parse_job`` without a ``run``; make sure that default is the
+        real thing and not a double that a refactor could have swapped in."""
+        import inspect
+        from lab_api import parse_worker
+        from lab_parser.batch_parse import parse_in_batches
+        from lab_parser.unstructured_runner import run_unstructured_fast
+        self.assertIs(inspect.signature(parse_worker.process_parse_job).parameters["run"].default, parse_in_batches)
+        self.assertIs(inspect.signature(parse_in_batches).parameters["run_batch"].default, run_unstructured_fast)
+        self.assertEqual(md.version("unstructured"), "0.27.36")
+
     def test_f01_21_pages_real_parse_to_page_results_and_an_idempotent_rerun(self):
         pdf = synthetic_pdf.build(21)
         doc, job = self.upload_and_queue(pdf)
@@ -273,8 +284,10 @@ class ParseEndToEndTests(FreshDatabase):
         for word in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot"):
             self.assertIn(word, page1, f"{word} lost from the two-column page")
         page2 = squash(" ".join(t for _, t in observed[1]["elements"]))
-        for cell in ("TABLEMARK", "Item", "Quantity", "UnitPrice", "Widget", "12", "3.50", "Gadget", "10.25", "Gizmo", "100", "0.75"):
-            self.assertIn(cell, page2, f"cell {cell} lost from the table page")
+        # Exactly these element texts, no more and no fewer (the earlier substring check did not cover "7").
+        expected = ["Synthetic price table TABLEMARK", "Item", "Quantity", "UnitPrice", "Widget", "12", "3.50",
+                    "Gadget", "7", "10.25", "Gizmo", "100", "0.75"]
+        self.assertEqual(sorted(t for _, t in observed[1]["elements"]), sorted(expected))
         # Observed on CI (run 42692463217) and pinned so a change in the library's behaviour is noticed:
         # the two columns stay separate reading units, in left-to-right order, with disjoint boxes.
         left, right = observed[0]["evidence"]
