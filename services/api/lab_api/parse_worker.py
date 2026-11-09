@@ -17,6 +17,8 @@ Failure policy (fixed reason codes, never document or parser text):
 * transient ones (timeout, process unavailable, I/O) -> ``queued`` while attempts remain, else
   ``failed``. The caller's loop must back off between attempts; there is no not-before column;
 * lease lost -> nothing is persisted, the new owner decides (``abandoned``);
+* database or connection failure (including inside ``persist``) -> ``abandoned(infrastructure_error)``:
+  the job stays ``running`` until its lease expires, then it is retried;
 * cancel requested -> the child is stopped and the worker acknowledges (``cancelled``).
 """
 from __future__ import annotations
@@ -112,6 +114,16 @@ def _fail(conn, project_id, lease, code) -> ParseOutcome:
     return ParseOutcome(lease.job_id, "failed", code)
 
 
+# The database or its connection failed: nothing can be written, and a code that says the job
+# or the result was bad would be a lie. The job stays 'running' until its lease expires and is
+# then retried (or finalized by fail_exhausted).
+_INFRASTRUCTURE = (psycopg.OperationalError, psycopg.InterfaceError)
+
+
+def _unreachable(job_id) -> ParseOutcome:
+    return ParseOutcome(job_id, "abandoned", "infrastructure_error")
+
+
 def _stopped(conn, project_id, job_id) -> ParseOutcome:
     """The lease is gone while we ran: acknowledge a cancel, otherwise leave it to the new owner."""
     if jobs.acknowledge_cancel(conn, project_id, job_id):
@@ -149,11 +161,15 @@ def process_parse_job(
                         ttl_seconds, python, run)
     except jobs.LeaseLost:
         return _stopped(conn, project_id, job_id)
+    except _INFRASTRUCTURE:
+        return _unreachable(job_id)
     except Exception:
         try:
             return _fail(conn, project_id, lease, "internal_error")
         except jobs.LeaseLost:
             return _stopped(conn, project_id, job_id)
+        except _INFRASTRUCTURE:
+            return _unreachable(job_id)
 
 
 def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, ttl_seconds, python, run):
@@ -208,7 +224,7 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
     try:
         jobs.finish(conn, project_id, lease, "succeeded", "parsed",
                     hook=lambda c: persist(c, project_id, lease, batch))
-    except jobs.LeaseLost:
+    except (jobs.LeaseLost, *_INFRASTRUCTURE):
         raise
     except Exception:
         return _fail(conn, project_id, lease, "persist_failed")
