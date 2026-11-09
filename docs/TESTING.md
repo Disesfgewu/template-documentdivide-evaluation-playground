@@ -29,3 +29,13 @@ python3 -m tools.governance.branch_cleanup --repo Disesfgewu/template-documentdi
 ```
 
 僅當 PR merged、同 repo、非 default/main/protected、目前 branch head 等於該 PR head、且無其他 open PR 以其為 head/base 時才刪除；否則輸出 `cleanup_pending` 與原因，exit 2。
+
+## Benchmark transfer foundation
+
+The contracts suite includes `tests/contracts/test_transfer.py`: actual local
+export/import/project CLI roundtrip, all-file hash/size/count checks,
+rehashed-invalid schema/reference/source/page cases, duplicate IDs/keys,
+resource limits and private file/symlink/FIFO handling. The synthetic bundle is
+structural test data, not accepted parser/provider/human evidence. See
+[benchmark transfer](BENCHMARK_TRANSFER.md); full T78 and authenticated UI/API,
+frozen revision selection, database/audit and release gates remain open.
