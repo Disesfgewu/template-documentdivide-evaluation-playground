@@ -85,6 +85,33 @@ class RunnerTests(Base):
                 self.run_it(child_source(pages=pages))
             self.assertEqual(ctx.exception.code, "invalid_child_result")
 
+    def test_a_page_subset_keeps_original_indices_and_frames(self):
+        from lab_parser.isolation import inspect_geometry
+        geometry = inspect_geometry(self.pdf)
+        # Subset [1]: the child's own page 1 is original page 1 (300x400 frame, not page 0's 612x792).
+        el = self.element(1, (300, 400))
+        batch = run_unstructured_fast(self.pdf, document_id="doc-synthetic", budget_ref="b", operation_id="op",
+                                      geometry=geometry, page_indices=[1],
+                                      _child=self.child(child_source(elements=(el,), pages="[True]")))
+        self.assertIsNone(batch.quarantine_reason)
+        self.assertEqual(batch.manifest.page_selection, [1])
+        self.assertEqual([m.page_index for m in batch.manifest.page_index_map], [1])
+        self.assertEqual(batch.evidence[0].regions[0].page_index, 1)
+        self.assertAlmostEqual(batch.evidence[0].regions[0].bbox[0], 40 / 300)
+        self.assertEqual([p.page_index for p in batch.result.pages], [1])
+
+    def test_invalid_subsets_and_foreign_geometry_are_refused(self):
+        from lab_parser.isolation import inspect_geometry
+        geometry = inspect_geometry(self.pdf)
+        other = inspect_geometry(build_pdf([{"mediabox": (0, 0, 100, 100)}]))
+        child = self.child(child_source())
+        for kwargs in ({"page_indices": []}, {"page_indices": [2]}, {"page_indices": [1, 0]}, {"page_indices": [0, 0]},
+                       {"page_indices": [True]}, {"geometry": other}):
+            with self.subTest(kwargs), self.assertRaises(InspectionError) as ctx:
+                run_unstructured_fast(self.pdf, document_id="d", budget_ref="b", operation_id="o", _child=child,
+                                      **{"geometry": geometry, **kwargs})
+            self.assertEqual(ctx.exception.code, "invalid_input")
+
     def test_every_page_is_selected_and_manifest_is_the_pinned_profile(self):
         batch = self.run_it(child_source())
         self.assertEqual(batch.manifest.page_selection, [0, 1])

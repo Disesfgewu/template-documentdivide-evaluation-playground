@@ -171,7 +171,8 @@ class ParseEndToEndTests(FreshDatabase):
         for i in range(21):
             body = self.page(doc, job, i)
             seen = squash(" ".join(o["raw_content"] for o in body["observations"]))
-            self.assertIn(squash(f"page {i + 1}"), seen, f"page {i + 1} text missing")
+            self.assertIn(squash(f"page {i + 1}"), seen,
+                          f"page {i + 1} text missing (status {body['status']}, diagnostics {body['diagnostics']})")
             token = squash(synthetic_pdf._page_text(i)[3])
             self.assertIn(token, seen, f"page {i + 1} token missing")
             self.assertTrue(body["evidence"], f"page {i + 1} has no evidence on a plain page")

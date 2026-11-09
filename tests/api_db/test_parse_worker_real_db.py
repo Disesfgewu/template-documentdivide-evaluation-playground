@@ -363,6 +363,18 @@ class ParseWorkerRealDbTests(FreshDatabase):
                 process_parse_job(c, project, job, store=self.store, persist=self.persist, worker="w",
                                   max_pdf_bytes=64 * 1024 * 1024, connect=self.connect, run=self.ok_run())
 
+    def test_pages_that_stay_failed_after_the_retry_budget_fail_the_job_and_publish_nothing(self):
+        from lab_parser.batch_parse import PartialParseFailure
+        project, job = self.queue()
+
+        def partial(data, **kw):
+            raise PartialParseFailure([3, 4])
+
+        outcome = self.process(project, job, partial)
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "pages_failed"))
+        self.assertEqual(self.persisted_count(), 0)
+        self.assertEqual(self.job_state(job)[:2], ("failed", 1))   # deterministic: not requeued
+
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
         blobs = [p for p in self.root.rglob("*") if p.is_file()]

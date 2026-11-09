@@ -48,3 +48,20 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 - `QueryCanceled`（statement／lock timeout）是確定性錯誤：persist 內遇到就是 `failed(persist_failed)`，沒有有界重試。
 - 資料庫連不上時只記固定代碼並在下一輪重試，不會崩潰。
 - 尚未涵蓋：頁數上限、部署（systemd／容器）、多 worker 間的公平性、health endpoint、以及使用者取消 API（目前沒有 HTTP 端點可以送出取消）。
+
+## 批次解析（PM-DECISION B，Refs #7）
+
+預設的解析函式是 `lab_parser.batch_parse.parse_in_batches`：同一個 job 內依 `plan_batches`（預設每批 10 頁）把文件切成批次，只解析各批次的**核心頁**（overlap 脈絡頁是給後續 LLM 階段用的，所以頁面不會被解析兩次、evidence 不會重複），最多 2 個批次子程序同時執行；失敗的頁面依 `derive_retry_plan`／`execute_and_merge_retry` 逐頁重試，最多 `retry_rounds`（預設 2、上限 5）輪；結果合併成一個 `NormalizedBatch`（原始 0-based 實體頁碼、各頁 status／diagnostics），再由既有的 persist 存入，沒有新表。
+
+- **失敗政策**：重試預算用完仍是 `failed` 的頁面 → `PartialParseFailure` → job `failed(pages_failed)`，**不發布任何部分結果**（好的頁面也不存）。`needs_review`（沒有可認定的幾何／空白頁）是誠實的不確定，不算失敗。
+- **崩潰＝整個 job 重跑**：批次進度不持久；持久化、可續跑的批次（方案 A）要等 500／600 頁負載測試證明需要才做。
+- **取消**：取消旗標傳給每個批次子程序（各自獨立的 process group），全部被殺後以 `cancelled` 結束。
+- **記憶體**：每個子程序位址空間上限 4 GiB；一個 job 最多 2 個批次子程序，所以 `--concurrency N` 最多 N×2 個子程序（N=2 時最多 16 GiB 虛擬位址）。部署時請以此設定 `--concurrency`。
+- 頁面子集由子程序內以 pypdf 建立子文件（保留旋轉與 CropBox），parser 頁碼與原始頁碼的對照寫在 manifest 的 `page_index_map`；合併後的 manifest 以實體頁碼 +1 為頁碼。
+- 尚未涵蓋：批次層級的 `MaxRetries` 以外的退避、跨 job 的批次共享、overlap 脈絡頁的實際使用。
+
+批次解析的成本界線與紀錄（#114 審查後補充）：
+- **全部批次都以同一個暫時性代碼失敗**（`timeout`、`process_unavailable`、`inspection_io_failed`）→ 重新丟出該 `InspectionError`，消費者的處理與未分批時完全相同（重排至次數用完）；`unsupported_platform`、`invalid_input` 等系統性代碼立刻重新丟出，不逐頁重試。
+- **第一輪失敗頁面超過 50%** 視為系統性問題：直接 `PartialParseFailure`，不做逐頁重試（避免 N 頁 × 重試輪數個子程序）。
+- **job 層級期限**（預設 1800 秒）：超過後不再啟動新的子程序並以 `timeout`（暫時性）結束；每個子程序另有自己的 120 秒上限。2000 頁文件在最壞情況下仍是 200 個批次，期限就是它的上界。
+- **合併後的 raw 與 manifest**：合併的 manifest 把 parser 頁碼定為實體頁碼 +1，但它引用的 raw 輸出保留各自子文件內的 `page_number`；每次執行自己的 manifest（有真實的 `page_index_map`）也保存在 artifacts 中。因此要重新 normalize 已存的 raw 輸出必須用該次執行的 manifest，不能用合併的那份。evidence id 取決於批次計畫與重試歷史（不同批次大小或被重試的頁面會有不同的 raw artifact，因此 id 不同），只在相同計畫與結果下穩定。

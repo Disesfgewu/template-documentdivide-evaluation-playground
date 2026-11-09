@@ -16,11 +16,11 @@ import stat
 import sys
 import tempfile
 import time
-from typing import Callable
+from typing import Callable, Sequence
 
 from lab_contracts.parse import ModelRevision, PageMapEntry, ParseManifest, ParseRequest, RenderSettings
 
-from .isolation import InspectionError, ProcessLimits, _run_child, inspect_geometry
+from .isolation import Inspection, InspectionError, ProcessLimits, _run_child, inspect_geometry
 from .normalize import ADAPTER_REVISION, DisplayFrame, NormalizedBatch, UnstructuredParser, UnstructuredProfile
 
 __all__ = ["RUNNER_LIMITS", "run_unstructured_fast"]
@@ -50,12 +50,19 @@ def run_unstructured_fast(
     python: str | None = None,
     limits: ProcessLimits = RUNNER_LIMITS,
     cancelled: Callable[[], bool] | None = None,
+    geometry: Inspection | None = None,
+    page_indices: Sequence[int] | None = None,
     document_id: str,
     budget_ref: str,
     operation_id: str,
     _child: Path = _CHILD,
 ) -> NormalizedBatch:
-    """Parse every page of ``data``; raise ``InspectionError`` (fixed code) on failure.
+    """Parse every page of ``data`` (or only ``page_indices``); raise ``InspectionError`` on failure.
+
+    ``geometry`` may be a previous ``inspect_geometry`` result for exactly these bytes (a batch
+    runner inspects once, not once per batch); ``page_indices`` is a strictly ascending list of
+    original 0-based pages, parsed from a sub-document built inside the child. The result's page
+    statuses, evidence and observations carry original physical indices either way.
 
     ``python`` must be an interpreter that has ``unstructured==0.27.36`` (a trusted,
     operator-chosen venv); it defaults to the current interpreter.
@@ -64,9 +71,18 @@ def run_unstructured_fast(
         raise InspectionError("unsupported_platform")
     cancelled = cancelled or (lambda: False)
     # L0 geometry first: it validates the PDF and attests each page's display frame.
-    geometry = inspect_geometry(data, cancelled=cancelled)
+    if geometry is None:
+        geometry = inspect_geometry(data, cancelled=cancelled)
+    elif type(geometry) is not Inspection or geometry.sha256 != hashlib.sha256(data).hexdigest():
+        raise InspectionError("invalid_input")  # geometry of some other document
     sha = geometry.sha256
-    page_indices = [p.page_index for p in geometry.pages]
+    total_pages = len(geometry.pages)
+    subset = page_indices is not None
+    page_indices = list(range(total_pages)) if page_indices is None else list(page_indices)
+    if (not page_indices or any(type(i) is not int or not 0 <= i < total_pages for i in page_indices)
+            or any(b <= a for a, b in zip(page_indices, page_indices[1:]))):
+        raise InspectionError("invalid_input")
+    pages_by_index = {p.page_index: p for p in geometry.pages}
     started = datetime.now(timezone.utc)
     deadline = time.monotonic() + limits.wall_seconds
     try:
@@ -75,6 +91,8 @@ def run_unstructured_fast(
             with source.open("xb") as stream:
                 os.chmod(source, 0o600)
                 stream.write(data)
+            if subset:
+                Path(directory, "pages.json").write_bytes(json.dumps(page_indices).encode("ascii"))
             _run_child([python or sys.executable, "-I", str(_child), str(limits.memory_bytes),
                         str(limits.cpu_seconds), str(limits.output_bytes)],
                        directory, deadline, cancelled,
@@ -104,7 +122,7 @@ def run_unstructured_fast(
     frames = {p.page_index: DisplayFrame(coordinate_frame="rotated_cropbox_top_left",
                                          width=p.width_pt, height=p.height_pt,
                                          transform_ref=f"l0:{sha[:16]}:p{p.page_index}")
-              for p, ok in zip(geometry.pages, attestable) if ok}
+              for p, ok in zip((pages_by_index[i] for i in page_indices), attestable) if ok}
     request = ParseRequest(document_artifact_ref="sha256:" + sha, page_indices=page_indices,
                            profile_revision="unstructured-oss-fast",
                            budget_ref=budget_ref, operation_id=operation_id)
@@ -114,11 +132,11 @@ def run_unstructured_fast(
         model_revisions=[ModelRevision(name="core", revision=_VERSION, checksum=None)],
         requested_profile="unstructured-oss-fast", effective_profile="unstructured-oss-fast",
         fallback_reason=None, ocr_languages=["en"], page_selection=page_indices,
-        page_index_map=[PageMapEntry(parser_page=i + 1, page_index=i) for i in page_indices],
+        page_index_map=[PageMapEntry(parser_page=k + 1, page_index=i) for k, i in enumerate(page_indices)],
         render_settings=RenderSettings(dpi=150, max_megapixels=16.0), postprocess_flags=[],
         endpoint_deployment_id=None, started_at=started, finished_at=datetime.now(timezone.utc),
         cost_usd=0.0, warnings=[], reproducible=True)
     return UnstructuredParser().normalize(
         raw, request, manifest, UnstructuredProfile(strategy="fast"),
         document_id=document_id, document_sha256=sha, frames=frames,
-        document_page_count=len(page_indices))
+        document_page_count=total_pages)
