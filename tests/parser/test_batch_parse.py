@@ -130,6 +130,43 @@ class BatchParseTests(unittest.TestCase):
         # Bounded work: 3 batches + 10 pages x 2 rounds, never more.
         self.assertEqual(len(run.calls), 3 + 10 * 2)
 
+    def test_every_batch_failing_transiently_is_a_job_level_error_not_page_failures(self):
+        def behaviour(pages, nth):
+            raise InspectionError("timeout")
+        run = Recorder(behaviour)
+        with self.assertRaises(InspectionError) as ctx:
+            self.parse(run)
+        self.assertEqual(ctx.exception.code, "timeout")     # the consumer can requeue this exactly as before
+        self.assertEqual(len(run.calls), 3)                  # no per-page retries
+
+    def test_systemic_codes_stop_at_once(self):
+        for code in ("unsupported_platform", "invalid_input"):
+            with self.subTest(code):
+                def behaviour(pages, nth, code=code):
+                    raise InspectionError(code)
+                run = Recorder(behaviour, delay=0.05)
+                with self.assertRaises(InspectionError) as ctx:
+                    self.parse(run)
+                self.assertEqual(ctx.exception.code, code)
+                self.assertLessEqual(len(run.calls), 3)
+
+    def test_when_most_pages_failed_the_cause_is_systemic_and_no_page_is_retried(self):
+        def behaviour(pages, nth):
+            if pages != (20,):
+                raise InspectionError("child_failed")
+        run = Recorder(behaviour)
+        with self.assertRaises(PartialParseFailure) as ctx:
+            self.parse(run)
+        self.assertEqual(len(ctx.exception.failed_pages), 20)
+        self.assertEqual(len(run.calls), 3)                  # 20 of 21 pages failed: no 20 x rounds of retries
+
+    def test_the_job_deadline_stops_the_work_before_more_children_start(self):
+        run = Recorder(delay=0.4)
+        with self.assertRaises(InspectionError) as ctx:
+            self.parse(run, job_deadline_seconds=0.1)
+        self.assertEqual(ctx.exception.code, "timeout")
+        self.assertLess(len(run.calls), 3)
+
     def test_zero_retry_rounds_fail_straight_away(self):
         def behaviour(pages, nth):
             if pages == (20,):

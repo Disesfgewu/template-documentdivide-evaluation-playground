@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timezone
 import threading
+import time
 from typing import Callable, Sequence
 
 from lab_contracts.parse import PageMapEntry, PageStatus, ParseResult
@@ -39,6 +40,13 @@ __all__ = ["DEFAULT_LIMITS", "MAX_RETRY_ROUNDS", "PartialParseFailure", "parse_i
 
 DEFAULT_LIMITS = BatchLimits(max_pages=2000, batch_size=10, overlap_pages=0, parallel_batches=2)
 MAX_RETRY_ROUNDS = 5
+# A child failure with one of these codes can succeed on a later attempt of the whole job.
+TRANSIENT_CODES = frozenset({"timeout", "process_unavailable", "inspection_io_failed"})
+# These are about this process or this input, not about one batch: retrying them cannot help.
+SYSTEMIC_CODES = frozenset({"unsupported_platform", "invalid_input", "invalid_limits", "invalid_pdf", "encrypted_pdf",
+                            "page_limit_exceeded", "input_size"})
+MAX_FAILED_FRACTION = 0.5     # more failed pages than this after the first pass = systemic: no page-by-page retry
+JOB_DEADLINE_SECONDS = 1800.0
 
 
 class PartialParseFailure(Exception):
@@ -87,27 +95,42 @@ def parse_in_batches(
     retry_rounds: int = 2,
     cancelled: Callable[[], bool] | None = None,
     python: str | None = None,
+    job_deadline_seconds: float = JOB_DEADLINE_SECONDS,
+    max_failed_fraction: float = MAX_FAILED_FRACTION,
 ) -> NormalizedBatch:
-    """Return one merged ``NormalizedBatch`` for all pages; raise ``InspectionError`` for a
-    systemic failure (invalid PDF, cancel) or ``PartialParseFailure`` for unrecoverable pages."""
+    """Return one merged ``NormalizedBatch`` for all pages.
+
+    Raises ``InspectionError`` for a systemic failure (invalid input or platform, cancel, the job
+    deadline, or every batch failing with the same transient code, so the caller can requeue the
+    job exactly as for an unbatched run) and ``PartialParseFailure`` for pages that stay failed.
+    Bounded cost: ``job_deadline_seconds`` ends the job (``timeout``, transient) before any further
+    child starts, and when more than ``max_failed_fraction`` of the pages failed the first pass the
+    cause is systemic, so no page-by-page retry is attempted.
+    """
     if type(retry_rounds) is not int or not 0 <= retry_rounds <= MAX_RETRY_ROUNDS:
         raise InspectionError("invalid_input")
     cancelled = cancelled or (lambda: False)
+    deadline = time.monotonic() + job_deadline_seconds
     geometry = inspect_geometry(data, cancelled=cancelled)
     plan = plan_batches(document_id=document_id, document_sha256=geometry.sha256,
                         page_count=len(geometry.pages), limits=limits)
     outcome: dict[int, _Page] = {}
     lock = threading.Lock()
 
+    codes: dict[str, str] = {}
+
     def run(pages: Sequence[int], op: str) -> dict[int, _Page]:
         if cancelled():
             raise InspectionError("cancelled")
+        if time.monotonic() >= deadline:
+            raise InspectionError("timeout")
         try:
             batch = run_batch(data, geometry=geometry, page_indices=list(pages), cancelled=cancelled, python=python,
                               document_id=document_id, budget_ref=budget_ref, operation_id=op)
         except InspectionError as exc:
-            if exc.code == "cancelled" or cancelled():
+            if exc.code == "cancelled" or cancelled() or exc.code in SYSTEMIC_CODES:
                 raise
+            codes[op] = exc.code
             return {p: _failed(exc.code) for p in pages}
         return _pages_of(batch)
 
@@ -136,7 +159,12 @@ def parse_in_batches(
         if error is not None:
             raise error
 
+    first_codes = [codes.get(r.operation_id) for r in results]
+    if first_codes and all(c in TRANSIENT_CODES for c in first_codes) and len(set(first_codes)) == 1:
+        raise InspectionError(first_codes[0])  # nothing worked: a whole-job transient failure, not page failures
     coverage = evaluate_coverage(plan, results)
+    if len(coverage.failed_pages) + len(coverage.missing_pages) > max_failed_fraction * len(geometry.pages):
+        raise PartialParseFailure(sorted(set(coverage.failed_pages) | set(coverage.missing_pages)))
     history: tuple = ()
     prior = results
     for round_number in range(1, retry_rounds + 1):
@@ -164,6 +192,16 @@ def parse_in_batches(
 
 
 def _merge(outcome: dict[int, _Page], operation_id: str, page_count: int) -> NormalizedBatch:
+    """Merge the per-page outcomes into one batch.
+
+    The merged manifest numbers parser pages as physical page + 1. The raw artifacts it references
+    are the per-run upstream outputs, which keep their own sub-document ``page_number``; each run's
+    own manifest artifact (with its true ``page_index_map``) is kept in ``artifacts`` for that
+    reason, so re-normalizing a stored raw output must use its run manifest, not the merged one.
+    Evidence ids depend on the batch plan and the retry history (a different batch size or a retried
+    page gives different raw artifacts and so different ids); they are stable only for the same
+    plan and outcome.
+    """
     ordered = [outcome[p] for p in range(page_count)]
     runs = list(dict.fromkeys(id(s.source) for s in ordered if s.source is not None))
     sources = {id(s.source): s.source for s in ordered if s.source is not None}
