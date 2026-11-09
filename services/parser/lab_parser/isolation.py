@@ -84,7 +84,7 @@ def _stop(process: subprocess.Popen):
 
 
 def _run_child(command: list[str], cwd: str, deadline: float,
-               cancelled: Callable[[], bool]) -> None:
+               cancelled: Callable[[], bool], env: dict[str, str] | None = None) -> None:
     """Private trusted-command harness; public entrypoint fixes the command."""
     process = None
     try:
@@ -93,7 +93,7 @@ def _run_child(command: list[str], cwd: str, deadline: float,
         if time.monotonic() >= deadline:
             raise InspectionError("timeout")
         process = subprocess.Popen(
-            command, cwd=cwd, env={"LANG": "C.UTF-8"}, stdin=subprocess.DEVNULL,
+            command, cwd=cwd, env=env or {"LANG": "C.UTF-8"}, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, start_new_session=True,
         )

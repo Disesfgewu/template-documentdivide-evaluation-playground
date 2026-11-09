@@ -109,6 +109,21 @@ def main() -> int:
     report["observations"] = len(batch.observations)
     report["evidence_text"] = [e.raw_content for e in batch.evidence][:10]
     ok = batch.quarantine_reason is None and len(batch.evidence) > 0
+    # Second, stricter leg: the same PDF through the isolation-child runner, with frames
+    # derived from real page geometry (no hand-set frame).
+    from lab_parser.unstructured_runner import run_unstructured_fast
+    t1 = time.monotonic()
+    isolated = run_unstructured_fast(data, python=sys.executable, document_id="doc-synthetic-f01-probe",
+                                     budget_ref="b-probe", operation_id="op-probe-isolated")
+    report["isolated"] = {
+        "wall_seconds": round(time.monotonic() - t1, 3),
+        "quarantine_reason": isolated.quarantine_reason,
+        "evidence_units": len(isolated.evidence),
+        "evidence_text": [e.raw_content for e in isolated.evidence][:10],
+        "bbox": [list(e.regions[0].bbox) for e in isolated.evidence][:10],
+        "frame_source": "inspect_geometry",
+    }
+    ok = ok and isolated.quarantine_reason is None and len(isolated.evidence) > 0
     report["result"] = "pass" if ok else "fail"
     print(json.dumps(report, indent=2))
     return 0 if ok else 1
