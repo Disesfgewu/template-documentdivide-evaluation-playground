@@ -313,6 +313,42 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual(self.process(project, job, self.ok_run()).status, "succeeded")
         self.assertEqual(self.job_state(job)[:2], ("succeeded", 2))
 
+    def test_a_dead_connection_on_the_lease_lost_path_returns_instead_of_raising(self):
+        project, job = self.queue()
+        with self.connect() as c:
+            def run(data, cancelled, **kw):
+                with self.connect() as other, other.transaction():  # another worker takes the job over
+                    other.execute("UPDATE jobs SET lease_token = lease_token + 1000, lease_owner = 'thief', "
+                                  "row_version = row_version + 1 WHERE id = %s", (job,))
+                deadline = time.monotonic() + 20
+                while not cancelled() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                c.close()  # the worker's connection dies before it can acknowledge or finish
+                raise InspectionError("cancelled")
+
+            outcome = process_parse_job(c, project, job, store=self.store, persist=self.persist, worker="w",
+                                        max_pdf_bytes=64 * 1024 * 1024, connect=self.connect, run=run)
+        self.assertEqual((outcome.status, outcome.reason), ("abandoned", "infrastructure_error"))
+
+    def test_claiming_with_a_dead_connection_returns_instead_of_raising(self):
+        project, job = self.queue()
+        c = self.connect()
+        c.close()
+        outcome = process_parse_job(c, project, job, store=self.store, persist=self.persist, worker="w",
+                                    max_pdf_bytes=64 * 1024 * 1024, connect=self.connect, run=self.ok_run())
+        self.assertEqual((outcome.status, outcome.reason), ("abandoned", "infrastructure_error"))
+        self.assertEqual(self.job_state(job)[:2], ("queued", 0))  # nothing was claimed
+
+    def test_statement_level_database_errors_are_deterministic_not_infrastructure(self):
+        import psycopg.errors
+        project, job = self.queue()
+
+        def cancelled_statement(conn, project, lease, batch):
+            raise psycopg.errors.QueryCanceled("statement timeout")
+
+        outcome = self.process(project, job, self.ok_run(), persist=cancelled_statement)
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "persist_failed"))
+
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
         blobs = [p for p in self.root.rglob("*") if p.is_file()]

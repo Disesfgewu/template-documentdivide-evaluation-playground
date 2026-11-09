@@ -16,6 +16,7 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 |---|---|
 | 不支援 profile／頁面選取、PDF 無效、normalizer quarantine、資源耗盡、artifact 不可讀、persist 失敗、其他例外 | `failed`（固定 reason code；其他例外為 `internal_error`） |
 | timeout、process_unavailable、I/O | 還有 attempts 就回 `queued`，否則 `failed` |
+| 資料庫或連線層失敗（含 persist 內；`acquire`、`fail_exhausted`、取消確認也受保護） | `abandoned(infrastructure_error)`：job 維持 `running`，lease 過期後重跑或由 `fail_exhausted` 收尾；只有連線層錯誤算數，`QueryCanceled`／`ProgramLimitExceeded` 是確定性錯誤（`persist_failed`／`internal_error`） |
 | lease 遺失（被接手） | `abandoned`：不寫結果，由新持有者決定 |
 | cancel_requested | 停止子程序，worker 以 `acknowledge_cancel` 轉為 `cancelled` |
 | lease 過期且 attempts 用完（worker 崩潰） | 下次有人要求認領時由 `fail_exhausted` 轉 `failed(lease_exhausted)` |
@@ -33,3 +34,13 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 `lab_db.parse_results.persist_parse_result` 是上述契約中的 persist：把原始輸出存為 content-addressed artifact，寫入 `parse_results`（manifest、capabilities、不含各頁的 result、`record_sha256`）與每頁一列 `parse_page_results`（status、diagnostics、evidence、observations），全部 append-only。以 job 為冪等鍵；重放必須與整筆紀錄的雜湊相同，否則 `ParseResultConflict`。整筆紀錄超過 64 MiB 以 `ParseResultTooLarge` 拒絕且不寫入任何東西，資料庫另對各 JSON 欄位設上限（manifest／capabilities 1 MiB，result 與頁面 evidence／observations 16 MiB）。
 
 讀取：`GET /api/v1/documents/{document_id}/parse-results/{job_id}`（摘要）與 `.../pages/{page_index}`（單頁）。權限動作為 `read_gold_and_generation_context`（owner、maintainer、reviewer）：organizer 的 parse 輸出是產生 evidence 的來源，SPEC 16.4 讓 participant 的解析與之分開，所以 participant 與 observer 一律 403（不論結果是否存在）；非成員、未知文件、未知結果、不在結果內的頁面為 404。
+
+## 執行 worker（`python -m lab_api.parse_worker_main`）
+
+設定與 API 相同（`LAB_DATABASE_URL`、`LAB_ARTIFACT_ROOT`…）；解析函式庫要在 `--python` 指定的直譯器（預設目前這個）。`--once` 處理目前可認領的 job 後結束並印出各結果的計數；否則輪詢到收到 SIGTERM／SIGINT。
+
+- 輪詢間隔 `--interval` 限 1..60 秒；併發 `--concurrency` 限 1..4（每個 job 一條連線）。
+- 優雅停止：不再認領新 job；執行中的 job 有 `--grace`（預設 60）秒完成，仍在跑的留給 lease 到期（會被重跑並耗掉一次 attempt）。
+- transient 重排後的退避：記憶體內指數退避（`--backoff` 秒起、每次加倍、上限 5 分鐘）。重啟會遺失退避，因為沒有 not-before 欄位。
+- 資料庫連不上時只記固定代碼並在下一輪重試，不會崩潰。
+- 尚未涵蓋：頁數上限、部署（systemd／容器）、多 worker 間的公平性、health endpoint、以及使用者取消 API（目前沒有 HTTP 端點可以送出取消）。
