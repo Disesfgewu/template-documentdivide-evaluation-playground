@@ -10,8 +10,11 @@ def main(argv: list[str]) -> int:
     if argv and argv[0] == "inspect":
         from .inspection_cli import inspect
         return inspect(argv[1:])
+    if argv and argv[0] == "preview-page":
+        from .preview_cli import preview_page_cli
+        return preview_page_cli(argv[1:])
     if argv != ["check-config"]:
-        print("usage: python -m lab_parser check-config | inspect <path> [--max-bytes N] [--max-pages N]", file=sys.stderr)
+        print("usage: python -m lab_parser check-config | inspect <path> [--max-bytes N] [--max-pages N] | preview-page ...", file=sys.stderr)
         return 2
     try:
         s = load_settings()
