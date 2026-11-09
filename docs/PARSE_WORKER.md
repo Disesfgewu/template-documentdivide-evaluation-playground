@@ -26,4 +26,10 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 
 - 沒有 not-before／backoff：transient 重排後呼叫端迴圈必須自己退避。
 - 沒有併發上限、頁數上限與排程入口（沒有 CLI 或常駐程序會呼叫 consumer）。
-- 真正的 ParseResult 表（migration 0012）與 GET 頁面結果 API 在下一個 PR。
+- 隔離（quarantine）的批次不會被記錄；回應沒有「合成／真實」標記（資料庫無從得知）。
+
+## 已存結果與讀取 API（migration 0012）
+
+`lab_db.parse_results.persist_parse_result` 是上述契約中的 persist：把原始輸出存為 content-addressed artifact，寫入 `parse_results`（manifest、capabilities、不含各頁的 result、`record_sha256`）與每頁一列 `parse_page_results`（status、diagnostics、evidence、observations），全部 append-only。以 job 為冪等鍵；重放必須與整筆紀錄的雜湊相同，否則 `ParseResultConflict`。整筆紀錄超過 64 MiB 以 `ParseResultTooLarge` 拒絕且不寫入任何東西，資料庫另對各 JSON 欄位設上限（manifest／capabilities 1 MiB，result 與頁面 evidence／observations 16 MiB）。
+
+讀取：`GET /api/v1/documents/{document_id}/parse-results/{job_id}`（摘要）與 `.../pages/{page_index}`（單頁）。權限動作為 `read_gold_and_generation_context`（owner、maintainer、reviewer）：organizer 的 parse 輸出是產生 evidence 的來源，SPEC 16.4 讓 participant 的解析與之分開，所以 participant 與 observer 一律 403（不論結果是否存在）；非成員、未知文件、未知結果、不在結果內的頁面為 404。

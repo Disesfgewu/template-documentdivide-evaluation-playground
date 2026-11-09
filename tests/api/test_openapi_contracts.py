@@ -102,6 +102,8 @@ class OpenApiSchemaStructureTests(unittest.TestCase):
             "/resources/{resource_id}/lineage",
             "/api/v1/comparisons",
             "/api/v1/documents/{document_id}/parse",
+            "/api/v1/documents/{document_id}/parse-results/{job_id}",
+            "/api/v1/documents/{document_id}/parse-results/{job_id}/pages/{page_index}",
         }
         self.assertEqual(paths, expected_paths)
 
