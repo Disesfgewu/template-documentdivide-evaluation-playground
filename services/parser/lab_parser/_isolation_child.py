@@ -7,8 +7,29 @@ import resource
 import sys
 
 
+def die_with_parent() -> None:
+    """Ask the kernel to SIGKILL this process when its parent dies (Linux PR_SET_PDEATHSIG).
+
+    The child runs in its own session so a cancelled parent can kill its group, but a parent
+    that is SIGKILLed or ``os._exit``ed never gets to; without this the parser would keep
+    running (up to its CPU/wall limits) with nobody to read its result.
+    """
+    import ctypes
+    import signal
+
+    try:
+        parent = os.getppid()
+        if ctypes.CDLL(None, use_errno=True).prctl(1, int(signal.SIGKILL), 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+            return
+        if os.getppid() != parent:  # the parent died before the call took effect
+            os._exit(1)
+    except Exception:
+        return  # best effort: the limits and the parent's own cancel path still apply
+
+
 def main() -> int:
     # Fixed argv comes only from the trusted parent's validated ProcessLimits.
+    die_with_parent()
     memory, cpu, output, max_pages = map(int, sys.argv[1:])
     os.umask(0o077)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))

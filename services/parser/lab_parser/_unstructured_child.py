@@ -21,6 +21,26 @@ def apply_limits(memory: int, cpu: int, output: int) -> None:
     resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
 
 
+def die_with_parent() -> None:
+    """Ask the kernel to SIGKILL this process when its parent dies (Linux PR_SET_PDEATHSIG).
+
+    The child runs in its own session so a cancelled parent can kill its group, but a parent
+    that is SIGKILLed or ``os._exit``ed never gets to; without this the parser would keep
+    running (up to its CPU/wall limits) with nobody to read its result.
+    """
+    import ctypes
+    import signal
+
+    try:
+        parent = os.getppid()
+        if ctypes.CDLL(None, use_errno=True).prctl(1, int(signal.SIGKILL), 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+            return
+        if os.getppid() != parent:  # the parent died before the call took effect
+            os._exit(1)
+    except Exception:
+        return  # best effort: the limits and the parent's own cancel path still apply
+
+
 def _trivial_pages(path: str) -> list[bool]:
     """True only where /Rotate is 0 and CropBox equals MediaBox.
 
@@ -39,6 +59,7 @@ def _trivial_pages(path: str) -> list[bool]:
 
 
 def main() -> int:
+    die_with_parent()
     apply_limits(*map(int, sys.argv[1:]))
     try:
         import importlib.metadata as md
