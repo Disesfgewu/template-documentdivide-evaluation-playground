@@ -228,6 +228,19 @@ class ParseEndToEndTests(FreshDatabase):
         page2 = squash(" ".join(t for _, t in observed[1]["elements"]))
         for cell in ("TABLEMARK", "Item", "Quantity", "UnitPrice", "Widget", "12", "3.50", "Gadget", "10.25", "Gizmo", "100", "0.75"):
             self.assertIn(cell, page2, f"cell {cell} lost from the table page")
+        # Observed on CI (run 42692463217) and pinned so a change in the library's behaviour is noticed:
+        # the two columns stay separate reading units, in left-to-right order, with disjoint boxes.
+        left, right = observed[0]["evidence"]
+        self.assertIn("LEFTCOL", left[0])
+        self.assertNotIn("RIGHTCOL", left[0])
+        self.assertIn("RIGHTCOL", right[0])
+        self.assertNotIn("LEFTCOL", right[0])
+        self.assertLess(left[1][2], right[1][0], "left column box must end before the right column starts")
+        # The fast strategy has no table model: cells come out as separate elements, not a Table, and
+        # nothing in the result says which cells share a row. (hi_res would; it is blocked here.)
+        types = {t for t, _ in observed[1]["elements"]}
+        self.assertNotIn("Table", types)
+        self.assertGreaterEqual(len(observed[1]["elements"]), 12)
         REPORT["layout_characterization"] = {"synthetic": True, "pages": observed}
 
     def test_cancel_stops_the_real_parser_and_stores_nothing(self):
