@@ -1432,6 +1432,25 @@ class TestChunkPathCostAndCaps(unittest.TestCase):
         self.assertEqual(len(batch.artifacts), 1 + 1 + 1)  # raw, one child, manifest
         self.assertEqual(len([o for o in batch.observations if o.upstream_type == "CompositeElement"]), 20)
 
+    def test_identical_chunks_decode_their_payload_once(self):
+        """One large child referenced by many identical chunks: reproduced at ~40 ms per chunk
+        (200 chunks 7.9 s) when each chunk was decompressed and parsed before the dedupe."""
+        chunk = _chunk("x" * 2000, None)
+        raw = json.dumps([chunk] * 200).encode()
+        real = zlib.decompressobj
+        decodes = []
+
+        def counting(*args, **kwargs):
+            decodes.append(1)
+            return real(*args, **kwargs)
+
+        with unittest.mock.patch("lab_parser.normalize.zlib.decompressobj", side_effect=counting):
+            batch = _normalize_unstructured(raw)
+        self.assertIsNone(batch.quarantine_reason)
+        self.assertEqual(len(decodes), 1, f"payload decoded {len(decodes)} times for 200 identical chunks")
+        self.assertEqual(len([o for o in batch.observations if o.upstream_type == "CompositeElement"]), 200)
+        self.assertEqual(len(batch.artifacts), 1 + 1 + 1)
+
     def test_the_element_count_is_capped(self):
         raw = json.dumps([{"type": "NarrativeText", "text": "a", "metadata": {"page_number": 1}}] * 6).encode()
         with unittest.mock.patch("lab_parser.normalize.MAX_ELEMENTS", 5):

@@ -208,6 +208,7 @@ class _Builder:
         self.artifact_bytes = len(raw)  # running total, never re-summed per chunk
         self.artifact_refs = {self.raw.ref}
         self.elements = 0
+        self.decoded_children: set[str] = set()  # orig_elements strings already decoded
         self.req, self.manifest = req, manifest
         self.document_id, self.document_sha256 = document_id, document_sha256
         self.frames, self.asset_refs = frames, asset_refs
@@ -293,6 +294,7 @@ class _Builder:
         self.artifacts = [self.raw]
         self.artifact_bytes = len(self.raw.content)
         self.artifact_refs = {self.raw.ref}
+        self.decoded_children.clear()
         self.evidence.clear()
         self._evidence_ids.clear()
         self.observations.clear()
@@ -350,6 +352,13 @@ class UnstructuredParser:
                             b.observations.append(Observation(artifact.ref, pointer, None, typ,
                                 item.get("text", ""), html, (), None))
                             continue
+                        if encoded in b.decoded_children:
+                            # Identical chunk payload already decoded and consumed: pay nothing
+                            # again (no base64, zlib or JSON work), keep only this observation.
+                            b.observations.append(Observation(artifact.ref, pointer, None, typ,
+                                item.get("text", ""), html, (), None))
+                            continue
+                        b.decoded_children.add(encoded)
                         compressed = base64.b64decode(encoded, validate=True)
                         decoder = zlib.decompressobj()
                         original = decoder.decompress(compressed, MAX_RAW_BYTES + 1)
