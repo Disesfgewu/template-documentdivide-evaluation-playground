@@ -130,8 +130,8 @@ def main() -> int:
 
     # Real-library legs for the pages the runner must NOT attest (PM review #105): a plain
     # page, a /Rotate 90 page and a CropBox-offset page, same size as the MediaBox so the
-    # layout-size check alone would accept it. Text must survive; only the plain page may
-    # produce a region.
+    # layout-size check alone would accept it. Text must survive; the plain and the CropBox page (translated
+    # frame) produce regions, the sideways page does not.
     multi = synthetic_pdf([(["Plain page alpha"], ""),
                            (["Rotated page bravo"], "/Rotate 90"),
                            (["Cropped page charlie"], "/CropBox [50 50 662 842]")])
@@ -151,11 +151,11 @@ def main() -> int:
     report["checks"] = {
         "plain_and_isolated_legs": ok,
         "mixed_not_quarantined": mixed.quarantine_reason is None,
-        "evidence_only_on_plain_page": sorted(by_page) == [0],
+        "evidence_on_upright_and_crop_pages_only": sorted(by_page) == [0, 2],
         "text_survives_on_all_pages": all(w in seen_text for w in ("alpha", "bravo", "charlie")),
         "observations_on_all_pages": sorted({o.page_index for o in mixed.observations}) == [0, 1, 2],
     }
-    ok = (ok and mixed.quarantine_reason is None and sorted(by_page) == [0]
+    ok = (ok and mixed.quarantine_reason is None and sorted(by_page) == [0, 2]
           and all(word in seen_text for word in ("alpha", "bravo", "charlie"))
           and sorted({o.page_index for o in mixed.observations}) == [0, 1, 2])
 

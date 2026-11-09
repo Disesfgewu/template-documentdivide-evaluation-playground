@@ -65,3 +65,12 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 - **第一輪失敗頁面超過 50%** 視為系統性問題：直接 `PartialParseFailure`，不做逐頁重試（避免 N 頁 × 重試輪數個子程序）。
 - **job 層級期限**（預設 1800 秒）：超過後不再啟動新的子程序並以 `timeout`（暫時性）結束；每個子程序另有自己的 120 秒上限。2000 頁文件在最壞情況下仍是 200 個批次，期限就是它的上界。
 - **合併後的 raw 與 manifest**：合併的 manifest 把 parser 頁碼定為實體頁碼 +1，但它引用的 raw 輸出保留各自子文件內的 `page_number`；每次執行自己的 manifest（有真實的 `page_index_map`）也保存在 artifacts 中。因此要重新 normalize 已存的 raw 輸出必須用該次執行的 manifest，不能用合併的那份。evidence id 取決於批次計畫與重試歷史（不同批次大小或被重試的頁面會有不同的 raw artifact，因此 id 不同），只在相同計畫與結果下穩定。
+
+## 哪些頁面有幾何（Unstructured fast，Refs #7）
+
+在 CI 以真實 unstructured 0.27.36 實測（e2e 的 `bbox_measurement` 與 `bbox_validation_against_pdfium`）：pdfminer 會把 `/Rotate` 套進它的 layout（layout 尺寸是旋轉後的 MediaBox），但**忽略 `/CropBox`**，座標相對於 MediaBox。因此：
+
+- **有幾何**：`/Rotate` 為 0 或 180 的頁面，不論有沒有 CropBox。`lab_parser.frame_transform.display_transform` 由該頁的 MediaBox、CropBox 與旋轉算出旋轉後可見框的原點，座標減去原點再除以顯示尺寸；`DisplayFrame` 以 `layout_width/height` 與 `origin_x/y` 表示（原始 raw 輸出不改）。runner 另外確認算出的顯示尺寸等於 L0 量到的尺寸，否則該頁不給 frame。
+- **PDFium 驗證**：5 個案例（一般、CropBox 偏移、較小 CropBox、180、180＋CropBox）的 evidence 聯集與 PDFium 實際渲染的墨跡框，左右差距約 1 pt、上下約 1–2 pt（容許 3／6 pt，因為 pdfminer 的行框含字型的上下緣）。
+- **沒有幾何（保留文字）**：`/Rotate` 為 90 或 270。pdfminer 對側向文字逐字母拆開並打亂（量測：`"e","ilrahc","ovarbahpA"`），座標雖然正確，但框住的是亂序碎片，所以不認定。
+- 限制：只測了單頁、一種字型與合成文字；多欄、表格、頁面內容超出 CropBox、混合旋轉的實際文件沒有量測。

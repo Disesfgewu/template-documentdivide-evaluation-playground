@@ -112,6 +112,46 @@ class RunnerTests(Base):
                                       **{"geometry": geometry, **kwargs})
             self.assertEqual(ctx.exception.code, "invalid_input")
 
+    def crop_child(self, info, *, pages="[True]"):
+        el = dict(ELEMENT, metadata={"page_number": 1, "coordinates": {
+            "system": "PixelSpace", "layout_width": 612, "layout_height": 792,
+            "points": [[72, 60.9], [72, 110.9], [191.8, 110.9], [191.8, 60.9]]}})
+        source = child_source(elements=(el,), pages=pages).replace(
+            "'attestable_pages': " + pages, "'attestable_pages': " + pages + f", 'page_geometry': {info!r}")
+        return self.child(source)
+
+    def test_a_crop_box_page_is_attested_with_the_translated_box(self):
+        pdf = build_pdf([{"mediabox": (0, 0, 612, 792), "cropbox": (50, 50, 662, 842)}])
+        info = [{"rotation": 0, "mediabox": [0, 0, 612, 792], "cropbox": [50, 50, 662, 842]}]
+        batch = run_unstructured_fast(pdf, document_id="d", budget_ref="b", operation_id="o", _child=self.crop_child(info))
+        self.assertEqual(len(batch.evidence), 1)
+        x0, y0, x1, y1 = batch.evidence[0].regions[0].bbox
+        # The page shows [50..612] x [top 0..742]: x 72 -> (72-50)/562, y 60.9 -> 60.9/742.
+        self.assertAlmostEqual(x0, 22 / 562)
+        self.assertAlmostEqual(y0, 60.9 / 742)
+        self.assertAlmostEqual(x1, (191.8 - 50) / 562)
+
+    def test_a_child_whose_boxes_do_not_match_the_inspected_page_gets_no_frame(self):
+        pdf = build_pdf([{"mediabox": (0, 0, 612, 792), "cropbox": (50, 50, 662, 842)}])
+        lie = [{"rotation": 0, "mediabox": [0, 0, 612, 792], "cropbox": [0, 0, 612, 792]}]   # says: no crop
+        batch = run_unstructured_fast(pdf, document_id="d", budget_ref="b", operation_id="o", _child=self.crop_child(lie))
+        self.assertEqual(len(batch.evidence), 0)
+        for bad in ([{"rotation": 45, "mediabox": [0, 0, 612, 792], "cropbox": [0, 0, 612, 792]}], [{}], [],
+                    [{"rotation": 0, "mediabox": [0, 0, 612], "cropbox": [0, 0, 612, 792]}]):
+            with self.subTest(bad):
+                batch = run_unstructured_fast(pdf, document_id="d", budget_ref="b", operation_id="o", _child=self.crop_child(bad))
+                self.assertEqual(len(batch.evidence), 0)
+
+    def test_rotated_sideways_pages_are_never_attested(self):
+        pdf = build_pdf([{"mediabox": (0, 0, 612, 792), "rotate": 90}])
+        info = [{"rotation": 90, "mediabox": [0, 0, 612, 792], "cropbox": [0, 0, 612, 792]}]
+        el = dict(ELEMENT, metadata={"page_number": 1, "coordinates": {
+            "system": "PixelSpace", "layout_width": 792, "layout_height": 612, "points": [[681, 72], [681, 190], [731, 190], [731, 72]]}})
+        source = child_source(elements=(el,), pages="[False]").replace(
+            "'attestable_pages': [False]", "'attestable_pages': [False], 'page_geometry': " + repr(info))
+        batch = run_unstructured_fast(pdf, document_id="d", budget_ref="b", operation_id="o", _child=self.child(source))
+        self.assertEqual((len(batch.evidence), len(batch.observations)), (0, 1))
+
     def test_every_page_is_selected_and_manifest_is_the_pinned_profile(self):
         batch = self.run_it(child_source())
         self.assertEqual(batch.manifest.page_selection, [0, 1])

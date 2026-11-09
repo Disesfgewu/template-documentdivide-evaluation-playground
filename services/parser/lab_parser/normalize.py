@@ -77,6 +77,21 @@ class DisplayFrame(Contract):
     width: float = Field(gt=0, allow_inf_nan=False)
     height: float = Field(gt=0, allow_inf_nan=False)
     transform_ref: str = Field(min_length=1, max_length=128)
+    # Optional: the upstream layout space is not the display frame itself (pdfminer ignores CropBox, so
+    # coordinates are relative to the MediaBox). ``layout_*`` is the size the upstream reports and
+    # ``origin_*`` where the display frame starts inside it; a point converts as (p - origin) / size.
+    # All four are set together or not at all (see frame_transform.display_transform).
+    layout_width: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    layout_height: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    origin_x: float | None = Field(default=None, allow_inf_nan=False)
+    origin_y: float | None = Field(default=None, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _layout_fields_together(self):
+        given = [v is not None for v in (self.layout_width, self.layout_height, self.origin_x, self.origin_y)]
+        if any(given) and not all(given):
+            raise ValueError("layout_width, layout_height, origin_x and origin_y are set together")
+        return self
 
 
 @dataclass(frozen=True)
@@ -388,15 +403,18 @@ class UnstructuredParser:
                     frame = frames.get(page)
                     if isinstance(coords, dict) and frame and coords.get("system") == "PixelSpace":
                         lw, lh = coords.get("layout_width"), coords.get("layout_height")
-                        if _finite_number(lw) and _finite_number(lh) and lw == frame.width and lh == frame.height:
+                        expected_w = frame.width if frame.layout_width is None else frame.layout_width
+                        expected_h = frame.height if frame.layout_height is None else frame.layout_height
+                        ox, oy = frame.origin_x or 0.0, frame.origin_y or 0.0
+                        if _finite_number(lw) and _finite_number(lh) and lw == expected_w and lh == expected_h:
                             points = coords.get("points")
                             if isinstance(points, list) and len(points) >= 2:
                                 if any(not isinstance(p, list) or len(p) != 2 or any(not _finite_number(v) for v in p) for p in points):
                                     raise ValueError("invalid_coordinates")
-                                bbox = [min(p[0] for p in points)/frame.width,
-                                        min(p[1] for p in points)/frame.height,
-                                        max(p[0] for p in points)/frame.width,
-                                        max(p[1] for p in points)/frame.height]
+                                bbox = [(min(p[0] for p in points) - ox)/frame.width,
+                                        (min(p[1] for p in points) - oy)/frame.height,
+                                        (max(p[0] for p in points) - ox)/frame.width,
+                                        (max(p[1] for p in points) - oy)/frame.height]
                         else:
                             b.warn(page, "unattested_layout_geometry")
                     images = [image_path] if image_path else []

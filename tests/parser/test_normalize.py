@@ -1608,5 +1608,38 @@ class TestCommonConstraints(unittest.TestCase):
                          "ff54576f0fa4b4a677eaf63497a546d78502398d6c9dddb0984cfa02e5294d3b")
 
 
+class DisplayFrameOriginTests(unittest.TestCase):
+    def test_layout_fields_are_set_together_or_not_at_all(self):
+        base = dict(coordinate_frame="rotated_cropbox_top_left", width=562.0, height=742.0, transform_ref="t")
+        DisplayFrame(**base)
+        DisplayFrame(**base, layout_width=612.0, layout_height=792.0, origin_x=50.0, origin_y=0.0)
+        for partial in ({"layout_width": 612.0}, {"origin_x": 1.0, "origin_y": 2.0},
+                        {"layout_width": 612.0, "layout_height": 792.0, "origin_x": 1.0}):
+            with self.subTest(partial), self.assertRaises(ValueError):
+                DisplayFrame(**base, **partial)
+
+    def test_origin_is_subtracted_and_layout_must_match_the_declared_upstream_size(self):
+        frame = DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=562.0, height=742.0, transform_ref="t",
+                             layout_width=612.0, layout_height=792.0, origin_x=50.0, origin_y=0.0)
+        item = {"type": "NarrativeText", "element_id": "e", "text": "x", "metadata": {"page_number": 1, "coordinates": {
+            "system": "PixelSpace", "layout_width": 612, "layout_height": 792,
+            "points": [[100, 100], [100, 200], [300, 200], [300, 100]]}}}
+        batch = UnstructuredParser().normalize(
+            json.dumps([item]).encode(), _make_request([0]), _make_unstructured_manifest([0]),
+            UnstructuredProfile(strategy="fast"), document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames={0: frame}, document_page_count=1)
+        x0, y0, x1, y1 = batch.evidence[0].regions[0].bbox
+        self.assertAlmostEqual(x0, 50 / 562)
+        self.assertAlmostEqual(x1, 250 / 562)
+        self.assertAlmostEqual(y0, 100 / 742)
+        # An upstream layout that is the display size instead of the declared layout loses its geometry.
+        item["metadata"]["coordinates"].update(layout_width=562, layout_height=742)
+        batch = UnstructuredParser().normalize(
+            json.dumps([item]).encode(), _make_request([0]), _make_unstructured_manifest([0]),
+            UnstructuredProfile(strategy="fast"), document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames={0: frame}, document_page_count=1)
+        self.assertEqual(len(batch.evidence), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
