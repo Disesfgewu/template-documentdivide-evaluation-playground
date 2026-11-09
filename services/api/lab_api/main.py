@@ -18,6 +18,7 @@ from .results import router as results_router
 from .runs import router as runs_router
 from .jobs import router as jobs_router
 from .parse_jobs import router as parse_jobs_router
+from .parse_results import router as parse_results_router
 from .lineage import router as lineage_router
 from .readiness import Check, default_checks, run_checks
 
@@ -61,6 +62,7 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
     app.include_router(comparisons_router)
     app.include_router(jobs_router)
     app.include_router(parse_jobs_router)
+    app.include_router(parse_results_router)
     app.include_router(lineage_router)
     app.include_router(benchmarks_router)
 
