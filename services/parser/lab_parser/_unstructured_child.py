@@ -41,21 +41,18 @@ def die_with_parent() -> None:
         return  # best effort: the limits and the parent's own cancel path still apply
 
 
-def _trivial_pages(path: str) -> list[bool]:
-    """True only where /Rotate is 0 and CropBox equals MediaBox.
+def _page_info(path: str) -> list[dict]:
+    """Per page: /Rotate (0, 90, 180, 270) and the MediaBox and CropBox, as pypdf resolves them.
 
-    pdfminer (used by Unstructured fast) ignores CropBox and reports the unrotated
-    MediaBox size, so only such pages have coordinates that can be attested.
+    The parent decides what can be attested from this (Unstructured fast takes its coordinates from
+    pdfminer, which applies /Rotate to the layout size but ignores /CropBox; measured on CI).
     """
     from pypdf import PdfReader
 
     reader = PdfReader(path, strict=True)
-    result = []
-    for page in reader.pages:
-        media = [float(v) for v in page.mediabox]
-        crop = [float(v) for v in page.cropbox]
-        result.append(page.rotation % 360 == 0 and media == crop)
-    return result
+    return [{"rotation": page.rotation % 360,
+             "mediabox": [float(v) for v in page.mediabox], "cropbox": [float(v) for v in page.cropbox]}
+            for page in reader.pages]
 
 
 def main() -> int:
@@ -87,8 +84,12 @@ def main() -> int:
         elements = partition_pdf(filename=source, strategy="fast")
         payload = json.dumps(elements_to_dicts(elements), allow_nan=False, sort_keys=True,
                              separators=(",", ":")).encode("utf-8")
+        info = _page_info(source)
         meta = json.dumps({"unstructured": md.version("unstructured"),
-                           "attestable_pages": _trivial_pages(source)}).encode("utf-8")
+                           # Text units are intact only for upright (0) and upside-down (180) pages; 90 and
+                           # 270 come out letter-scrambled (measured), so they are never attested.
+                           "attestable_pages": [i["rotation"] in (0, 180) for i in info],
+                           "page_geometry": info}).encode("utf-8")
         with open("elements.json", "xb") as stream:
             stream.write(payload)
         with open("meta.json", "xb") as stream:

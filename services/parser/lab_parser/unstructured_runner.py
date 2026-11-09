@@ -20,6 +20,7 @@ from typing import Callable, Sequence
 
 from lab_contracts.parse import ModelRevision, PageMapEntry, ParseManifest, ParseRequest, RenderSettings
 
+from .frame_transform import display_transform
 from .isolation import Inspection, InspectionError, ProcessLimits, _run_child, inspect_geometry
 from .normalize import ADAPTER_REVISION, DisplayFrame, NormalizedBatch, UnstructuredParser, UnstructuredProfile
 
@@ -116,13 +117,32 @@ def run_unstructured_fast(
             or any(type(v) is not bool for v in attestable)):
         # The child and the geometry inspector must agree on the page count.
         raise InspectionError("invalid_child_result")
-    # Unstructured fast takes coordinates from pdfminer, which ignores /CropBox and
-    # /Rotate. Only pages where both are trivial can be attested; elsewhere the text is
-    # kept but no region (and so no evidence unit) is claimed.
-    frames = {p.page_index: DisplayFrame(coordinate_frame="rotated_cropbox_top_left",
-                                         width=p.width_pt, height=p.height_pt,
-                                         transform_ref=f"l0:{sha[:16]}:p{p.page_index}")
-              for p, ok in zip((pages_by_index[i] for i in page_indices), attestable) if ok}
+    # Unstructured fast takes coordinates from pdfminer: /Rotate is applied to its layout, /CropBox is not.
+    # A page is attested only if the child says its text units are intact (rotation 0 or 180) AND the
+    # transform computed from its boxes reproduces the L0 display size. Everything else keeps its text
+    # but claims no region (and so no evidence unit).
+    geometry_info = meta.get("page_geometry")
+    frames = {}
+    for k, (page_index, ok) in enumerate(zip(page_indices, attestable)):
+        if not ok:
+            continue
+        page = pages_by_index[page_index]
+        transform_ref = f"l0:{sha[:16]}:p{page_index}"
+        if geometry_info is None:  # a child that reports no boxes: the layout must be the frame itself
+            frames[page_index] = DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=page.width_pt,
+                                              height=page.height_pt, transform_ref=transform_ref)
+            continue
+        try:
+            info = geometry_info[k]
+            ft = display_transform(info["mediabox"], info["cropbox"], info["rotation"])
+        except (ValueError, TypeError, KeyError, IndexError):
+            continue
+        if abs(ft.width - page.width_pt) > 0.01 or abs(ft.height - page.height_pt) > 0.01:
+            continue  # the child's boxes do not describe the page the inspector measured
+        frames[page_index] = DisplayFrame(
+            coordinate_frame="rotated_cropbox_top_left", width=page.width_pt, height=page.height_pt,
+            transform_ref=transform_ref + ":t", layout_width=ft.layout_width, layout_height=ft.layout_height,
+            origin_x=ft.origin_x, origin_y=ft.origin_y)
     request = ParseRequest(document_artifact_ref="sha256:" + sha, page_indices=page_indices,
                            profile_revision="unstructured-oss-fast",
                            budget_ref=budget_ref, operation_id=operation_id)
