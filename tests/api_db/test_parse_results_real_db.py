@@ -84,6 +84,7 @@ class ParseResultsRealDbTests(FreshDatabase):
             project, owner = self.make_project(c)
             observer = self.add_member(c, project, "observer")
             reviewer = self.add_member(c, project, "reviewer")
+            participant = self.add_member(c, project, "participant")
             _, outsider = self.make_project(c)
         res = self.client.post(f"/api/v1/documents?project_id={project}&logical_id=r{uuid.uuid4().hex[:6]}",
                                headers=self.headers(owner, **{"Content-Type": "application/pdf"}),
@@ -95,7 +96,7 @@ class ParseResultsRealDbTests(FreshDatabase):
         job = uuid.UUID(res.json()["job_id"])
         with self.connect() as c:
             op = c.execute("SELECT operation_id FROM parse_jobs WHERE job_id = %s", (job,)).fetchone()[0]
-        return SimpleSeed(project, owner, observer, reviewer, outsider, doc, job, op)
+        return SimpleSeed(project, owner, observer, reviewer, outsider, doc, job, op, participant)
 
     def finish_with_result(self, s, batch=None, texts=("Alpha", "Gamma")):
         batch = batch or make_batch(s.doc, s.op, texts)
@@ -166,6 +167,45 @@ class ParseResultsRealDbTests(FreshDatabase):
             with self.assertRaises(ParseResultConflict):
                 persist_parse_result(c, self.store, s.project, lease, other)
 
+    def test_a_replay_must_match_the_whole_record_not_only_the_result(self):
+        import dataclasses
+        s = self.seed()
+        record = record_from_batch(make_batch(s.doc, s.op))
+        changed_manifest = dataclasses.replace(record, manifest={**record.manifest, "cost_usd": 12.5})
+        changed_page = dataclasses.replace(record, pages=(dataclasses.replace(record.pages[0], diagnostics=["x"]),) + record.pages[1:])
+        with self.connect() as c:
+            lease = jobs.acquire(c, s.project, s.job, "w1")
+            persist_parse_result(c, self.store, s.project, lease, record)
+            for other in (changed_manifest, changed_page):
+                with self.assertRaises(ParseResultConflict):
+                    persist_parse_result(c, self.store, s.project, lease, other)
+
+    def test_an_oversized_record_is_refused_before_anything_is_written(self):
+        import dataclasses
+        from lab_db.parse_results import ParseResultTooLarge
+        s = self.seed()
+        record = record_from_batch(make_batch(s.doc, s.op))
+        huge = [{"page_index": 0, "raw_content": "x" * (65 * 1024 * 1024)}]
+        record = dataclasses.replace(record, pages=(dataclasses.replace(record.pages[0], observations=huge),) + record.pages[1:])
+        with self.connect() as c:
+            before = c.execute("SELECT count(*) FROM artifacts").fetchone()[0]
+            lease = jobs.acquire(c, s.project, s.job, "w1")
+            with self.assertRaises(ParseResultTooLarge):
+                persist_parse_result(c, self.store, s.project, lease, record)
+            self.assertEqual(c.execute("SELECT count(*) FROM artifacts").fetchone()[0], before)
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_results WHERE job_id = %s", (s.job,)).fetchone()[0], 0)
+
+    def test_the_database_also_caps_each_json_column(self):
+        s = self.seed()
+        self.finish_with_result(s)
+        with self.connect() as c:
+            with self.assertRaises(errors.CheckViolation):
+                with c.transaction():
+                    c.execute("INSERT INTO parse_page_results SELECT job_id, project_id, document_version_id, 0, 'ok', '[]', "
+                              "jsonb_build_array(repeat('x', 17000000)), '[]' FROM parse_results WHERE job_id = %s", (s.job,))
+            stored = c.execute("SELECT result FROM parse_results WHERE job_id = %s", (s.job,)).fetchone()[0]
+            self.assertNotIn("pages", stored)  # per-page data lives only in parse_page_results
+
     def test_a_stale_lease_cannot_persist(self):
         s = self.seed()
         record = record_from_batch(make_batch(s.doc, s.op))
@@ -196,8 +236,9 @@ class ParseResultsRealDbTests(FreshDatabase):
         res = self.client.get(base, headers=self.headers(s.owner))
         self.assertEqual(res.status_code, 200, res.text)
         body = res.json()
-        self.assertEqual((body["parser"], body["parser_version"], body["effective_profile"]),
-                         ("unstructured", "0.27.36", "unstructured-oss-fast"))
+        self.assertEqual((body["parser"], body["parser_version"], body["effective_profile"], body["strategy"]),
+                         ("unstructured", "0.27.36", "unstructured-oss-fast", "fast"))
+        self.assertEqual(body["operation_id"], str(s.op))
         self.assertEqual([p["page_index"] for p in body["pages"]], [0, 1, 2])
         first = self.client.get(f"{base}/pages/0", headers=self.headers(s.owner)).json()
         self.assertEqual(first["page_index"], 0)
@@ -208,7 +249,7 @@ class ParseResultsRealDbTests(FreshDatabase):
         self.assertEqual((empty["evidence"], empty["observations"]), ([], []))
         third = self.client.get(f"{base}/pages/2", headers=self.headers(s.owner)).json()
         self.assertEqual([e["raw_content"] for e in third["evidence"]], ["Gamma"])
-        self.assertTrue(self.client.get(f"{base}/pages/0", headers=self.headers(s.reviewer)).status_code == 200)
+        self.assertEqual(self.client.get(f"{base}/pages/0", headers=self.headers(s.reviewer)).status_code, 200)
 
     def test_access_and_missing_results(self):
         s = self.seed()
@@ -217,7 +258,12 @@ class ParseResultsRealDbTests(FreshDatabase):
         get = lambda url, actor=None, **h: self.client.get(url, headers=self.headers(actor, **h) if actor else {})
         self.assertEqual(get(base).status_code, 401)
         self.assertEqual(get(base, s.outsider).status_code, 404)           # non-member
-        self.assertEqual(get(base, s.observer).status_code, 403)           # observer needs an explicit grant
+        # Organizer parse output feeds evidence generation: participants and observers never read it,
+        # and the answer does not depend on whether such a result exists.
+        for actor in (s.participant, s.observer):
+            self.assertEqual(get(base, actor).status_code, 403)
+            self.assertEqual(get(f"{base}/pages/0", actor).status_code, 403)
+            self.assertEqual(get(f"/api/v1/documents/{s.doc}/parse-results/{uuid.uuid4()}", actor).status_code, 403)
         self.assertEqual(get(f"/api/v1/documents/{s.doc}/parse-results/{uuid.uuid4()}", s.owner).status_code, 404)
         self.assertEqual(get(f"/api/v1/documents/{uuid.uuid4()}/parse-results/{s.job}", s.owner).status_code, 404)
         self.assertEqual(get(f"{base}/pages/{PAGES}", s.owner).status_code, 404)
@@ -245,7 +291,8 @@ class ParseResultsRealDbTests(FreshDatabase):
 
 
 class SimpleSeed:
-    def __init__(self, project, owner, observer, reviewer, outsider, doc, job, op):
+    def __init__(self, project, owner, observer, reviewer, outsider, doc, job, op, participant):
+        self.participant = participant
         self.project, self.owner, self.observer, self.reviewer, self.outsider = project, owner, observer, reviewer, outsider
         self.doc, self.job, self.op = doc, job, op
 

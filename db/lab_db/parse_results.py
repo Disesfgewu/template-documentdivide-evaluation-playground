@@ -11,6 +11,8 @@ document text.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import uuid
 
 import psycopg
@@ -19,13 +21,24 @@ from psycopg.types.json import Jsonb
 from .jobs import Lease, LeaseLost
 from .storage import LocalArtifactStore, store_and_register
 
-__all__ = ["PageRecord", "ParseResultConflict", "ParseResultRecord", "persist_parse_result"]
+__all__ = ["PageRecord", "ParseResultConflict", "ParseResultRecord", "ParseResultTooLarge", "persist_parse_result"]
 
 MAX_RAW_ARTIFACTS = 20_000
+MAX_RECORD_BYTES = 64 * 1024 * 1024  # canonical JSON of the whole record; larger fails closed
 
 
 class ParseResultConflict(Exception):
     """A different result is already stored for this job."""
+
+
+class ParseResultTooLarge(Exception):
+    """The record exceeds MAX_RECORD_BYTES; nothing is stored."""
+
+
+def _canonical(record: "ParseResultRecord") -> bytes:
+    body = {"manifest": record.manifest, "capabilities": record.capabilities, "result": record.result,
+            "pages": [[p.page_index, p.status, p.diagnostics, p.evidence, p.observations] for p in record.pages]}
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -68,9 +81,13 @@ def persist_parse_result(
     if {p.page_index for p in record.pages} != {p["page_index"] for p in record.result.get("pages", [])}:
         raise ValueError("page records must match the pages named in the result")
 
-    existing = conn.execute("SELECT result FROM parse_results WHERE job_id = %s", (lease.job_id,)).fetchone()
+    canonical = _canonical(record)
+    if len(canonical) > MAX_RECORD_BYTES:
+        raise ParseResultTooLarge(str(lease.job_id))
+    digest = hashlib.sha256(canonical).hexdigest()
+    existing = conn.execute("SELECT record_sha256 FROM parse_results WHERE job_id = %s", (lease.job_id,)).fetchone()
     if existing is not None:
-        if existing[0] != record.result:
+        if existing[0] != digest:
             raise ParseResultConflict(str(lease.job_id))
         return  # idempotent replay: identical content is already stored
 
@@ -78,9 +95,10 @@ def persist_parse_result(
                     for data in record.raw_artifacts]
     conn.execute(
         "INSERT INTO parse_results (job_id, project_id, document_version_id, operation_id, manifest, capabilities, "
-        "result, raw_artifact_ids) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        "result, record_sha256, raw_artifact_ids) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (lease.job_id, project_id, document_version_id, operation_id, Jsonb(record.manifest),
-         Jsonb(record.capabilities), Jsonb(record.result), artifact_ids),
+         Jsonb(record.capabilities), Jsonb({k: v for k, v in record.result.items() if k != "pages"}),
+         digest, artifact_ids),
     )
     with conn.cursor() as cur:
         cur.executemany(

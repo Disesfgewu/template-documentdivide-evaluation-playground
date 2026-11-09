@@ -12,9 +12,15 @@ CREATE TABLE parse_results (
     project_id          uuid NOT NULL,
     document_version_id uuid NOT NULL,
     operation_id        uuid NOT NULL,
-    manifest            jsonb NOT NULL CHECK (jsonb_typeof(manifest) = 'object'),
-    capabilities        jsonb NOT NULL CHECK (jsonb_typeof(capabilities) = 'object'),
-    result              jsonb NOT NULL CHECK (jsonb_typeof(result) = 'object'),
+    -- Size ceilings are checked again here (persist_parse_result enforces the overall cap first).
+    manifest            jsonb NOT NULL CHECK (jsonb_typeof(manifest) = 'object' AND octet_length(manifest::text) <= 1048576),
+    capabilities        jsonb NOT NULL CHECK (jsonb_typeof(capabilities) = 'object' AND octet_length(capabilities::text) <= 1048576),
+    -- The ParseResult without its per-page statuses: those live only in parse_page_results.
+    result              jsonb NOT NULL CHECK (jsonb_typeof(result) = 'object' AND NOT (result ? 'pages')
+                                              AND octet_length(result::text) <= 16777216),
+    -- sha256 of the canonical record (manifest, capabilities, result, every page): an idempotent
+    -- replay must match all of it, not just the result.
+    record_sha256       text NOT NULL CHECK (record_sha256 ~ '^[0-9a-f]{64}$'),
     raw_artifact_ids    uuid[] NOT NULL CHECK (cardinality(raw_artifact_ids) >= 1),
     created_at          timestamptz NOT NULL DEFAULT now(),
     UNIQUE (project_id, operation_id),
@@ -32,9 +38,9 @@ CREATE TABLE parse_page_results (
     document_version_id uuid NOT NULL,
     page_index          integer NOT NULL CHECK (page_index >= 0),
     status              text NOT NULL CHECK (status IN ('ok', 'partial', 'needs_review', 'failed')),
-    diagnostics         jsonb NOT NULL CHECK (jsonb_typeof(diagnostics) = 'array'),
-    evidence            jsonb NOT NULL CHECK (jsonb_typeof(evidence) = 'array'),
-    observations        jsonb NOT NULL CHECK (jsonb_typeof(observations) = 'array'),
+    diagnostics         jsonb NOT NULL CHECK (jsonb_typeof(diagnostics) = 'array' AND octet_length(diagnostics::text) <= 65536),
+    evidence            jsonb NOT NULL CHECK (jsonb_typeof(evidence) = 'array' AND octet_length(evidence::text) <= 16777216),
+    observations        jsonb NOT NULL CHECK (jsonb_typeof(observations) = 'array' AND octet_length(observations::text) <= 16777216),
     PRIMARY KEY (job_id, page_index),
     FOREIGN KEY (project_id, job_id) REFERENCES parse_results(project_id, job_id) ON DELETE RESTRICT,
     FOREIGN KEY (project_id, document_version_id) REFERENCES document_versions(project_id, id) ON DELETE RESTRICT

@@ -141,3 +141,9 @@ Results summaries explicitly return `summary_scope="scored_rows_only"` and `prov
 - 權限：`read_gold_trace_and_lineage`，只有 owner、maintainer、reviewer 可讀；participant 與 observer 回 403（血緣可能暴露由 gold 衍生的資源）。資源不存在、或屬於呼叫者不是成員的 project，兩者都回完全相同的 404 `resource not found`，不洩漏存在與否。
 - 回應：`nodes`（`id`、`resource_type`、`logical_id`、`revision`、`content_hash`、`depth`）、`edges`（`upstream_id`、`downstream_id`、`relation`、`operation_id`）、`next_cursor`、`truncated`（深度、節點、邊數或 frontier 上限之外還有未走訪的鄰居或未回傳的邊）、`frontier_count`（有界未走訪鄰居數，上限 1000）。
 - 資源與分頁語意：資料庫讀取與回應均設強制上限（edge 與 frontier 查詢均帶 SQL `LIMIT`，避免高扇出與同端點多 operation 消耗大量記憶體）。分頁以節點（depth, id）為主序；每條已走訪 edge 列在其較遠端節點所在頁面。`truncated: true` 只在確有資料被省略時出現：深度、max_nodes、max_edges 或 max_frontier 上限之外仍有未走訪的鄰居，或有尚未回傳的 edge（包含指向已走訪節點的 edge）；剛好用完上限而沒有省略任何資料時為 `false`。`cursor` 採 HMAC 簽章並綁定該次查詢（資源、方向、depth、max_nodes、max_edges），竄改任何欄位（包含保留 q 但變更 depth 或 node id）一律 400；`limit` 可在翻頁間改變。
+
+## 解析結果讀取（Refs #7）
+
+- `GET /api/v1/documents/{document_id}/parse-results/{job_id}`：摘要（parser、版本、profile、strategy、各頁狀態）。
+- `GET /api/v1/documents/{document_id}/parse-results/{job_id}/pages/{page_index}`：單頁 status、diagnostics、evidence、observations。
+- 權限 `read_gold_and_generation_context`（owner／maintainer／reviewer）；participant 與 observer 回 403，非成員與不存在回 404。細節與取捨見 `docs/PARSE_WORKER.md`。
