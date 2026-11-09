@@ -173,3 +173,12 @@ jobs:
           "$RUNNER_TEMP/e2e-venv/bin/pip" install -r services/api/requirements.lock -r services/parser/requirements.lock -r contracts/requirements.lock -r db/requirements.lock
           "$RUNNER_TEMP/e2e-venv/bin/pip" install "unstructured[pdf]==0.27.36"
           "$RUNNER_TEMP/e2e-venv/bin/pip" freeze > "$RUNNER_TEMP/e2e-freeze.txt"
+      - name: End-to-end acceptance
+        env:
+          LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+          LAB_E2E_REAL_UNSTRUCTURED: "1"
+          LAB_E2E_REPORT: ${{ runner.temp }}/e2e-report.json
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/e2e-venv/bin/python" -m unittest -v tests.e2e.test_parse_e2e_real 2>&1 | tee "$RUNNER_TEMP/e2e-log.txt"
+          cat "$RUNNER_TEMP/e2e-report.json"
