@@ -36,7 +36,7 @@ from lab_db import jobs
 from lab_db.storage import LocalArtifactStore
 from lab_parser.isolation import InspectionError
 from lab_parser.normalize import NormalizedBatch
-from lab_parser.unstructured_runner import run_unstructured_fast
+from lab_parser.batch_parse import PartialParseFailure, parse_in_batches
 
 __all__ = ["ParseOutcome", "SUPPORTED_PROFILE", "process_parse_job"]
 
@@ -157,7 +157,7 @@ def process_parse_job(
     connect: Callable[[], psycopg.Connection],
     ttl_seconds: int = 60,
     python: str | None = None,
-    run: Callable[..., NormalizedBatch] = run_unstructured_fast,
+    run: Callable[..., NormalizedBatch] = parse_in_batches,
 ) -> ParseOutcome:
     """Claim and execute one parse job. Raises ``jobs.LeaseUnavailable`` if it is not claimable.
 
@@ -235,6 +235,9 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
                         budget_ref=budget_ref or "unbudgeted", operation_id=str(operation_id))
             error = None
         except InspectionError as exc:
+            batch, error = None, exc.code
+        except PartialParseFailure as exc:
+            # Some pages stayed failed after the retry budget: never published as a success.
             batch, error = None, exc.code
     if beat.lost.is_set() or error == "cancelled":
         return _stopped(conn, project_id, job_id)

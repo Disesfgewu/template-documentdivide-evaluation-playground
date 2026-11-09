@@ -119,7 +119,7 @@ class Worker:
     def _run_with_abort(self):
         base = self.run
         if base is None:
-            from lab_parser.unstructured_runner import run_unstructured_fast as base
+            from lab_parser.batch_parse import parse_in_batches as base
 
         def run(data, cancelled=None, **kw):
             inner = cancelled or (lambda: False)

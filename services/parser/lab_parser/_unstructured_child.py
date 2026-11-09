@@ -67,11 +67,28 @@ def main() -> int:
         from unstructured.partition.pdf import partition_pdf
         from unstructured.staging.base import elements_to_dicts
 
-        elements = partition_pdf(filename="source.pdf", strategy="fast")
+        source = "source.pdf"
+        if os.path.exists("pages.json"):
+            # A batch: parse only these original pages, in this order (the parent validated them).
+            from pypdf import PdfReader, PdfWriter
+
+            with open("pages.json", "rb") as stream:
+                pages = json.loads(stream.read(65536))
+            reader = PdfReader("source.pdf", strict=True)
+            if (type(pages) is not list or not pages or any(type(i) is not int or not 0 <= i < len(reader.pages)
+                                                            for i in pages)):
+                return 1
+            writer = PdfWriter()
+            for i in pages:
+                writer.add_page(reader.pages[i])
+            with open("subset.pdf", "xb") as stream:
+                writer.write(stream)
+            source = "subset.pdf"
+        elements = partition_pdf(filename=source, strategy="fast")
         payload = json.dumps(elements_to_dicts(elements), allow_nan=False, sort_keys=True,
                              separators=(",", ":")).encode("utf-8")
         meta = json.dumps({"unstructured": md.version("unstructured"),
-                           "attestable_pages": _trivial_pages("source.pdf")}).encode("utf-8")
+                           "attestable_pages": _trivial_pages(source)}).encode("utf-8")
         with open("elements.json", "xb") as stream:
             stream.write(payload)
         with open("meta.json", "xb") as stream:
