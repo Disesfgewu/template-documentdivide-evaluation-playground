@@ -23,6 +23,12 @@ from lab_contracts.parse import CAPABILITIES, Capability, CapabilityManifest, Pa
 from lab_contracts.source import SourceRegion
 
 MAX_RAW_BYTES = 16 * 1024 * 1024
+# Work caps checked before any per-item or whole-payload validation. Without them cost was
+# bounded only by MAX_RAW_BYTES (a 16 MB MinerU payload took ~1 min in jsonschema alone).
+MAX_ELEMENTS = 200_000   # Unstructured elements (flat plus expanded orig_elements)
+MAX_ARTIFACTS = 20_000   # distinct decompressed orig_elements artifacts
+MAX_MINERU_PAGES = 2_000
+MAX_MINERU_BLOCKS = 20_000
 ADAPTER_REVISION = "raw-normalization-1"
 
 
@@ -54,6 +60,15 @@ class MinerUProfile(Contract):
 
 class DisplayFrame(Contract):
     """Attested upstream display frame, from the actual parser invocation.
+
+    Conversion is by this attested frame only: a PixelSpace point is divided by the frame
+    width/height after the upstream layout size is checked to equal the frame. This module
+    does not compute CropBox or /Rotate itself (``geometry.to_region_space`` is not used
+    here), so the caller that builds the frame must derive its size and ``transform_ref``
+    from the real page; a rotated page is attested as its swapped (display) size.
+    MinerU bboxes are accepted only as already normalized [0, 1] top-left coordinates;
+    point or pixel boxes fall outside [0, 1] and are rejected as
+    ``geometry_outside_display_frame`` (the item keeps its text, without geometry).
 
     No default frame: callers must verify CropBox/rotation against L0. Upstream
     normalized/PixelSpace bboxes may only be used if this provenance is known.
@@ -190,6 +205,9 @@ class _Builder:
             document_sha256=document_sha256, page_index=0, bbox=[0, 0, 1, 1], kind="page", quote=None)))
         self.raw = Artifact(raw)
         self.artifacts = [self.raw]
+        self.artifact_bytes = len(raw)  # running total, never re-summed per chunk
+        self.artifact_refs = {self.raw.ref}
+        self.elements = 0
         self.req, self.manifest = req, manifest
         self.document_id, self.document_sha256 = document_id, document_sha256
         self.frames, self.asset_refs = frames, asset_refs
@@ -273,6 +291,8 @@ class _Builder:
     def quarantine(self, reason):
         self.reason = reason
         self.artifacts = [self.raw]
+        self.artifact_bytes = len(self.raw.content)
+        self.artifact_refs = {self.raw.ref}
         self.evidence.clear()
         self._evidence_ids.clear()
         self.observations.clear()
@@ -304,6 +324,9 @@ class UnstructuredParser:
             def consume(items, artifact, prefix, depth=0):
                 if depth > 1 or not isinstance(items, list):
                     raise ValueError("invalid_orig_elements")
+                b.elements += len(items)
+                if b.elements > MAX_ELEMENTS:
+                    raise ValueError("element_count_limit")
                 for i, item in enumerate(items):
                     if not isinstance(item, dict) or not isinstance(item.get("type"), str):
                         raise ValueError("invalid_element_shape")
@@ -333,9 +356,15 @@ class UnstructuredParser:
                         if len(original) > MAX_RAW_BYTES or not decoder.eof or decoder.unused_data:
                             raise ValueError("orig_elements_decompression_limit_or_corruption")
                         child = Artifact(original)
-                        if sum(len(a.content) for a in b.artifacts) + len(original) > 2 * MAX_RAW_BYTES:
-                            raise ValueError("total_orig_elements_limit")
-                        b.artifacts.append(child)
+                        # Identical children are retained once; the byte total is a running
+                        # counter so the check stays O(1) per chunk.
+                        if child.ref not in b.artifact_refs:
+                            if (b.artifact_bytes + len(original) > 2 * MAX_RAW_BYTES
+                                    or len(b.artifacts) >= MAX_ARTIFACTS):
+                                raise ValueError("total_orig_elements_limit")
+                            b.artifact_bytes += len(original)
+                            b.artifact_refs.add(child.ref)
+                            b.artifacts.append(child)
                         consume(_json(original), child, "", depth + 1)
                         # Derived chunk text never overwrites its original elements.
                         b.observations.append(Observation(artifact.ref, pointer, None, typ,
@@ -384,6 +413,16 @@ class MinerUParser:
             payload = _json(raw)
             if not isinstance(payload, dict) or payload.get("schema") != "docvortex.middle" or payload.get("schema_version") != "2.0":
                 return b.quarantine("unsupported_mineru_schema")
+            # Cheap structural counts first: schema validation costs ~0.4 ms per block.
+            pages_value = payload.get("pages")
+            if isinstance(pages_value, list) and len(pages_value) > MAX_MINERU_PAGES:
+                return b.quarantine("mineru_page_count_limit")
+            block_total = 0
+            for page_value in pages_value if isinstance(pages_value, list) else ():
+                blocks_value = page_value.get("blocks") if isinstance(page_value, dict) else None
+                block_total += len(blocks_value) if isinstance(blocks_value, list) else 0
+            if block_total > MAX_MINERU_BLOCKS:
+                return b.quarantine("mineru_block_count_limit")
             if not _DOCVORTEX_VALIDATOR.is_valid(payload):
                 return b.quarantine("invalid_mineru_output_schema")
             if (manifest.parser_name != "mineru" or manifest.package_or_service_version != profile.version

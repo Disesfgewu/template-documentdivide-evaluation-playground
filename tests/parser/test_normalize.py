@@ -27,6 +27,10 @@ from lab_parser.normalize import (
     _Builder,
     DisplayFrame,
     MAX_RAW_BYTES,
+    MAX_ARTIFACTS,
+    MAX_ELEMENTS,
+    MAX_MINERU_BLOCKS,
+    MAX_MINERU_PAGES,
     MinerUParser,
     MinerUProfile,
     UnstructuredParser,
@@ -1377,6 +1381,153 @@ class TestNormalizationCost(unittest.TestCase):
         builder.quarantine("invalid_unstructured_output")
         builder.add(builder.raw, "/0", 0, "NarrativeText", "a", [0.1, 0.1, 0.2, 0.2])  # same pointer after a reset
         self.assertEqual(len(builder.evidence), 1)
+
+
+def _chunk(text: str, distinct: int | None):
+    """A CompositeElement whose orig_elements holds one element (distinct text per chunk when given)."""
+    inner = json.dumps([{"type": "NarrativeText", "text": text if distinct is None else f"{text}{distinct}",
+                         "metadata": {"page_number": 1}}]).encode()
+    return {"type": "CompositeElement", "text": text,
+            "metadata": {"orig_elements": base64.b64encode(zlib.compress(inner)).decode()}}
+
+
+def _normalize_unstructured(raw: bytes):
+    pages = [0]
+    return UnstructuredParser().normalize(
+        raw, _make_request(pages), _make_unstructured_manifest(pages), UnstructuredProfile(strategy="fast"),
+        document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+        frames=_default_frames(pages), document_page_count=1)
+
+
+class TestChunkPathCostAndCaps(unittest.TestCase):
+    """The chunk path (CompositeElement/TableChunk with orig_elements) re-summed every retained
+    artifact per chunk (10k chunks 1.7 s, 40k chunks 24 s). Counts and caps are asserted
+    structurally so the tests do not depend on machine speed."""
+
+    def test_the_retained_artifacts_are_not_rescanned_per_chunk(self):
+        scans = []
+        real_init = _Builder.__init__
+
+        class Counting(list):
+            def __iter__(self):
+                scans.append(1)
+                return super().__iter__()
+
+        def init(self, *a, **k):
+            real_init(self, *a, **k)
+            self.artifacts = Counting(self.artifacts)
+
+        raw = json.dumps([_chunk("t", i) for i in range(200)]).encode()
+        with unittest.mock.patch.object(_Builder, "__init__", init):
+            batch = _normalize_unstructured(raw)
+        self.assertIsNone(batch.quarantine_reason)
+        self.assertEqual(len(batch.artifacts), 1 + 200 + 1)  # raw, 200 distinct children, manifest
+        # finish() reads the list a constant number of times; the chunk loop must not.
+        self.assertLessEqual(len(scans), 5, f"artifacts scanned {len(scans)} times for 200 chunks")
+
+    def test_identical_children_are_retained_once_but_every_chunk_is_observed(self):
+        raw = json.dumps([_chunk("same", None) for _ in range(20)]).encode()
+        batch = _normalize_unstructured(raw)
+        self.assertIsNone(batch.quarantine_reason)
+        self.assertEqual(len(batch.artifacts), 1 + 1 + 1)  # raw, one child, manifest
+        self.assertEqual(len([o for o in batch.observations if o.upstream_type == "CompositeElement"]), 20)
+
+    def test_the_element_count_is_capped(self):
+        raw = json.dumps([{"type": "NarrativeText", "text": "a", "metadata": {"page_number": 1}}] * 6).encode()
+        with unittest.mock.patch("lab_parser.normalize.MAX_ELEMENTS", 5):
+            batch = _normalize_unstructured(raw)
+        self.assertEqual(batch.quarantine_reason, "invalid_unstructured_output")
+        self.assertEqual(len(batch.evidence), 0)
+        self.assertGreater(MAX_ELEMENTS, 10_000)
+
+    def test_the_distinct_artifact_count_is_capped(self):
+        raw = json.dumps([_chunk("t", i) for i in range(4)]).encode()
+        with unittest.mock.patch("lab_parser.normalize.MAX_ARTIFACTS", 3):  # raw + 2 children
+            batch = _normalize_unstructured(raw)
+        self.assertEqual(batch.quarantine_reason, "invalid_unstructured_output")
+        self.assertEqual(len(batch.artifacts), 2)  # raw + manifest only after quarantine
+        self.assertGreater(MAX_ARTIFACTS, 1_000)
+
+
+def _mineru_payload(pages: int, blocks_per_page: int, bbox=(0.1, 0.1, 0.9, 0.9)) -> dict:
+    return {
+        "schema": "docvortex.middle", "schema_version": "2.0",
+        "metadata": {"producer": {"name": "mineru", "version": "4.1.7"}, "file_suffix": "pdf"},
+        "is_full_document": False,
+        "pages": [{"page_idx": p, "blocks": [
+            {"type": "text", "index": i, "bbox": list(bbox),
+             "content": [{"type": "text", "content": "x"}]} for i in range(blocks_per_page)]}
+            for p in range(pages)],
+        "extensions": {"mineru": {"tier": "standard"}, "docvortex_layout": {"version": 1, "pages": [
+            {"page_idx": p, "width_pt": 612.0, "height_pt": 792.0} for p in range(pages)]}},
+    }
+
+
+def _normalize_mineru(payload: dict, frames=None):
+    pages = [p["page_idx"] for p in payload["pages"]]
+    return MinerUParser().normalize(
+        json.dumps(payload).encode(), _make_request(pages, "mineru-standard"),
+        _make_mineru_manifest(pages, tier="standard"), MinerUProfile(tier="standard"),
+        document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+        frames=frames or _default_frames(pages), document_page_count=max(pages) + 1)
+
+
+class TestMinerUCapsAndFrames(unittest.TestCase):
+    def test_block_and_page_caps_apply_before_schema_validation(self):
+        validated = []
+        with unittest.mock.patch("lab_parser.normalize.MAX_MINERU_BLOCKS", 5), \
+                unittest.mock.patch("lab_parser.normalize._DOCVORTEX_VALIDATOR") as validator:
+            validator.is_valid.side_effect = lambda payload: validated.append(1) or True
+            batch = _normalize_mineru(_mineru_payload(1, 6))
+        self.assertEqual(batch.quarantine_reason, "mineru_block_count_limit")
+        self.assertEqual(validated, [], "the over-cap payload reached whole-payload schema validation")
+        with unittest.mock.patch("lab_parser.normalize.MAX_MINERU_PAGES", 1):
+            batch = _normalize_mineru(_mineru_payload(2, 1))
+        self.assertEqual(batch.quarantine_reason, "mineru_page_count_limit")
+        self.assertGreaterEqual(MAX_MINERU_BLOCKS, 1000)
+        self.assertGreaterEqual(MAX_MINERU_PAGES, 600)
+
+    def test_a_payload_at_the_cap_is_accepted(self):
+        with unittest.mock.patch("lab_parser.normalize.MAX_MINERU_BLOCKS", 6):
+            batch = _normalize_mineru(_mineru_payload(1, 6))
+        self.assertIsNone(batch.quarantine_reason)
+        self.assertEqual(len(batch.evidence), 6)
+
+    def test_point_or_pixel_boxes_are_rejected_not_scaled(self):
+        batch = _normalize_mineru(_mineru_payload(1, 1, bbox=(72.0, 72.0, 300.0, 120.0)))
+        self.assertIsNone(batch.quarantine_reason)
+        self.assertEqual(len(batch.evidence), 0)
+        self.assertIsNone(batch.observations[0].evidence_id)
+        self.assertEqual(batch.result.pages[0].status, "needs_review")
+
+
+class TestAttestedDisplayFrameOnly(unittest.TestCase):
+    """Rotated pages: conversion divides by the attested display frame and nothing else."""
+
+    @staticmethod
+    def _element(layout_w, layout_h):
+        return json.dumps([{"type": "NarrativeText", "text": "a", "metadata": {
+            "page_number": 1, "coordinates": {"system": "PixelSpace", "layout_width": layout_w,
+            "layout_height": layout_h, "points": [[79.2, 61.2], [79.2, 122.4], [396.0, 122.4], [396.0, 61.2]]}}}]).encode()
+
+    def _normalize_with_frame(self, raw, width, height):
+        pages = [0]
+        frames = {0: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=width, height=height,
+                                  transform_ref="tr-rot90")}
+        return UnstructuredParser().normalize(
+            raw, _make_request(pages), _make_unstructured_manifest(pages), UnstructuredProfile(strategy="fast"),
+            document_id=SYNTHETIC_DOC_ID, document_sha256=SYNTHETIC_DOC_SHA256,
+            frames=frames, document_page_count=1)
+
+    def test_a_rotated_page_uses_the_swapped_display_size(self):
+        batch = self._normalize_with_frame(self._element(792.0, 612.0), 792.0, 612.0)
+        region = batch.evidence[0].regions[0]
+        self.assertEqual([round(v, 4) for v in region.bbox], [0.1, 0.1, 0.5, 0.2])
+
+    def test_unrotated_layout_size_for_a_rotated_frame_is_unattested(self):
+        batch = self._normalize_with_frame(self._element(612.0, 792.0), 792.0, 612.0)
+        self.assertEqual(len(batch.evidence), 0)
+        self.assertIn("unattested_layout_geometry", batch.result.pages[0].diagnostics)
 
 
 class TestCommonConstraints(unittest.TestCase):
