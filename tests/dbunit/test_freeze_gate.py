@@ -1,7 +1,7 @@
 """Unit tests for fail-closed benchmark freeze gate (SPEC 10, R05, R06, issue #10).
 
 Verifies the optimistic-concurrency state change boundary in lab_db.repo
-and its simulation of the 0010 database trigger boundary without requiring a live
+and its simulation of the 0012 database trigger boundary without requiring a live
 PostgreSQL instance. Real PostgreSQL tests reside in tests/db/test_benchmarks.py.
 """
 from __future__ import annotations
