@@ -45,4 +45,14 @@
 - 遮罩造成的部分可見性。
 - outbox `delivered_at` 與逐 consumer 消費的語意統一。
 - parse_runs/observations 的 revision 與 hash 補強。
-- pgvector collection（#11）。
+- 真 embedding model 的呼叫、method-service 與 benchmark 建題流程對 collection 的實際接線（#11／#10／#6）。
+
+## pgvector 向量儲存（#11 增量，migration 0010、`lab_db.vectors`）
+
+- `embedding_spaces`：不可變的 embedding 身分（`UNIQUE(project_id, config_hash)`）；不同 space 的向量不能互相比較。
+- `vector_collections`：屬於一個 project、一個 space 與一種用途（`method` 或 `benchmark_generation`，兩者互相隔離）；`method` 才需要 `method_revision`。狀態 `building → ready → frozen`（或 `failed`）；`ready` 必須有 `manifest_hash`、`item_count` 與 `ready_at`，發佈前以 `manifest` 重算核對，未 ready 的 collection 不能查詢。
+- `vector_items`／`vector_item_regions`：append-only。向量欄位不指定維度，由 trigger 對照 space 的維度；只在 `building` 時可寫入，限同 project 與文件範圍，cosine 不接受零向量。
+- `vector_index_revisions`：每個 collection 一個部分 HNSW 表達式索引（`((embedding::vector(d)) ops) WHERE collection_id = ...`）或精確掃描。查詢以 `EXPLAIN` 驗證確實使用索引；沒用到就丟 `IndexNotUsed`，不默默改成全表掃描。
+- `vector_queries`：append-only，記錄要求的模式、實際使用的模式、缺額（shortfall）與 fallback 原因；`fallback` 只在實際模式與要求不同時才有值。精確 fallback 必須由呼叫端明確允許。
+
+API：`create_space`、`create_collection`、`upsert`、`manifest`／`manifest_hash_of`、`publish`、`build_index`（`exact` 或 `hnsw`）、`search`（回傳 `QueryResult`）。測試 `tests/db/test_vectors.py` 涵蓋 T53–T57：隔離、ready 閘、維度與零向量、HNSW 召回（真 PostgreSQL＋pgvector）。
