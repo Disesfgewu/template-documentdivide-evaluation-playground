@@ -169,7 +169,7 @@ APPEND_ONLY_TABLES = ("audit_events", "operation_results", "benchmark_transition
                       "log_events", "submissions", "retrieved_hits", "citations",
                       "visual_observations", "evidence_verifications",
                       "embedding_spaces", "vector_items", "vector_item_regions", "vector_index_revisions",
-                      "vector_queries")
+                      "vector_queries", "parse_jobs")
 READ_ONLY_TABLES = ("schema_migrations", "benchmark_transitions_allowed", "job_transitions_allowed")
 
 
