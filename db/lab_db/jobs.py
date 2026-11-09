@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -132,12 +132,21 @@ def finish(
     lease: Lease,
     status: str,
     reason: str,
+    hook: Optional[Callable[[psycopg.Connection], None]] = None,
 ) -> None:
     """running -> succeeded/failed/paused_budget/waiting_review/cancel_requested/queued.
-    The DB rejects anything else; leaving 'running' always drops the lease."""
+    The DB rejects anything else; leaving 'running' always drops the lease.
+
+    ``hook`` runs inside the same transaction, after the lease check and before the status
+    update, with the job row locked and still 'running' under this lease. Whatever it writes
+    commits or rolls back together with the status change, so a result can never be stored
+    for a job that did not finish, nor a job finish without its result. A hook that raises
+    rolls everything back and the exception propagates (the job stays 'running')."""
     with conn.transaction():
         _check(conn, project_id, lease)
         _reason(conn, reason)
+        if hook is not None:
+            hook(conn)
         conn.execute(
             """
             UPDATE jobs
@@ -150,6 +159,44 @@ def finish(
             """,
             (status, project_id, lease.job_id),
         )
+
+
+def fail_exhausted(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID) -> bool:
+    """Finalize a job stuck 'running' whose lease expired and whose attempts are used up.
+
+    ``acquire`` refuses such a job (attempt + 1 > max_attempts), so without this nobody could
+    ever move it. Returns True when it was moved to 'failed'."""
+    with conn.transaction():
+        _reason(conn, "lease_exhausted")
+        row = conn.execute(
+            """
+            UPDATE jobs
+            SET status = 'failed', lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+                row_version = row_version + 1
+            WHERE project_id = %s AND id = %s AND status = 'running'
+              AND attempt >= max_attempts AND lease_expires_at < clock_timestamp()
+            RETURNING 1
+            """,
+            (project_id, job_id),
+        ).fetchone()
+    return row is not None
+
+
+def acknowledge_cancel(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID) -> bool:
+    """cancel_requested -> cancelled, called by the worker once it has stopped its work.
+
+    Returns False when the job is not in 'cancel_requested' (nothing is changed)."""
+    with conn.transaction():
+        _reason(conn, "cancel_acknowledged")
+        row = conn.execute(
+            """
+            UPDATE jobs SET status = 'cancelled', row_version = row_version + 1
+            WHERE project_id = %s AND id = %s AND status = 'cancel_requested'
+            RETURNING 1
+            """,
+            (project_id, job_id),
+        ).fetchone()
+    return row is not None
 
 
 def save_checkpoint(

@@ -1,0 +1,301 @@
+"""document.parse consumer on real PostgreSQL (PM plan item 5, Refs #7).
+
+The parser itself is replaced by synthetic doubles (the real one is covered by the
+CI-only probe); everything else, leases, heartbeat, job transitions and artifact reads,
+is real."""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import uuid
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+for _sub in (_REPO_ROOT, _REPO_ROOT / "db", _REPO_ROOT / "services" / "api", _REPO_ROOT / "services" / "parser", _REPO_ROOT / "contracts"):
+    if _sub.exists() and str(_sub) not in sys.path:
+        sys.path.insert(0, str(_sub))
+
+from lab_api.auth import get_signing_secret, issue_actor_token
+from lab_api.config import load_settings
+from lab_api.main import create_app
+from lab_api.parse_worker import process_parse_job
+from lab_db import jobs
+from lab_db.storage import LocalArtifactStore
+from lab_parser.isolation import InspectionError
+from fixtures.generators import synthetic_pdf
+
+try:
+    from tests.db.base import FreshDatabase, ADMIN_URL
+except ImportError:
+    ADMIN_URL = os.environ.get("LAB_TEST_DATABASE_URL", "")
+    FreshDatabase = unittest.TestCase  # type: ignore[misc,assignment]
+
+GOOD = SimpleNamespace(quarantine_reason=None)
+
+
+@unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
+class ParseWorkerRealDbTests(FreshDatabase):
+    def setUp(self) -> None:
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        env = {"LAB_ENV": "test", "LAB_PROVIDER_MODE": "mock", "LAB_DATABASE_URL": self.url,
+               "LAB_ARTIFACT_ROOT": str(self.root), "LAB_AUTH_SECRET": "top-secret-signing-key-for-tests-only",
+               "LAB_DB_CONNECT_TIMEOUT_S": "5"}
+        with patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.client = TestClient(create_app(settings=settings, checks={}))
+        self.secret = get_signing_secret(settings)
+        self.store = LocalArtifactStore(self.root)
+        with self.connect() as c, c.transaction():
+            c.execute("CREATE TABLE IF NOT EXISTS persisted_results (job_id uuid NOT NULL, lease_token bigint NOT NULL)")
+            c.execute("TRUNCATE persisted_results")
+
+    def persist(self, conn, project, lease, batch):
+        """Stands in for the real persistence: asserts the contract, writes through ``conn``."""
+        status, token = conn.execute("SELECT status::text, lease_token FROM jobs WHERE id = %s",
+                                     (lease.job_id,)).fetchone()
+        assert (status, token) == ("running", lease.token), (status, token)
+        conn.execute("INSERT INTO persisted_results VALUES (%s, %s)", (lease.job_id, lease.token))
+
+    def persisted_count(self):
+        with self.connect() as c:
+            return c.execute("SELECT count(*) FROM persisted_results").fetchone()[0]
+
+    def headers(self, actor, **extra):
+        return {"Authorization": f"Bearer {issue_actor_token(actor, self.secret)}", **extra}
+
+    def queue(self, body=None, pages=21):
+        """A project, a real uploaded document and a queued parse job; returns (project, job)."""
+        with self.connect() as c:
+            project, owner = self.make_project(c)
+        res = self.client.post(f"/api/v1/documents?project_id={project}&logical_id=f{uuid.uuid4().hex[:6]}",
+                               headers=self.headers(owner, **{"Content-Type": "application/pdf"}),
+                               content=synthetic_pdf.build(pages))
+        self.assertEqual(res.status_code, 201, res.text)
+        doc = res.json()["id"]
+        res = self.client.post(f"/api/v1/documents/{doc}/parse", headers=self.headers(owner), json=body or {})
+        self.assertEqual(res.status_code, 202, res.text)
+        return project, uuid.UUID(res.json()["job_id"])
+
+    def process(self, project, job, run, ttl=60, persist=None, connect=None):
+        with self.connect() as c:
+            return process_parse_job(c, project, job, store=self.store, persist=persist or self.persist,
+                                     worker="test-worker", max_pdf_bytes=64 * 1024 * 1024,
+                                     connect=connect or self.connect, ttl_seconds=ttl, run=run)
+
+    def job_state(self, job):
+        with self.connect() as c:
+            status, attempt = c.execute("SELECT status::text, attempt FROM jobs WHERE id = %s", (job,)).fetchone()
+            reasons = [r[0] for r in c.execute("SELECT reason FROM job_transitions WHERE job_id = %s ORDER BY id", (job,))]
+        return status, attempt, reasons
+
+    def ok_run(self, seen=None):
+        def run(data, **kw):
+            if seen is not None:
+                seen.append((len(data), kw))
+            return GOOD
+        return run
+
+    def test_success_persists_before_the_job_is_marked_succeeded(self):
+        project, job = self.queue()
+        seen = []
+        outcome = self.process(project, job, self.ok_run(seen))
+        self.assertEqual((outcome.status, outcome.reason), ("succeeded", "parsed"))
+        self.assertEqual(self.persisted_count(), 1)
+        self.assertGreater(seen[0][0], 100)  # the real uploaded bytes reached the parser
+        status, attempt, reasons = self.job_state(job)
+        self.assertEqual((status, attempt), ("succeeded", 1))
+        self.assertEqual(reasons[-1], "parsed")
+        with self.assertRaises(jobs.LeaseUnavailable):  # a finished job cannot be claimed again
+            self.process(project, job, self.ok_run())
+
+    def test_unsupported_profiles_are_failed_not_run(self):
+        project, job = self.queue({"profile": "mineru-standard"})
+        run = self.ok_run(seen := [])
+        outcome = self.process(project, job, run)
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "profile_unsupported"))
+        self.assertEqual((seen, self.persisted_count()), ([], 0))
+
+    def test_partial_page_selection_is_failed_and_the_full_range_is_accepted(self):
+        project, job = self.queue({"page_selection": [0, 5]})
+        outcome = self.process(project, job, self.ok_run(seen := []))
+        self.assertEqual((outcome.status, outcome.reason, seen), ("failed", "page_selection_unsupported", []))
+        project, job = self.queue({"page_selection": list(range(21))})
+        self.assertEqual(self.process(project, job, self.ok_run()).status, "succeeded")
+
+    def test_quarantined_output_is_failed_and_not_persisted(self):
+        project, job = self.queue()
+        outcome = self.process(project, job, lambda data, **kw: SimpleNamespace(quarantine_reason="invalid_unstructured_output"))
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "quarantined:invalid_unstructured_output"))
+        self.assertEqual(self.persisted_count(), 0)
+
+    def test_transient_error_requeues_until_attempts_run_out(self):
+        project, job = self.queue()
+
+        def boom(data, **kw):
+            raise InspectionError("timeout")
+
+        self.assertEqual(self.process(project, job, boom).status, "queued")
+        self.assertEqual(self.job_state(job)[:2], ("queued", 1))
+        self.assertEqual(self.process(project, job, boom).status, "queued")
+        last = self.process(project, job, boom)  # attempt 3 of 3
+        self.assertEqual((last.status, last.reason), ("failed", "timeout"))
+        self.assertEqual(self.job_state(job)[:2], ("failed", 3))
+
+    def test_deterministic_error_fails_immediately(self):
+        project, job = self.queue()
+
+        def boom(data, **kw):
+            raise InspectionError("child_failed")
+
+        outcome = self.process(project, job, boom)
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "child_failed"))
+        self.assertEqual(self.job_state(job)[:2], ("failed", 1))
+
+    def test_cancel_while_running_stops_the_parser_acknowledges_and_persists_nothing(self):
+        project, job = self.queue()
+        started = threading.Event()
+
+        def run(data, cancelled, **kw):
+            started.set()
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if cancelled():
+                    raise InspectionError("cancelled")
+                time.sleep(0.05)
+            return GOOD
+
+        def cancel():
+            started.wait(10)
+            with self.connect() as c, c.transaction():
+                c.execute("SELECT set_config('lab.transition_reason', 'user cancel', true)")
+                # The jobs CHECK allows a lease only on 'running', so a cancel request drops it.
+                c.execute("UPDATE jobs SET status = 'cancel_requested', lease_owner = NULL, lease_token = NULL, "
+                          "lease_expires_at = NULL, row_version = row_version + 1 WHERE id = %s", (job,))
+
+        t = threading.Thread(target=cancel)
+        t.start()
+        began = time.monotonic()
+        outcome = self.process(project, job, run)  # default 60 s ttl: latency must not scale with it
+        elapsed = time.monotonic() - began
+        t.join(10)
+        self.assertEqual((outcome.status, outcome.reason), ("cancelled", "cancel_acknowledged"))
+        self.assertLess(elapsed, 8)
+        self.assertEqual(self.persisted_count(), 0)
+        self.assertEqual(self.job_state(job)[0], "cancelled")
+
+    def test_a_run_that_raises_anything_fails_the_job_instead_of_leaving_it_running(self):
+        project, job = self.queue()
+
+        def boom(data, **kw):
+            raise RuntimeError("unexpected")
+
+        outcome = self.process(project, job, boom)
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "internal_error"))
+        self.assertEqual(self.job_state(job)[0], "failed")
+
+    def test_losing_the_lease_to_another_worker_abandons_without_persisting(self):
+        project, job = self.queue()
+
+        def run(data, cancelled, **kw):
+            with self.connect() as c, c.transaction():  # another worker takes the job over
+                c.execute("UPDATE jobs SET lease_token = lease_token + 1000, lease_owner = 'thief', "
+                          "row_version = row_version + 1 WHERE id = %s", (job,))
+            deadline = time.monotonic() + 20
+            while not cancelled() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            raise InspectionError("cancelled")
+
+        outcome = self.process(project, job, run)
+        self.assertEqual((outcome.status, outcome.reason), ("abandoned", "lease_lost"))
+        self.assertEqual(self.persisted_count(), 0)
+        self.assertEqual(self.job_state(job)[0], "running")  # the thief owns it now
+
+    def test_takeover_after_a_crash_runs_once_and_the_stale_writer_is_fenced(self):
+        project, job = self.queue()
+        with self.connect() as c:
+            stale = jobs.acquire(c, project, job, "crashed-worker", ttl_seconds=1)  # never finishes
+        time.sleep(1.4)
+        outcome = self.process(project, job, self.ok_run())
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(self.job_state(job)[:2], ("succeeded", 2))
+        self.assertEqual(self.persisted_count(), 1)
+        calls = []
+        with self.connect() as c, self.assertRaises(jobs.LeaseLost):
+            jobs.finish(c, project, stale, "succeeded", "late", hook=lambda conn: calls.append(1))
+        self.assertEqual((calls, self.persisted_count()), ([], 1))
+
+    def test_a_job_whose_attempts_are_used_up_by_crashes_is_finalized_not_stuck(self):
+        project, job = self.queue()
+        for n in range(3):
+            with self.connect() as c:
+                jobs.acquire(c, project, job, f"crashed-{n}", ttl_seconds=1)
+            time.sleep(1.3)
+        self.assertEqual(self.job_state(job)[:2], ("running", 3))
+        with self.assertRaises(jobs.LeaseUnavailable):
+            self.process(project, job, self.ok_run())
+        status, attempt, reasons = self.job_state(job)
+        self.assertEqual((status, attempt, reasons[-1]), ("failed", 3, "lease_exhausted"))
+
+    def test_a_failed_heartbeat_connection_is_retried(self):
+        project, job = self.queue()
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise ConnectionError("transient")
+            return self.connect()
+
+        def slow(data, **kw):
+            time.sleep(4.5)
+            return GOOD
+
+        outcome = self.process(project, job, slow, ttl=2, connect=flaky)
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_heartbeat_keeps_a_short_lease_alive_during_a_long_parse(self):
+        project, job = self.queue()
+
+        def slow(data, **kw):
+            time.sleep(4.5)  # longer than the 2 s lease
+            return GOOD
+
+        outcome = self.process(project, job, slow, ttl=2)
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(self.job_state(job)[:2], ("succeeded", 1))
+
+    def test_failing_persistence_is_failed_not_succeeded(self):
+        project, job = self.queue()
+
+        def broken(conn, project, lease, batch):
+            conn.execute("INSERT INTO persisted_results VALUES (%s, %s)", (lease.job_id, lease.token))
+            raise RuntimeError("crash after the write, before the status change")
+
+        outcome = self.process(project, job, self.ok_run(), persist=broken)
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "persist_failed"))
+        self.assertEqual(self.job_state(job)[0], "failed")
+        self.assertEqual(self.persisted_count(), 0)  # the write rolled back with the status change
+
+    def test_a_tampered_original_is_never_parsed(self):
+        project, job = self.queue()
+        blobs = [p for p in self.root.rglob("*") if p.is_file()]
+        self.assertEqual(len(blobs), 1)
+        blobs[0].write_bytes(b"%PDF-1.4 tampered")
+        outcome = self.process(project, job, self.ok_run(seen := []))
+        self.assertEqual((outcome.status, outcome.reason, seen), ("failed", "artifact_unreadable", []))
+
+
+if __name__ == "__main__":
+    unittest.main()
