@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts fixtures)
+SUITES=(governance api api-db worker parser web contracts fixtures db db-unit)
 scope=auto
 base=origin/main
 selected=()
@@ -34,8 +34,11 @@ suite_for_base() {
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
     web/*) echo web;;
-    contracts/*|tests/contracts/*) echo "contracts fixtures";;
-    fixtures/*|tests/fixtures/*) echo fixtures;;
+    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db";;
+    fixtures/*|tests/fixtures/*) echo "fixtures parser";;
+    db/*) echo "db db-unit";;
+    tests/db/*) echo db;;
+    tests/dbunit/*) echo db-unit;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -54,10 +57,11 @@ run_suite() {
       python3 -m tools.governance.check_repo
       # Provenance is checked against GitHub for passed entries only (needs GH_TOKEN then).
       python3 -m tools.governance.check_traceability --verify-provenance
+      python3 -m tools.governance.check_release_evidence --check
       python3 -m tools.governance.run_tests tests/governance
       ;;
     api)
-      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api
+      PYTHONPATH=services/api:contracts python3 -m tools.governance.run_tests tests/api
       ;;
     api-db)
       # Real PostgreSQL/pgvector only. Missing database = BLOCKED, never passed.
@@ -65,7 +69,7 @@ run_suite() {
         echo "BLOCKED: suite api-db needs LAB_TEST_DATABASE_URL (see docs/TESTING.md)" >&2
         return 3
       fi
-      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
+      PYTHONPATH=services/api:contracts python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
       ;;
     web)
       # React frontend: locked install, unit tests, type check, production build.
@@ -74,6 +78,18 @@ run_suite() {
         return 3
       fi
       (cd web && node --version && npm ci && npm test && npm run build)
+      ;;
+    db-unit)
+      # lab_db code that needs no database (e.g. export, redaction).
+      PYTHONPATH=db python3 -m tools.governance.run_tests tests/dbunit
+      ;;
+    db)
+      # Migrations, constraints, transactions on real PostgreSQL. Missing DB = BLOCKED.
+      if [[ -z "${LAB_TEST_DATABASE_URL:-}" ]]; then
+        echo "BLOCKED: suite db needs LAB_TEST_DATABASE_URL (see docs/TESTING.md)" >&2
+        return 3
+      fi
+      PYTHONPATH=db python3 -m tools.governance.run_tests tests/db --fail-on-skip
       ;;
     contracts)
       # Versioned data contracts: examples, negative cases, schema drift.
@@ -87,7 +103,7 @@ run_suite() {
       PYTHONPATH=contracts python3 -m fixtures.registry_check --verify-signoff
       ;;
     parser)
-      PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
+      PYTHONPATH=services/parser:contracts python3 -m tools.governance.run_tests tests/parser
       ;;
     worker)
       # Go worker. GOTOOLCHAIN=local: never auto-download a different Go;
