@@ -628,6 +628,12 @@ def _upload_core(
                 db_reason=inspection.reason,
             )
 
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            # Disconnected after a good inspection but before anything was written: stop here.
+            # (After this point the write is one short transaction that is allowed to commit;
+            # a retry with the same Idempotency-Key then replays it.)
+            raise ApiError(503, "request_cancelled", "request cancelled before the document was stored", retryable=True)
+
         pages = [
             PageGeometry(
                 page_index=p.page_index,
