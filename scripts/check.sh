@@ -109,7 +109,7 @@ run_suite() {
       PYTHONPATH=contracts:scoring python3 -m tools.governance.run_tests tests/scoring
       ;;
     parser)
-      PYTHONPATH=services/parser:contracts python3 -m tools.governance.run_tests tests/parser
+      PYTHONPATH=services/parser:db:contracts python3 -m tools.governance.run_tests tests/parser
       ;;
     worker)
       # Go worker. GOTOOLCHAIN=local: never auto-download a different Go;
