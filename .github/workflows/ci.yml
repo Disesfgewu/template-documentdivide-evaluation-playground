@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      probe:
+        description: "Also run the CI-only Unstructured probe (Issue #7 item 4)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -115,3 +120,32 @@ jobs:
       - name: Stop database
         if: always()
         run: docker compose -f deploy/compose.dev.yml down -v
+
+  unstructured-probe:
+    name: unstructured-probe (synthetic, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Throwaway venv with the pinned package
+        run: |
+          python -m venv "$RUNNER_TEMP/probe-venv"
+          "$RUNNER_TEMP/probe-venv/bin/pip" install -r services/parser/requirements.lock -r contracts/requirements.lock
+          "$RUNNER_TEMP/probe-venv/bin/pip" install "unstructured[pdf]==0.27.36"
+          "$RUNNER_TEMP/probe-venv/bin/pip" freeze > "$RUNNER_TEMP/probe-freeze.txt"
+      - name: Run the probe
+        env:
+          PYTHONPATH: contracts:services/parser
+        run: |
+          "$RUNNER_TEMP/probe-venv/bin/python" -I -c "import sys; sys.path[:0]=['contracts','services/parser','.']; import runpy; runpy.run_path('deploy/unstructured_probe.py', run_name='__main__')" | tee "$RUNNER_TEMP/probe-report.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unstructured-probe
+          path: |
+            ${{ runner.temp }}/probe-report.json
+            ${{ runner.temp }}/probe-freeze.txt
