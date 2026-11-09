@@ -107,9 +107,9 @@ class StorageDatabaseTests(FreshDatabase):
         expected_sha256 = hashlib.sha256(data).hexdigest()
         real_verify = LocalArtifactStore.verify
 
-        def corrupt_then_verify(object_key: str) -> tuple[str, int]:
+        def corrupt_then_verify(object_key: str, *args, **kwargs) -> tuple[str, int]:
             (self.root / object_key).write_bytes(b"corrupted on disk")
-            return real_verify(self.store, object_key)
+            return real_verify(self.store, object_key, *args, **kwargs)
 
         with self.connect() as conn:
             project_id, _ = self.make_project(conn)
