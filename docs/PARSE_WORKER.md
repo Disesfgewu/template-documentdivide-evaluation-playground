@@ -41,6 +41,10 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 
 - 輪詢間隔 `--interval` 限 1..60 秒；併發 `--concurrency` 限 1..4（每個 job 一條連線）。
 - 優雅停止：不再認領新 job；執行中的 job 有 `--grace`（預設 60）秒完成，仍在跑的留給 lease 到期（會被重跑並耗掉一次 attempt）。
-- transient 重排後的退避：記憶體內指數退避（`--backoff` 秒起、每次加倍、上限 5 分鐘）。重啟會遺失退避，因為沒有 not-before 欄位。
+- 退避：每個非終態結果（transient 重排、無法認領、任何 `abandoned`）都讓該 job 在記憶體內退避：`--backoff` 秒起、每次加倍、上限 5 分鐘，並有 ±50% jitter 避免多個 worker 同步重試；每輪之間至少相隔 0.25 秒，`--once` 另有 `--once-timeout`，所以失敗的認領不可能空轉。重啟會遺失退避（沒有 not-before 欄位），長時間沒再出現的 job 的記錄會被清掉。
+- 寬限期真的會執行：`--grace` 秒後取消仍在跑的 parser（殺掉子程序）、job 留給 lease 到期、worker 結束；第二次 SIGTERM／SIGINT 跳過寬限。極端情況下執行緒不返回時以 `os._exit(1)` 結束。
+- 記憶體：每個 parser 子程序的位址空間上限是 4 GiB（虛擬位址，實測最小需求在 1 到 2 GiB 之間，見 #105），併發 4 時最多 16 GiB 虛擬位址；實體記憶體需求遠小於此，但部署時要依機器設定 `--concurrency`。
+- 公平性：認領順序是 `ORDER BY id`，不保證專案之間公平，一個專案的大量 job 可以排在其他專案前面。
+- `QueryCanceled`（statement／lock timeout）是確定性錯誤：persist 內遇到就是 `failed(persist_failed)`，沒有有界重試。
 - 資料庫連不上時只記固定代碼並在下一輪重試，不會崩潰。
 - 尚未涵蓋：頁數上限、部署（systemd／容器）、多 worker 間的公平性、health endpoint、以及使用者取消 API（目前沒有 HTTP 端點可以送出取消）。

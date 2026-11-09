@@ -349,6 +349,20 @@ class ParseWorkerRealDbTests(FreshDatabase):
         outcome = self.process(project, job, self.ok_run(), persist=cancelled_statement)
         self.assertEqual((outcome.status, outcome.reason), ("failed", "persist_failed"))
 
+    def test_a_dead_connection_while_finalizing_an_exhausted_job_still_reports_it_unclaimable(self):
+        import psycopg
+        project, job = self.queue()
+        with self.connect() as c:
+            jobs.finish(c, project, jobs.acquire(c, project, job, "first"), "succeeded", "done")  # terminal: not claimable
+
+        def dead(*a, **kw):
+            raise psycopg.OperationalError("connection lost")
+
+        with self.connect() as c, patch.object(jobs, "fail_exhausted", dead):
+            with self.assertRaises(jobs.LeaseUnavailable):  # the unclaimable answer survives the dead connection
+                process_parse_job(c, project, job, store=self.store, persist=self.persist, worker="w",
+                                  max_pdf_bytes=64 * 1024 * 1024, connect=self.connect, run=self.ok_run())
+
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
         blobs = [p for p in self.root.rglob("*") if p.is_file()]

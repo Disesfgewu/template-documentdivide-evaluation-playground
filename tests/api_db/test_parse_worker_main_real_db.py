@@ -42,7 +42,7 @@ except ImportError:
 class BackoffTests(unittest.TestCase):
     def test_delay_doubles_caps_and_expires(self):
         now = [100.0]
-        backoff = Backoff(5, clock=lambda: now[0])
+        backoff = Backoff(5, clock=lambda: now[0], jitter=lambda: 1.0)
         job = uuid.uuid4()
         self.assertEqual([backoff.hit(job) for _ in range(3)], [5, 10, 20])
         self.assertEqual(backoff.waiting(), {job})
@@ -54,6 +54,18 @@ class BackoffTests(unittest.TestCase):
         self.assertEqual(delay, 300)                   # capped
         backoff.clear(job)
         self.assertEqual(backoff.hit(job), 5)
+
+    def test_jitter_spreads_the_delay_and_vanished_jobs_are_forgotten(self):
+        now = [0.0]
+        low, high = Backoff(10, clock=lambda: now[0], jitter=lambda: 0.5), Backoff(10, clock=lambda: now[0], jitter=lambda: 1.5)
+        job = uuid.uuid4()
+        self.assertEqual((low.hit(job), high.hit(job)), (5, 15))
+        import random
+        samples = {Backoff(10).hit(job) for _ in range(20)}
+        self.assertTrue(all(5 <= x <= 15 for x in samples) and len(samples) > 1)
+        now[0] += 5000                    # far beyond four times the cap
+        self.assertEqual(low.waiting(), set())
+        self.assertEqual(low._strikes, {})
 
 
 def good_run(data, **kw):
@@ -93,6 +105,7 @@ class ParseWorkerMainRealDbTests(FreshDatabase):
 
     def worker(self, run, **kw):
         kw.setdefault("interval", 1)
+        kw.setdefault("jitter", lambda: 1.0)
         return Worker(self.connect, self.store, name="test-worker", run=run, **kw)
 
     def drain_foreign_jobs(self):
@@ -141,6 +154,83 @@ class ParseWorkerMainRealDbTests(FreshDatabase):
         self.assertEqual(worker.run_once()["succeeded:parsed"], 1)
         self.assertGreaterEqual(calls[1] - calls[0], 1.5)
         self.assertEqual(self.status(job), ("succeeded", 2))
+
+    def test_a_claim_that_keeps_failing_is_backed_off_not_hot_spun(self):
+        from lab_api import parse_worker_main as module
+        from lab_db import jobs
+        self.drain_foreign_jobs()
+        job = self.queue()
+        calls = []
+
+        def never_claimable(*a, **kw):
+            calls.append(time.monotonic())
+            raise jobs.LeaseUnavailable("taken")
+
+        with patch.object(module, "process_parse_job", never_claimable):
+            worker = self.worker(good_run, backoff=1.0, interval=1)
+            self.assertEqual(worker.run_once(), {"queued:not_claimable": 1})   # --once terminates
+            self.assertEqual(len(calls), 1)
+            thread = threading.Thread(target=worker.run_forever)
+            thread.start()
+            time.sleep(3.5)
+            worker.stop.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertLessEqual(len(calls), 4, calls)       # 1 s, 2 s, 4 s backoff: a few attempts, not thousands
+        self.assertEqual(self.status(job)[0], "queued")
+
+    def test_infrastructure_abandonment_is_backed_off_too(self):
+        from lab_api import parse_worker_main as module
+        from lab_api.parse_worker import ParseOutcome
+        self.drain_foreign_jobs()
+        self.queue()
+        calls = []
+
+        def unreachable(conn, project_id, job_id, **kw):
+            calls.append(1)
+            return ParseOutcome(job_id, "abandoned", "infrastructure_error")
+
+        with patch.object(module, "process_parse_job", unreachable):
+            worker = self.worker(good_run, backoff=2.0, interval=1)
+            thread = threading.Thread(target=worker.run_forever)
+            thread.start()
+            time.sleep(2.5)
+            worker.stop.set()
+            thread.join(10)
+        self.assertLessEqual(len(calls), 2, calls)
+
+    def test_grace_is_enforced_and_a_second_signal_skips_it(self):
+        self.drain_foreign_jobs()
+        job = self.queue()
+        started = threading.Event()
+
+        def stubborn(data, cancelled, **kw):
+            started.set()
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if cancelled():
+                    raise InspectionError("cancelled")
+                time.sleep(0.05)
+            return good_run(data, **kw)
+
+        for second_signal in (False, True):
+            with self.subTest(second_signal=second_signal):
+                started.clear()
+                self.drain_foreign_jobs()
+                job = self.queue()
+                worker = self.worker(stubborn, grace=0.5 if not second_signal else 60)
+                thread = threading.Thread(target=worker.run_forever)
+                thread.start()
+                self.assertTrue(started.wait(30))
+                began = time.monotonic()
+                worker.stop.set()
+                if second_signal:
+                    time.sleep(0.3)
+                    worker.abort.set()
+                thread.join(30)
+                self.assertFalse(thread.is_alive(), "the worker must exit although the parser never finishes by itself")
+                self.assertLess(time.monotonic() - began, 15)
+                self.assertEqual(self.status(job)[0], "running")  # left to lease expiry, never marked finished
 
     def test_stop_lets_the_running_job_finish_and_claims_nothing_new(self):
         self.drain_foreign_jobs()
