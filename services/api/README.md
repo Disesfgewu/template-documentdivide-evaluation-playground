@@ -89,7 +89,47 @@ parsing, vector store and two independent example methods remain unfinished.
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
 
+## Implemented runtime OpenAPI
+
+`GET /openapi.json` describes the current document upload, metadata, JSON page
+geometry, original PDF download, public benchmark-question listing and probe
+routes, including compatibility aliases. Swagger at `/docs` can supply the
+signed actor Bearer token. Upload accepts raw PDF or strict multipart; project
+and logical-ID selection, role restrictions, successful replay versus original
+rejection, size/page limits and error statuses are documented per operation.
+Configured limits are captured when OpenAPI is first requested (the normal
+FastAPI schema cache); configure application state before serving requests.
+
+Response schemas describe observed HTTP behavior; they do not replace runtime
+validation or claim every SPEC endpoint exists. In particular, framework 422
+`detail` errors coexist with business `error` envelopes, observer grants are
+not implemented, and page previews on this main-based increment are JSON
+geometry only. The current error handler echoes `X-Request-Id` without the
+versioned contract's length validation and can emit messages longer than its
+2,000-character bound; the runtime schema records those existing gaps instead
+of promising unenforced limits. Multipart MIME/exactly-one-PDF constraints are
+checked by the parser and described in prose because property schemas alone
+cannot express part-header rules. No authentication token or database URL is
+included in the schema. Remaining SPEC routes and strict-error convergence
+remain tracked under #4 and requirement R22; this increment completes neither
+parent acceptance nor release validation.
+
+Not yet overlaid: `GET /api/v1/jobs/{id}`, `GET /api/v1/resources/{id}/lineage`,
+`GET /api/v1/audit-events`, `GET /api/v1/logs`, `GET /api/v1/runs/{id}`,
+`GET /api/v1/runs/{id}/results` and the benchmark revision detail route are served
+by the application but are not described by the contract overlay; their behaviour
+is documented in the route sections of this README only.
+
+`GET /api/v1/audit-events?project_id=…`：稽核事件查詢，可依 actor_id、resource_id、resource_type、action、outcome、since（含）/until（不含）過濾；新到舊、keyset cursor、limit 1–200。不認得的參數一律 400，避免拼錯的過濾條件悄悄放寬結果。存取暫用 `read_gold_trace_and_lineage`（owner/maintainer/reviewer），與 `GET /jobs/{id}` 相同，待 PM 決定；其他成員 403、非成員 404。
+
+`GET /api/v1/logs?project_id=…`：結構化日誌查詢，可依 level、event_name、trace_id、run_id、question_id、job_id、operation_id、since/until 過濾；以事件 id 由新到舊、keyset cursor、limit 1–200。只回該 project 的事件（無 project 的系統事件不可由此取得），且不回 `attributes` 與 `error_message`（可能含 participant 回報文字）。attempt 非 `log_events` 欄位，故沒有 attempt 過濾。存取暫用 `read_gold_trace_and_lineage`，待 PM 決定。 每個自由文字欄位（`message`、`event_name`、`service`、`component`、`operation_name`、`status`、`error_code`）都在讀取時遮罩憑證，並以位元組數設上限（`message` 8192、其餘 256；SQL `octet_length` 先限制、Python 再對原值與遮罩後的值各檢查一次）。超過上限整欄省略（不截斷，避免留下憑證尾段），欄位值改為固定標記，並列在該筆的 `omitted_fields`；資料庫內的原始紀錄不變。
 `GET /api/v1/runs/{id}`：run 狀態、benchmark revision、budget profile、finalized_at 與進度計數（題數、attempt、已接受作答/棄答、待處理、被拒及逾時提交）。只回計數，不含答案、payload 或分數。owner/maintainer/reviewer 可看專案內任何 run；participant 只能看自己擁有之 method revision 的 run，其餘 404；observer 僅限已發布彙總（尚未實作），故 403；非成員 404。
+
+`GET /api/v1/runs/{id}/results`：某次 evaluation（預設最新，可用 `evaluation_id` 指定）的逐指標摘要（scored / not_applicable / pending / error 計數與已評分列的平均 raw_value）及逐題分數頁（ordinal、metric 排序，keyset cursor）。各指標獨立呈現，不產生加權總分（SPEC 9.1）；N/A 與待處理不以 0 計入平均。可用 `metric_name`、`quota_bucket` 過濾。僅 owner/maintainer/reviewer；participant 的可見分數取決於尚未定義的 feedback profile，自己的 run 為 403、他人的 run 為 404；observer 403。
+
+`GET /api/v1/comparisons?run_ids=a,b,…`（2–10 個不重複 run）：各 run 最新 evaluation 的逐指標摘要並列（scored／not_applicable／pending／error 計數與 scored 的平均），不產生加權總分，也不排名。可比條件為同一 benchmark revision、budget profile、最新 evaluation 的 grader revision，以及該 evaluation 實際評分的題目集合（以排序後 question id 的 sha256 表示）。另外，各指標的數字必須用同樣的方式算出：run 狀態與 evaluation 狀態（provisional／published）相同、指標集合相同、每個指標「已評分的題目集合」相同（`scored_question_set`，每個指標附 scored 計數與題目集合 hash，避免兩個平均值其實是對不同題目算的）、且沒有 pending 或 error 的列（`unfinished_scoring`）。任一條件不同、或某 run 尚無 evaluation 時，回 200 與 `comparable: false`，`blockers` 逐項列出各 run 的值，各 run 的資料仍回傳。權限同 `/runs/{id}/results`，逐一檢查，第一個失敗的 run 決定回應（404／403）；結果同樣標 `provisional`、`summary_scope: scored_rows_only`。
+
+Results summaries explicitly return `summary_scope="scored_rows_only"` and `provisional=true`, even when an evaluation status is completed. They are temporary statistics over stored scored rows, not the SPEC §16.5 final macro average: missing method-failure rows and the full applicable-question denominator are not yet accounted for. N/A is excluded and pending/error counts remain visible; participant feedback profiles and observer published aggregates remain separate unfinished gates. Cursors are canonical and bound to the evaluation and effective metric/bucket filters; all response score data shares one PostgreSQL statement snapshot.
 `GET /api/v1/jobs/{id}`：工作的 kind、stage、status、attempt/max_attempts、retryable、row_version 及最近 50 筆 transition（新到舊，超過時 `transitions_truncated`；每筆 reason 於 SQL 讀取與 API 投影兩層設上限 2000 字元，超長原因採 fail-closed 回傳 `[omitted: reason exceeds maximum length]` 並標記 `reason_truncated: true`，避免截斷邊界 secret 洩漏；普通短 reason 以 `lab_db.logs.redact` 遮蔽敏感資訊，保留原始 DB 稽核紀錄）。不回傳 lease owner、token 或到期時間。先查專案驗證權限，再以單一 statement snapshot 讀取狀態與 transitions，避免並行更新時讀到狀態與 transition 不一致。權限依 PM 在 Issue #6 決策限定 staff 角色，暫用 `read_gold_trace_and_lineage`（owner/maintainer/reviewer）；其他成員 403、非成員 404。
 ## 血緣查詢（#5 增量）
 

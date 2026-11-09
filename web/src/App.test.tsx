@@ -67,4 +67,11 @@ describe("App", () => {
     expect(s.textContent).toContain("非真模型");
     expect(screen.getByText(/database：失敗/)).toBeTruthy();
   });
+  it("renders DocumentOperator section and system limits notice without PR or issue numbers in UI", () => {
+    render(<App load={() => new Promise<ApiStatus>(() => {})} />);
+    expect(screen.getByRole("region", { name: "文件操作員介面" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "系統限制與功能說明" }).textContent).toContain("後端服務可用性");
+    expect(document.body.textContent).not.toMatch(/PR\s*#\d+/i);
+    expect(document.body.textContent).not.toMatch(/#\d+/);
+  });
 });
