@@ -288,6 +288,31 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual(self.job_state(job)[0], "failed")
         self.assertEqual(self.persisted_count(), 0)  # the write rolled back with the status change
 
+    def test_a_database_error_inside_persist_is_infrastructure_not_a_failed_job(self):
+        import psycopg
+        project, job = self.queue()
+
+        def flaky(conn, project, lease, batch):
+            raise psycopg.OperationalError("connection lost during persist")
+
+        outcome = self.process(project, job, self.ok_run(), persist=flaky)
+        self.assertEqual((outcome.status, outcome.reason), ("abandoned", "infrastructure_error"))
+        self.assertEqual(self.job_state(job)[0], "running")  # retried after the lease expires
+
+    def test_a_dead_connection_returns_instead_of_raising_and_the_job_is_retried_later(self):
+        project, job = self.queue()
+        with self.connect() as c:
+            def kill(data, **kw):
+                c.close()  # the worker's own connection dies while the parser runs
+                return GOOD
+
+            outcome = process_parse_job(c, project, job, store=self.store, persist=self.persist, worker="w",
+                                        max_pdf_bytes=64 * 1024 * 1024, connect=self.connect, ttl_seconds=1, run=kill)
+        self.assertEqual((outcome.status, outcome.reason), ("abandoned", "infrastructure_error"))
+        time.sleep(1.5)  # the lease expires; another worker takes the job over
+        self.assertEqual(self.process(project, job, self.ok_run()).status, "succeeded")
+        self.assertEqual(self.job_state(job)[:2], ("succeeded", 2))
+
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
         blobs = [p for p in self.root.rglob("*") if p.is_file()]
