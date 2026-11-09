@@ -119,6 +119,22 @@ def _validate_region(
     return (x0, y0, x1, y1)
 
 
+def raster_size_px(region: tuple[float, float, float, float], page_size_pt: tuple[float, float], dpi: int) -> tuple[int, int]:
+    """PDFium canvas/crop quantization for already validated geometry.
+
+    Keep planner and render preflight aligned. Empty quantized crops stay empty;
+    neither caller may fabricate a pixel for them. Runtime bitmap limits remain
+    checked independently after rendering.
+    """
+    x0, y0, x1, y1 = region
+    width, height = page_size_pt
+    scale = dpi / 72.0
+    return (
+        math.ceil(width * scale) - math.ceil(x0 * width * scale) - math.ceil((1 - x1) * width * scale),
+        math.ceil(height * scale) - math.ceil(y0 * height * scale) - math.ceil((1 - y1) * height * scale),
+    )
+
+
 def _check_pixel_limits(width_px: int, height_px: int) -> None:
     """Enforce SPEC 19.3.8 pixel limits (<= 16 MP total, <= 4096 px longest side)."""
     if width_px <= 0 or height_px <= 0:
@@ -232,11 +248,7 @@ def render_region(
                 raise ValueError(f"invalid page size in pt: {(page_w_pt, page_h_pt)}")
 
             scale = validated_dpi / 72.0
-            region_w_pt = (x1 - x0) * page_w_pt
-            region_h_pt = (y1 - y0) * page_h_pt
-
-            est_width_px = max(1, int(round(region_w_pt * scale)))
-            est_height_px = max(1, int(round(region_h_pt * scale)))
+            est_width_px, est_height_px = raster_size_px(norm_region, (page_w_pt, page_h_pt), validated_dpi)
             _check_pixel_limits(est_width_px, est_height_px)
 
             left_pt = x0 * page_w_pt
