@@ -89,6 +89,7 @@ parsing, vector store and two independent example methods remain unfinished.
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
 
+`GET /api/v1/runs/{id}`：run 狀態、benchmark revision、budget profile、finalized_at 與進度計數（題數、attempt、已接受作答/棄答、待處理、被拒及逾時提交）。只回計數，不含答案、payload 或分數。owner/maintainer/reviewer 可看專案內任何 run；participant 只能看自己擁有之 method revision 的 run，其餘 404；observer 僅限已發布彙總（尚未實作），故 403；非成員 404。
 `GET /api/v1/jobs/{id}`：工作的 kind、stage、status、attempt/max_attempts、retryable、row_version 及最近 50 筆 transition（新到舊，超過時 `transitions_truncated`；每筆 reason 於 SQL 讀取與 API 投影兩層設上限 2000 字元，超長原因採 fail-closed 回傳 `[omitted: reason exceeds maximum length]` 並標記 `reason_truncated: true`，避免截斷邊界 secret 洩漏；普通短 reason 以 `lab_db.logs.redact` 遮蔽敏感資訊，保留原始 DB 稽核紀錄）。不回傳 lease owner、token 或到期時間。先查專案驗證權限，再以單一 statement snapshot 讀取狀態與 transitions，避免並行更新時讀到狀態與 transition 不一致。權限依 PM 在 Issue #6 決策限定 staff 角色，暫用 `read_gold_trace_and_lineage`（owner/maintainer/reviewer）；其他成員 403、非成員 404。
 ## 血緣查詢（#5 增量）
 
