@@ -18,6 +18,9 @@ scripts/check.sh --scope all     # 全部 suite（main push / 發布 gate 使用
 - `fixtures`：`fixtures/registry.yaml` 登錄 F01–F12。partial/available 的項目會由產生器重建，並比對固定的 sha256；golden 來源不得是模型輸出；available 必須有可追溯的人工覆核紀錄：`human: true`、真實且不在未來的日期、`method`、覆核者的 GitHub 帳號（不得是 agent/bot 身分）、`signoff`（本 repo 內該覆核者的 GitHub 留言或 review 網址），以及 `fixture_digest`（`registry_check.fixture_digest` 對所覆核項目 id 與 sha256、以及 expected/golden 內容的雜湊；任一項目或預期值改變後即視為過期）。`human: true` 只在簽核紀錄被實際解析後才接受：`--verify-signoff`（check.sh 會執行）向 GitHub 讀取該留言或 review，要求它位於網址所指的 Issue/PR、作者就是 `by` 且為一般使用者（非 bot），並含有獨立一行 `FIXTURE-SIGNOFF <fixture id> <fixture_digest>`；離線或無法連上 GitHub 時一律不接受。F01 目前有 1/19/20/21/500/600 頁的合成 PDF，只有純文字的素材不足版本，並以 pypdf 讀回頁數驗證 T14。F02 目前有旋轉 0/90/180/270、CropBox 偏移、印刷頁碼與雙欄標記框的合成 PDF；預期座標（SPEC 4.1 空間）以 PDFium 實際渲染獨立比對，作為 #7 的 T05 基準。F05 目前有空檔、假 PDF、截斷、xref 損壞（可修復）、RC4 加密、2001 頁與內含指令注入文字的 PDF，每個檔案都以 pypdf strict 模式確認它具有所宣稱的特性；預期的匯入行為（拒絕、標記或當作資料接受）記在 `fixtures/F05/expected.json`，供 #7 使用。F06 的評分向量本身由 `contracts` suite 依 16.5 公式重算（`tests/contracts/test_score_vectors.py`），這裡只檢查它的登錄與 sha256。PDF 二進位檔不提交，由產生器重建。需要 `pip install -r requirements-dev.txt -r contracts/requirements.lock`。
 - `db`：真 PostgreSQL 的 migration（套用、重跑、checksum 竄改、失敗回滾、舊資料升級）、約束（跨專案、重複 revision、缺引用、凍結、audit append-only、artifact 生命週期）、交易（T48 同時 20 個相同 key、T49 audit/outbox 失敗回滾）、角色矩陣、gold RLS 隔離、job 狀態機、outbox 消費、artifact 清理與可取得性。每個測試類別建立一個新資料庫，需要 `LAB_TEST_DATABASE_URL`；沒有時印 `BLOCKED` 並以 exit 3 失敗，任何 skipped 也算失敗。
 - `db-unit`：不需資料庫的 `lab_db` 程式（匯出、redaction、本機 artifact store）。
+- `scoring`：`scoring/lab_scoring` 規則式評分核心（SPEC 16.5），以精確分數計算；`tests/scoring` 用 F06 的 SPEC 向量與暴力格點面積交叉核對。只用標準函式庫與 contracts，不需 DB 或 provider。
+- `db`：真 PostgreSQL 的 migration，由 Alembic 執行（套用、重跑、`alembic_version`、checksum 竄改、失敗回滾、舊資料升級、既有資料庫的採用、`alembic upgrade head` 命令列、並行 migrator 各只套用一次）、約束（跨專案、重複 revision、缺引用、凍結、audit append-only、artifact 生命週期）、交易（T48 同時 20 個相同 key、T49 audit/outbox 失敗回滾）、角色矩陣、gold RLS 隔離、job 狀態機、outbox 消費、artifact 清理與可取得性。每個測試類別建立一個新資料庫，需要 `LAB_TEST_DATABASE_URL`；沒有時印 `BLOCKED` 並以 exit 3 失敗，任何 skipped 也算失敗。
+- `db-unit`：不需資料庫的 `lab_db` 程式（匯出、redaction、本機 artifact store）。 Alembic 設定（revision 與 SQL 檔一一對應、單一線性鏈、URL 處理、checksum 驗證與採用邏輯）也在此 suite。CI 另有一步在 migrate 映像裡實際執行 Alembic（`deploy/Dockerfile.migrate`）。
 - `governance`（必要檔、PR/Issue templates、workflow 無空 job/`continue-on-error`/`|| true`、CODEOWNERS 身份核實、相對連結、密鑰樣式掃描、branch 清理判定）。後續 Issue 新增應用程式 suite 時需在 `scripts/check.sh` 註冊並對應路徑。
 - 本文件不代表 T01–T104 已執行；各 PR 驗證表須列實際指令、SHA 與結果。
 
@@ -29,3 +32,13 @@ python3 -m tools.governance.branch_cleanup --repo Disesfgewu/template-documentdi
 ```
 
 僅當 PR merged、同 repo、非 default/main/protected、目前 branch head 等於該 PR head、且無其他 open PR 以其為 head/base 時才刪除；否則輸出 `cleanup_pending` 與原因，exit 2。
+
+## Benchmark transfer foundation
+
+The contracts suite includes `tests/contracts/test_transfer.py`: actual local
+export/import/project CLI roundtrip, all-file hash/size/count checks,
+rehashed-invalid schema/reference/source/page cases, duplicate IDs/keys,
+resource limits and private file/symlink/FIFO handling. The synthetic bundle is
+structural test data, not accepted parser/provider/human evidence. See
+[benchmark transfer](BENCHMARK_TRANSFER.md); full T78 and authenticated UI/API,
+frozen revision selection, database/audit and release gates remain open.
