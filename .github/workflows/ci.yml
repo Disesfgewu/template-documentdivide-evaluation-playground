@@ -15,6 +15,10 @@ on:
         description: "Also run the real end-to-end parse acceptance (Issue #7)"
         type: boolean
         default: false
+      llm_smoke:
+        description: "Also run the real LLM provider smoke (needs secrets; fails as BLOCKED without them)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -193,3 +197,67 @@ jobs:
       - name: Stop PostgreSQL
         if: always()
         run: docker compose -f deploy/compose.dev.yml down -v
+
+  llm-smoke:
+    name: llm-smoke (real provider, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.llm_smoke }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require credentials (a missing one is BLOCKED, never a pass)
+        env:
+          AGENTKIT_READ_TOKEN: ${{ secrets.AGENTKIT_READ_TOKEN }}
+          LAB_LLM_SMOKE_API_KEY: ${{ secrets.LAB_LLM_SMOKE_API_KEY }}
+          LAB_LLM_SMOKE_BASE_URL: ${{ vars.LAB_LLM_SMOKE_BASE_URL }}
+          LAB_LLM_SMOKE_MODEL: ${{ vars.LAB_LLM_SMOKE_MODEL }}
+          LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK }}
+          LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK }}
+        run: |
+          missing=""
+          for name in AGENTKIT_READ_TOKEN LAB_LLM_SMOKE_API_KEY LAB_LLM_SMOKE_BASE_URL LAB_LLM_SMOKE_MODEL \
+                      LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            printf '{"status":"blocked","reason":"blocked: no credentials or configuration (%s )","real":false}\n' "$missing" > "$RUNNER_TEMP/llm-smoke-report.json"
+            echo "::error::BLOCKED: no credentials or configuration:$missing"
+            exit 1
+          fi
+      - name: Check out the private agentKit pin (token scoped to this one command)
+        env:
+          AGENTKIT_READ_TOKEN: ${{ secrets.AGENTKIT_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$AGENTKIT_READ_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" submodule update --init --checkout -- third_party/agentkit
+          test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/worker/agentflow/go.mod
+          cache: false
+      - name: Real provider smoke
+        env:
+          GOTOOLCHAIN: local
+          LAB_LLM_SMOKE_API_KEY: ${{ secrets.LAB_LLM_SMOKE_API_KEY }}
+          LAB_LLM_SMOKE_BASE_URL: ${{ vars.LAB_LLM_SMOKE_BASE_URL }}
+          LAB_LLM_SMOKE_MODEL: ${{ vars.LAB_LLM_SMOKE_MODEL }}
+          LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK }}
+          LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK }}
+        run: |
+          set -euo pipefail
+          export LAB_LLM_SMOKE_REPORT="$RUNNER_TEMP/llm-smoke-report.json"
+          (cd services/worker/agentflow && go test -count=1 -run '^TestRealProviderSmoke$' -v ./...)
+          python3 - "$LAB_LLM_SMOKE_REPORT" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          print(json.dumps(report, indent=2, sort_keys=True))
+          sys.exit(0 if report.get("status") == "passed" and report.get("real") is True else 1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: llm-smoke
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/llm-smoke-report.json
