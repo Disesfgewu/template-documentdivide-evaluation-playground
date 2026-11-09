@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts fixtures db db-unit)
+SUITES=(governance api api-db worker parser web contracts fixtures db db-unit scoring)
 scope=auto
 base=origin/main
 selected=()
@@ -34,7 +34,9 @@ suite_for_base() {
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
     web/*) echo web;;
-    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db";;
+    scoring/*|tests/scoring/*) echo scoring;;
+    fixtures/F06/*) echo "fixtures scoring";;
+    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db scoring";;
     fixtures/*|tests/fixtures/*) echo "fixtures parser";;
     db/*) echo "db db-unit";;
     tests/db/*) echo db;;
@@ -101,6 +103,10 @@ run_suite() {
       # Human signoffs are resolved on GitHub; with none recorded no network
       # is used, and an unreachable GitHub fails a human review (never passes).
       PYTHONPATH=contracts python3 -m fixtures.registry_check --verify-signoff
+      ;;
+    scoring)
+      # Rule-based scorer (SPEC 16.5): exact fractions, cross-checked with F06.
+      PYTHONPATH=contracts:scoring python3 -m tools.governance.run_tests tests/scoring
       ;;
     parser)
       PYTHONPATH=services/parser:contracts python3 -m tools.governance.run_tests tests/parser
