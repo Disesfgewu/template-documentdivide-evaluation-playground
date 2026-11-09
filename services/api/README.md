@@ -89,6 +89,37 @@ parsing, vector store and two independent example methods remain unfinished.
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
 
+## Implemented runtime OpenAPI
+
+`GET /openapi.json` describes the current document upload, metadata, JSON page
+geometry, original PDF download, public benchmark-question listing and probe
+routes, including compatibility aliases. Swagger at `/docs` can supply the
+signed actor Bearer token. Upload accepts raw PDF or strict multipart; project
+and logical-ID selection, role restrictions, successful replay versus original
+rejection, size/page limits and error statuses are documented per operation.
+Configured limits are captured when OpenAPI is first requested (the normal
+FastAPI schema cache); configure application state before serving requests.
+
+Response schemas describe observed HTTP behavior; they do not replace runtime
+validation or claim every SPEC endpoint exists. In particular, framework 422
+`detail` errors coexist with business `error` envelopes, observer grants are
+not implemented, and page previews on this main-based increment are JSON
+geometry only. The current error handler echoes `X-Request-Id` without the
+versioned contract's length validation and can emit messages longer than its
+2,000-character bound; the runtime schema records those existing gaps instead
+of promising unenforced limits. Multipart MIME/exactly-one-PDF constraints are
+checked by the parser and described in prose because property schemas alone
+cannot express part-header rules. No authentication token or database URL is
+included in the schema. Remaining SPEC routes and strict-error convergence
+remain tracked under #4 and requirement R22; this increment completes neither
+parent acceptance nor release validation.
+
+Not yet overlaid: `GET /api/v1/jobs/{id}`, `GET /api/v1/resources/{id}/lineage`,
+`GET /api/v1/audit-events`, `GET /api/v1/logs`, `GET /api/v1/runs/{id}`,
+`GET /api/v1/runs/{id}/results` and the benchmark revision detail route are served
+by the application but are not described by the contract overlay; their behaviour
+is documented in the route sections of this README only.
+
 `GET /api/v1/audit-events?project_id=…`：稽核事件查詢，可依 actor_id、resource_id、resource_type、action、outcome、since（含）/until（不含）過濾；新到舊、keyset cursor、limit 1–200。不認得的參數一律 400，避免拼錯的過濾條件悄悄放寬結果。存取暫用 `read_gold_trace_and_lineage`（owner/maintainer/reviewer），與 `GET /jobs/{id}` 相同，待 PM 決定；其他成員 403、非成員 404。
 
 `GET /api/v1/logs?project_id=…`：結構化日誌查詢，可依 level、event_name、trace_id、run_id、question_id、job_id、operation_id、since/until 過濾；以事件 id 由新到舊、keyset cursor、limit 1–200。只回該 project 的事件（無 project 的系統事件不可由此取得），且不回 `attributes` 與 `error_message`（可能含 participant 回報文字）。attempt 非 `log_events` 欄位，故沒有 attempt 過濾。存取暫用 `read_gold_trace_and_lineage`，待 PM 決定。 每個自由文字欄位（`message`、`event_name`、`service`、`component`、`operation_name`、`status`、`error_code`）都在讀取時遮罩憑證，並以位元組數設上限（`message` 8192、其餘 256；SQL `octet_length` 先限制、Python 再對原值與遮罩後的值各檢查一次）。超過上限整欄省略（不截斷，避免留下憑證尾段），欄位值改為固定標記，並列在該筆的 `omitted_fields`；資料庫內的原始紀錄不變。
