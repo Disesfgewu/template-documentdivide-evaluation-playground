@@ -19,6 +19,8 @@ scripts/check.sh --scope all     # 全部 suite（main push / 發布 gate 使用
 - `db`：真 PostgreSQL 的 migration（套用、重跑、checksum 竄改、失敗回滾、舊資料升級）、約束（跨專案、重複 revision、缺引用、凍結、audit append-only、artifact 生命週期）、交易（T48 同時 20 個相同 key、T49 audit/outbox 失敗回滾）、角色矩陣、gold RLS 隔離、job 狀態機、outbox 消費、artifact 清理與可取得性。每個測試類別建立一個新資料庫，需要 `LAB_TEST_DATABASE_URL`；沒有時印 `BLOCKED` 並以 exit 3 失敗，任何 skipped 也算失敗。
 - `db-unit`：不需資料庫的 `lab_db` 程式（匯出、redaction、本機 artifact store）。
 - `scoring`：`scoring/lab_scoring` 規則式評分核心（SPEC 16.5），以精確分數計算；`tests/scoring` 用 F06 的 SPEC 向量與暴力格點面積交叉核對。只用標準函式庫與 contracts，不需 DB 或 provider。
+- `db`：真 PostgreSQL 的 migration，由 Alembic 執行（套用、重跑、`alembic_version`、checksum 竄改、失敗回滾、舊資料升級、既有資料庫的採用、`alembic upgrade head` 命令列、並行 migrator 各只套用一次）、約束（跨專案、重複 revision、缺引用、凍結、audit append-only、artifact 生命週期）、交易（T48 同時 20 個相同 key、T49 audit/outbox 失敗回滾）、角色矩陣、gold RLS 隔離、job 狀態機、outbox 消費、artifact 清理與可取得性。每個測試類別建立一個新資料庫，需要 `LAB_TEST_DATABASE_URL`；沒有時印 `BLOCKED` 並以 exit 3 失敗，任何 skipped 也算失敗。
+- `db-unit`：不需資料庫的 `lab_db` 程式（匯出、redaction、本機 artifact store）。 Alembic 設定（revision 與 SQL 檔一一對應、單一線性鏈、URL 處理、checksum 驗證與採用邏輯）也在此 suite。CI 另有一步在 migrate 映像裡實際執行 Alembic（`deploy/Dockerfile.migrate`）。
 - `governance`（必要檔、PR/Issue templates、workflow 無空 job/`continue-on-error`/`|| true`、CODEOWNERS 身份核實、相對連結、密鑰樣式掃描、branch 清理判定）。後續 Issue 新增應用程式 suite 時需在 `scripts/check.sh` 註冊並對應路徑。
 - 本文件不代表 T01–T104 已執行；各 PR 驗證表須列實際指令、SHA 與結果。
 
@@ -30,3 +32,13 @@ python3 -m tools.governance.branch_cleanup --repo Disesfgewu/template-documentdi
 ```
 
 僅當 PR merged、同 repo、非 default/main/protected、目前 branch head 等於該 PR head、且無其他 open PR 以其為 head/base 時才刪除；否則輸出 `cleanup_pending` 與原因，exit 2。
+
+## Benchmark transfer foundation
+
+The contracts suite includes `tests/contracts/test_transfer.py`: actual local
+export/import/project CLI roundtrip, all-file hash/size/count checks,
+rehashed-invalid schema/reference/source/page cases, duplicate IDs/keys,
+resource limits and private file/symlink/FIFO handling. The synthetic bundle is
+structural test data, not accepted parser/provider/human evidence. See
+[benchmark transfer](BENCHMARK_TRANSFER.md); full T78 and authenticated UI/API,
+frozen revision selection, database/audit and release gates remain open.
