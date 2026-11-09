@@ -1,0 +1,26 @@
+# Database migration job: Alembic (db/alembic.ini) against any PostgreSQL.
+# Build from the repository root:
+#   docker build -f deploy/Dockerfile.migrate -t lab-migrate .
+# Run (the URL is the migration role's, passed as an environment variable):
+#   docker run --rm -e LAB_MIGRATION_DATABASE_URL=postgresql://... lab-migrate -x deployment=<id> upgrade head
+# Base image pinned by digest (python:3.12.13-slim-bookworm, multi-arch index).
+FROM python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app/db
+COPY db/requirements.lock /app/db/requirements.lock
+RUN pip install -r requirements.lock
+
+COPY db/alembic.ini /app/db/alembic.ini
+COPY db/lab_db /app/db/lab_db
+
+# Nothing here needs root; the schema owner's credentials arrive via the environment.
+RUN useradd --system --uid 10001 --no-create-home migrate
+USER migrate
+
+ENTRYPOINT ["alembic"]
+CMD ["-x", "deployment=local", "upgrade", "head"]

@@ -1,0 +1,16 @@
+{
+  "question_id": "q_002",
+  "metric": "correctness",
+  "status": "scored",
+  "raw_value": 75.0,
+  "display_value": "75.0",
+  "rounding": "lab-round-1",
+  "numerator": 1.5,
+  "denominator": 2.0,
+  "reason_codes": [],
+  "grader_revision": "grader@1",
+  "support_refs": [
+    "c1",
+    "c2"
+  ]
+}

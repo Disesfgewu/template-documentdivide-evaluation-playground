@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts)
+SUITES=(governance api api-db worker parser web contracts fixtures db db-unit)
 scope=auto
 base=origin/main
 selected=()
@@ -28,12 +28,17 @@ suite_for_base() {
   case "$1" in
     # Shared test/CI infrastructure affects every suite.
     .github/*|scripts/*|tools/governance/run_tests.py) echo "${SUITES[*]}";;
+    tools/governance/go_test_report.py) echo "governance worker";;
     services/api/*|tests/api/*) echo "api api-db";;
     tests/api_db/*|deploy/*) echo api-db;;
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
-    contracts/*|tests/contracts/*) echo contracts;;
     web/*) echo web;;
+    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db";;
+    fixtures/*|tests/fixtures/*) echo "fixtures parser";;
+    db/*) echo "db db-unit";;
+    tests/db/*) echo db;;
+    tests/dbunit/*) echo db-unit;;
     tools/__init__.py|tests/__init__.py|.gitignore|tools/governance/*|tests/governance/*|docs/*|*.md|requirements-dev.txt|LICENSE) echo governance;;
     *) echo "";;
   esac
@@ -50,10 +55,13 @@ run_suite() {
   case "$1" in
     governance)
       python3 -m tools.governance.check_repo
+      # Provenance is checked against GitHub for passed entries only (needs GH_TOKEN then).
+      python3 -m tools.governance.check_traceability --verify-provenance
+      python3 -m tools.governance.check_release_evidence --check
       python3 -m tools.governance.run_tests tests/governance
       ;;
     api)
-      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api
+      PYTHONPATH=services/api:contracts python3 -m tools.governance.run_tests tests/api
       ;;
     api-db)
       # Real PostgreSQL/pgvector only. Missing database = BLOCKED, never passed.
@@ -61,7 +69,7 @@ run_suite() {
         echo "BLOCKED: suite api-db needs LAB_TEST_DATABASE_URL (see docs/TESTING.md)" >&2
         return 3
       fi
-      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
+      PYTHONPATH=services/api:contracts python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
       ;;
     web)
       # React frontend: locked install, unit tests, type check, production build.
@@ -71,12 +79,31 @@ run_suite() {
       fi
       (cd web && node --version && npm ci && npm test && npm run build)
       ;;
+    db-unit)
+      # lab_db code that needs no database (e.g. export, redaction).
+      PYTHONPATH=db python3 -m tools.governance.run_tests tests/dbunit
+      ;;
+    db)
+      # Migrations, constraints, transactions on real PostgreSQL. Missing DB = BLOCKED.
+      if [[ -z "${LAB_TEST_DATABASE_URL:-}" ]]; then
+        echo "BLOCKED: suite db needs LAB_TEST_DATABASE_URL (see docs/TESTING.md)" >&2
+        return 3
+      fi
+      PYTHONPATH=db python3 -m tools.governance.run_tests tests/db --fail-on-skip
+      ;;
     contracts)
       # Versioned data contracts: examples, negative cases, schema drift.
       PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/contracts
       ;;
+    fixtures)
+      # Fixture registry: rebuild every registered item and compare sha256.
+      PYTHONPATH=contracts python3 -m tools.governance.run_tests tests/fixtures
+      # Human signoffs are resolved on GitHub; with none recorded no network
+      # is used, and an unreachable GitHub fails a human review (never passes).
+      PYTHONPATH=contracts python3 -m fixtures.registry_check --verify-signoff
+      ;;
     parser)
-      PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
+      PYTHONPATH=services/parser:contracts python3 -m tools.governance.run_tests tests/parser
       ;;
     worker)
       # Go worker. GOTOOLCHAIN=local: never auto-download a different Go;
@@ -92,8 +119,16 @@ run_suite() {
         (cd services/worker && gofmt -d .) >&2
         return 1
       fi
-      (cd services/worker && export GOTOOLCHAIN=local && go version && go vet ./... \
-        && go test -count=1 -v ./... && go build -o /dev/null ./cmd/lab-worker)
+      # go test -json is converted to the shared per-test report (printed
+      # like -v; written to LAB_TEST_REPORT_DIR for traceability evidence).
+      local gojson rc=0
+      gojson="$(mktemp)"
+      (cd services/worker && export GOTOOLCHAIN=local && go version && go vet ./...) || { rm -f "$gojson"; return 1; }
+      (cd services/worker && GOTOOLCHAIN=local go test -count=1 -json ./... > "$gojson") || rc=$?
+      python3 -m tools.governance.go_test_report --module services/worker --input "$gojson" || rc=1
+      rm -f "$gojson"
+      (( rc == 0 )) || return 1
+      (cd services/worker && GOTOOLCHAIN=local go build -o /dev/null ./cmd/lab-worker)
       ;;
     worker-agentkit)
       # Opt-in, never part of --scope all/auto: needs read access to the
