@@ -218,7 +218,9 @@ class ParseEndToEndTests(FreshDatabase):
         from lab_parser.unstructured_runner import run_unstructured_fast
         lines = ["Alpha bravo charlie delta", "Echo foxtrot golf hotel", "India juliet kilo lima"]
         cases = {"plain": "", "crop_offset_same_size": "/CropBox [50 50 662 842]", "crop_smaller": "/CropBox [40 400 500 780]",
-                 "rotate_180": "/Rotate 180", "rotate_180_crop": "/Rotate 180 /CropBox [40 400 500 780]"}
+                 "rotate_180": "/Rotate 180", "rotate_180_crop": "/Rotate 180 /CropBox [40 400 500 780]",
+                 "nonzero_origin": "/MediaBox [50 50 662 842]",
+                 "nonzero_origin_180_crop": "/MediaBox [50 50 662 842] /Rotate 180 /CropBox [60 450 560 800]"}
         sideways = {"rotate_90": "/Rotate 90", "rotate_270": "/Rotate 270", "rotate_90_crop": "/Rotate 90 /CropBox [40 400 500 780]"}
         measured = {}
         for name, extra in {**cases, **sideways}.items():
@@ -244,7 +246,7 @@ class ParseEndToEndTests(FreshDatabase):
                 self.assertEqual(boxes, [], f"{name} must stay without geometry")
                 continue
             self.assertIsNotNone(union, f"{name}: no evidence")
-            tolerance_x, tolerance_y = 3.0, 6.0   # pdfminer boxes include the font ascent/descent
+            tolerance_x, tolerance_y = 2.0, 3.0   # measured error is 1-2 pt (pdfminer boxes include the font ascent/descent)
             self.assertLessEqual(abs(union[0] - ink_box[0]), tolerance_x, f"{name} left {measured[name]}")
             self.assertLessEqual(abs(union[2] - ink_box[2]), tolerance_x, f"{name} right {measured[name]}")
             self.assertLessEqual(abs(union[1] - ink_box[1]), tolerance_y, f"{name} top {measured[name]}")
