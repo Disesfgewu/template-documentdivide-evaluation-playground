@@ -200,7 +200,10 @@ jobs:
 
   llm-smoke:
     name: llm-smoke (real provider, manual)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.llm_smoke }}
+    # Secrets are only ever handed to code on main, through the protected environment 'llm-smoke'
+    # (configure required reviewers there): a dispatch on any other ref skips this job.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.llm_smoke && github.ref == 'refs/heads/main' }}
+    environment: llm-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -210,12 +213,13 @@ jobs:
           AGENTKIT_READ_TOKEN: ${{ secrets.AGENTKIT_READ_TOKEN }}
           LAB_LLM_SMOKE_API_KEY: ${{ secrets.LAB_LLM_SMOKE_API_KEY }}
           LAB_LLM_SMOKE_BASE_URL: ${{ vars.LAB_LLM_SMOKE_BASE_URL }}
+          LAB_LLM_SMOKE_ALLOWED_HOST: ${{ vars.LAB_LLM_SMOKE_ALLOWED_HOST }}
           LAB_LLM_SMOKE_MODEL: ${{ vars.LAB_LLM_SMOKE_MODEL }}
           LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK }}
           LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK }}
         run: |
           missing=""
-          for name in AGENTKIT_READ_TOKEN LAB_LLM_SMOKE_API_KEY LAB_LLM_SMOKE_BASE_URL LAB_LLM_SMOKE_MODEL \
+          for name in AGENTKIT_READ_TOKEN LAB_LLM_SMOKE_API_KEY LAB_LLM_SMOKE_BASE_URL LAB_LLM_SMOKE_ALLOWED_HOST LAB_LLM_SMOKE_MODEL \
                       LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK; do
             [ -n "${!name}" ] || missing="$missing $name"
           done
@@ -242,13 +246,16 @@ jobs:
           GOTOOLCHAIN: local
           LAB_LLM_SMOKE_API_KEY: ${{ secrets.LAB_LLM_SMOKE_API_KEY }}
           LAB_LLM_SMOKE_BASE_URL: ${{ vars.LAB_LLM_SMOKE_BASE_URL }}
+          LAB_LLM_SMOKE_ALLOWED_HOST: ${{ vars.LAB_LLM_SMOKE_ALLOWED_HOST }}
           LAB_LLM_SMOKE_MODEL: ${{ vars.LAB_LLM_SMOKE_MODEL }}
           LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK }}
           LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK }}
         run: |
           set -euo pipefail
           export LAB_LLM_SMOKE_REPORT="$RUNNER_TEMP/llm-smoke-report.json"
-          (cd services/worker/agentflow && go test -count=1 -run '^TestRealProviderSmoke$' -v ./...)
+          # Everything in the private-module package (this is the only CI path that compiles it, so the
+          # harness tests against local fakes run here too), then the real call.
+          (cd services/worker/agentflow && go vet ./... && go test -count=1 ./... && go test -count=1 -run '^TestRealProviderSmoke$' -v ./...)
           python3 - "$LAB_LLM_SMOKE_REPORT" <<'PY'
           import json, sys
           report = json.load(open(sys.argv[1]))
@@ -259,5 +266,5 @@ jobs:
         if: always()
         with:
           name: llm-smoke
-          if-no-files-found: ignore
+          if-no-files-found: warn
           path: ${{ runner.temp }}/llm-smoke-report.json

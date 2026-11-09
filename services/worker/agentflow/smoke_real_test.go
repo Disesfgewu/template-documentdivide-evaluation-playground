@@ -7,6 +7,7 @@ package agentflow
 //
 //	LAB_LLM_SMOKE_BASE_URL   provider base URL (https://...)           required
 //	LAB_LLM_SMOKE_MODEL      model name                                required
+//	LAB_LLM_SMOKE_ALLOWED_HOST  the only host the key may reach (must equal the URL host)  required
 //	LAB_LLM_SMOKE_API_KEY    the key (read by agentKit from this env)  required, never logged
 //	LAB_LLM_SMOKE_PROTOCOL   agentKit protocol, default openai_chat
 //	LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK / ..._OUT_...               required (micro-USD per 1M tokens)
@@ -19,11 +20,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,6 +53,8 @@ type SmokeReport struct {
 	ChargedMicros  int64   `json:"charged_micros"` // -1 = unknown, never recorded as zero
 	Attempts       int     `json:"transport_attempts"`
 	WallSeconds    float64 `json:"wall_seconds"`
+	ResponseModel  string  `json:"response_model,omitempty"`
+	RequestSHA256  string  `json:"request_sha256,omitempty"`
 	TextLength     int     `json:"text_length"`
 	TextSHA256     string  `json:"text_sha256,omitempty"`
 	LedgerSpent    int64   `json:"ledger_spent_micros"`
@@ -58,25 +63,29 @@ type SmokeReport struct {
 
 type smokeEnv struct {
 	BaseURL, Model, Protocol string
+	AllowedHost              string // the only host the key may be sent to
 	Price                    Price
 }
+
+// maxPriceMicros is a sanity cap (micro-USD per 1M tokens): 1,000 USD per million tokens.
+const maxPriceMicros = 1_000_000_000
 
 // loadSmokeEnv returns the configuration or the reason the smoke is blocked.
 func loadSmokeEnv(get func(string) string) (smokeEnv, string) {
 	e := smokeEnv{BaseURL: get("LAB_LLM_SMOKE_BASE_URL"), Model: get("LAB_LLM_SMOKE_MODEL"),
-		Protocol: get("LAB_LLM_SMOKE_PROTOCOL")}
+		Protocol: get("LAB_LLM_SMOKE_PROTOCOL"), AllowedHost: get("LAB_LLM_SMOKE_ALLOWED_HOST")}
 	if e.Protocol == "" {
 		e.Protocol = "openai_chat"
 	}
 	var missing []string
-	for _, k := range []string{"LAB_LLM_SMOKE_BASE_URL", "LAB_LLM_SMOKE_MODEL", smokeKeyEnv} {
+	for _, k := range []string{"LAB_LLM_SMOKE_BASE_URL", "LAB_LLM_SMOKE_MODEL", "LAB_LLM_SMOKE_ALLOWED_HOST", smokeKeyEnv} {
 		if get(k) == "" {
 			missing = append(missing, k)
 		}
 	}
 	in, errIn := strconv.ParseInt(get("LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK"), 10, 64)
 	out, errOut := strconv.ParseInt(get("LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK"), 10, 64)
-	if errIn != nil || errOut != nil || in < 0 || out < 0 {
+	if errIn != nil || errOut != nil || in < 0 || out < 0 || in > maxPriceMicros || out > maxPriceMicros {
 		missing = append(missing, "LAB_LLM_SMOKE_PRICE_IN/OUT_MICROS_PER_MTOK")
 	}
 	if len(missing) > 0 {
@@ -90,34 +99,80 @@ func isLoopback(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
 }
 
+// isRealHost is true only for a public DNS name: not loopback, not an IP literal, not a private,
+// link-local or metadata address, not a single-label or internal-looking name.
+func isRealHost(host string) bool {
+	if host == "" || isLoopback(host) || net.ParseIP(host) != nil {
+		return false
+	}
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	if !strings.Contains(h, ".") {
+		return false
+	}
+	for _, suffix := range []string{".local", ".localhost", ".internal", ".lan", ".home", ".corp", ".intranet", ".test", ".invalid", ".example"} {
+		if strings.HasSuffix(h, suffix) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkEndpoint refuses a base URL the key must not be sent to. Loopback http endpoints are allowed
+// only as local fakes (they are never "real"); everything else needs https, no userinfo, no query or
+// fragment, and a host equal to the explicitly allowed one.
+func checkEndpoint(e smokeEnv) (host string, real bool, reason string) {
+	u, err := url.Parse(e.BaseURL)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", false, "invalid base url"
+	}
+	host = u.Hostname()
+	if isLoopback(host) {
+		return host, false, "" // a local fake; the report says real=false and the test refuses to pass it
+	}
+	if u.Scheme != "https" {
+		return host, false, "base url must be https"
+	}
+	if e.AllowedHost == "" || !strings.EqualFold(e.AllowedHost, host) {
+		return host, false, "base url host is not the allowed host"
+	}
+	return host, isRealHost(host), ""
+}
+
 // runSmoke makes the single pinned call. It never returns the key, prompt or reply text.
 func runSmoke(ctx context.Context, e smokeEnv) (rep SmokeReport) {
 	rep = SmokeReport{Status: "failed", Protocol: e.Protocol, Model: e.Model, ChargedMicros: UsageUnknown}
-	u, err := url.Parse(e.BaseURL)
-	if err != nil || u.Host == "" {
-		rep.Reason = "invalid base url"
+	host, real, reason := checkEndpoint(e)
+	rep.Host, rep.Real = host, real
+	if reason != "" {
+		rep.Reason = reason
 		return rep
 	}
-	rep.Host = u.Hostname()
-	rep.Real = !isLoopback(u.Hostname())
 	cfg := model.Config{Name: "smoke", Protocol: e.Protocol, BaseURL: e.BaseURL, Model: e.Model, APIKeyEnv: smokeKeyEnv,
 		MaxRetries: 1, TimeoutSeconds: 60, RequestsPerMinute: 30}
 	if err := ValidateModelConfig(cfg); err != nil {
-		rep.Reason = "model config: " + err.Error()
+		rep.Reason = "invalid model config"
 		return rep
 	}
 	client, err := model.NewContext(ctx, cfg)
 	if err != nil {
-		rep.Reason = "client: " + err.Error()
+		rep.Reason = "client construction failed"
 		return rep
 	}
+	// Never follow a redirect: some protocols send the key in a header Go does not strip on a
+	// cross-host redirect. A 30x is returned to agentKit as an error status instead.
+	hc := *client.HTTP
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client.HTTP = &hc
 	budget, _ := NewLedger(usd(1_000_000))
 	runner := &NodeRunner{Store: NewMemoryOperationStore(), WorkItemID: "smoke", NodeRevision: "smoke@1", MaxAttempts: 1,
 		InvocationID: func(graph.State) (string, error) { return "inv", nil }, Budget: budget, Estimate: usd(100_000)}
 	var seen model.Response
+	const prompt = "Reply with the single word: OK."
+	reqSum := sha256.Sum256([]byte(e.Model + "\x00" + prompt))
+	rep.RequestSHA256 = hex.EncodeToString(reqSum[:])
 	call := ChatCall{Client: model.Router{Entries: []model.Entry{{Config: cfg, Client: client}}}, Pin: cfg.Name, Price: e.Price,
 		Build: func(graph.State) (model.Request, error) {
-			return model.Request{Messages: []model.Message{{Role: "user", Content: "Reply with the single word: OK."}},
+			return model.Request{Messages: []model.Message{{Role: "user", Content: prompt}},
 				MaxOutputTokens: 16}, nil
 		},
 		Apply: func(_ graph.State, resp model.Response) (graph.State, error) {
@@ -126,7 +181,7 @@ func runSmoke(ctx context.Context, e smokeEnv) (rep SmokeReport) {
 		}}
 	node, err := call.Node(runner)
 	if err != nil {
-		rep.Reason = "node: " + err.Error()
+		rep.Reason = "node construction failed"
 		return rep
 	}
 	began := time.Now()
@@ -151,6 +206,7 @@ func runSmoke(ctx context.Context, e smokeEnv) (rep SmokeReport) {
 	rep.InputTokens, _ = info["input_tokens"].(int)
 	rep.OutputTokens, _ = info["output_tokens"].(int)
 	rep.Attempts, _ = info["transport_attempts"].(int)
+	rep.ResponseModel = seen.Model
 	rep.TextLength = len(seen.Text)
 	sum := sha256.Sum256([]byte(seen.Text))
 	rep.TextSHA256 = hex.EncodeToString(sum[:])
@@ -158,6 +214,8 @@ func runSmoke(ctx context.Context, e smokeEnv) (rep SmokeReport) {
 		rep.ChargedMicros, _ = e.Price.Cost(rep.InputTokens, rep.OutputTokens)
 	}
 	switch {
+	case rep.Real && (!rep.UsageKnown || rep.InputTokens <= 0 || rep.OutputTokens <= 0):
+		rep.Reason = "a real run must report usage"
 	case rep.TextLength == 0:
 		rep.Reason = "empty reply"
 	case !rep.UsageKnown && rep.LedgerSpent != 0:
@@ -265,6 +323,79 @@ func TestSmokeHarnessFailuresAreRecordedNotPassed(t *testing.T) {
 				t.Fatalf("report %+v", rep)
 			}
 		})
+	}
+}
+
+func TestSmokeEndpointRules(t *testing.T) {
+	cases := []struct {
+		name, url, allowed string
+		real               bool
+		reason             string
+	}{
+		{"https allowed public host", "https://api.example-llm.com/v1", "api.example-llm.com", true, ""},
+		{"http public host", "http://api.example-llm.com/v1", "api.example-llm.com", false, "must be https"},
+		{"host not allowed", "https://evil.example-llm.com/v1", "api.example-llm.com", false, "not the allowed host"},
+		{"no allowed host", "https://api.example-llm.com", "", false, "not the allowed host"},
+		{"userinfo", "https://user:pw@api.example-llm.com", "api.example-llm.com", false, "invalid base url"},
+		{"query string", "https://api.example-llm.com/v1?key=x", "api.example-llm.com", false, "invalid base url"},
+		{"private ip literal", "https://10.0.0.5/v1", "10.0.0.5", false, ""},
+		{"metadata ip", "https://169.254.169.254/v1", "169.254.169.254", false, ""},
+		{"single label host", "https://llm/v1", "llm", false, ""},
+		{"internal suffix", "https://llm.internal/v1", "llm.internal", false, ""},
+		{"loopback http fake", "http://127.0.0.1:9999", "", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, real, reason := checkEndpoint(smokeEnv{BaseURL: c.url, AllowedHost: c.allowed})
+			if real != c.real || (c.reason == "") != (reason == "") || !strings.Contains(reason, c.reason) {
+				t.Fatalf("real=%v reason=%q, want real=%v reason~%q", real, reason, c.real, c.reason)
+			}
+		})
+	}
+}
+
+func TestSmokeNeverFollowsARedirectWithTheKey(t *testing.T) {
+	t.Setenv(smokeKeyEnv, "test-key-not-real")
+	var leaked atomic.Int32
+	target := &provider{handler: func(_ int32, w http.ResponseWriter, r *http.Request) {
+		leaked.Add(1)
+		answer("OK", true)(0, w, r)
+	}}
+	targetURL := target.start(t)
+	redirector := &provider{handler: func(_ int32, w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
+	}}
+	rep := runSmoke(audited(t), fakeEnv(redirector.start(t), Price{InputMicrosPerMTok: 1, OutputMicrosPerMTok: 1}))
+	if leaked.Load() != 0 {
+		t.Fatalf("the redirect target received %d request(s): the key could have leaked", leaked.Load())
+	}
+	if rep.Status != "failed" {
+		t.Fatalf("report %+v", rep)
+	}
+}
+
+func TestSmokeReportHasProvenanceAndFixedReasons(t *testing.T) {
+	t.Setenv(smokeKeyEnv, "test-key-not-real")
+	p := &provider{handler: answer("OK", true)}
+	rep := runSmoke(audited(t), fakeEnv(p.start(t), Price{InputMicrosPerMTok: 1, OutputMicrosPerMTok: 1}))
+	if len(rep.RequestSHA256) != 64 || rep.ResponseModel == "" || rep.Host != "127.0.0.1" {
+		t.Fatalf("provenance missing: %+v", rep)
+	}
+}
+
+func TestSmokePriceSanityCaps(t *testing.T) {
+	get := func(in, out string) func(string) string {
+		return func(k string) string {
+			return map[string]string{"LAB_LLM_SMOKE_BASE_URL": "https://a.example-llm.com", "LAB_LLM_SMOKE_MODEL": "m",
+				"LAB_LLM_SMOKE_ALLOWED_HOST": "a.example-llm.com", smokeKeyEnv: "k",
+				"LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK": in, "LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK": out}[k]
+		}
+	}
+	if _, reason := loadSmokeEnv(get("3000000", "15000000")); reason != "" {
+		t.Fatalf("a normal price is blocked: %s", reason)
+	}
+	if _, reason := loadSmokeEnv(get("999999999999", "1")); reason == "" {
+		t.Fatal("an absurd price must be refused")
 	}
 }
 
