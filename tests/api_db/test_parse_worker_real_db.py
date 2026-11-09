@@ -170,7 +170,7 @@ class ParseWorkerRealDbTests(FreshDatabase):
             started.wait(10)
             with self.connect() as c, c.transaction():
                 c.execute("SELECT set_config('lab.transition_reason', 'user cancel', true)")
-                c.execute("UPDATE jobs SET status = 'cancel_requested', lease_owner = NULL, lease_token = NULL, "
+                c.execute("UPDATE jobs SET status = 'cancel_requested', lease_owner = NULL, lease_token = NULL, row_version = row_version + 1, "
                           "lease_expires_at = NULL WHERE id = %s", (job,))
 
         t = threading.Thread(target=cancel)
