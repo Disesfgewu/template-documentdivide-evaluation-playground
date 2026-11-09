@@ -128,6 +128,7 @@ _CHILD_CODES = {
     "encrypted_pdf": "encrypted_pdf",
     "page_limit_exceeded": "page_limit_exceeded",
     "timeout": "inspection_timeout",
+    "cancelled": "inspection_cancelled",
     "memory_limit": "inspection_failed",
 }
 
@@ -169,10 +170,10 @@ def _cheap_reject(size_bytes: int, head: bytes, limits: Limits) -> str | None:
     return None
 
 
-def _run_child(data: bytes, sha256: str, limits: Limits) -> tuple[ImportResult, tuple]:
+def _run_child(data: bytes, sha256: str, limits: Limits, cancelled=None) -> tuple[ImportResult, tuple]:
     size_bytes = len(data)
     try:
-        inspection = inspect_geometry(data, _process_limits(size_bytes, limits))
+        inspection = inspect_geometry(data, _process_limits(size_bytes, limits), cancelled=cancelled)
     except InspectionError as exc:
         return ImportResult(outcome="reject", reason=_CHILD_CODES.get(exc.code, "inspection_failed"),
                             sha256=sha256, size_bytes=size_bytes, page_count=None, warnings=()), ()
@@ -180,12 +181,14 @@ def _run_child(data: bytes, sha256: str, limits: Limits) -> tuple[ImportResult, 
                         page_count=inspection.page_count, warnings=()), inspection.pages
 
 
-def inspect_pdf_isolated(data: bytes, limits: Limits) -> tuple[ImportResult, tuple]:
+def inspect_pdf_isolated(data: bytes, limits: Limits, cancelled=None) -> tuple[ImportResult, tuple]:
     """Inspect PDF bytes in the isolation child; one inspector for ingest and upload.
 
     Returns ``(result, pages)``: a reject result (fixed reason code) with no pages,
     or an accept result whose ``page_count`` is the number pypdf, the geometry
     extractor and PDFium agree on, with the child's per-page geometry and label.
+    ``cancelled`` is an optional fast, nonblocking callback (for example a client disconnect
+    flag); when it turns true the child is stopped and the result is ``inspection_cancelled``.
     Never raises for a bad PDF; only the cheap checks run in the caller process.
     """
     sha256 = hashlib.sha256(data).hexdigest()
@@ -193,7 +196,7 @@ def inspect_pdf_isolated(data: bytes, limits: Limits) -> tuple[ImportResult, tup
     if reason is not None:
         return ImportResult(outcome="reject", reason=reason, sha256=sha256, size_bytes=len(data),
                             page_count=None, warnings=()), ()
-    return _run_child(data, sha256, limits)
+    return _run_child(data, sha256, limits, cancelled)
 
 
 def _inspect_staged_fd(

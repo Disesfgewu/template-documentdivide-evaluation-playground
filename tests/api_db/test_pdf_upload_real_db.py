@@ -731,6 +731,26 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual({k: v for k, v in replay.json().items() if k != "replayed"}, original)
         self.assertIs(replay.json()["replayed"], True)
 
+    def test_a_cancelled_inspection_persists_nothing_and_a_retry_succeeds(self) -> None:
+        """Client disconnect during inspection: 503 request_cancelled, rolled back, no cached failure."""
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        headers = {"Authorization": f"Bearer {issue_actor_token(owner_id, self.secret)}",
+                   "Content-Type": "application/pdf", "Idempotency-Key": "cancel-1"}
+        url = f"/api/v1/documents?project_id={project_id}&logical_id=doc-cancel"
+        with patch("lab_parser.artifacts.inspect_geometry", side_effect=InspectionError("cancelled")):
+            res = self.client.post(url, headers=headers, content=self.f01_21)
+        self.assertEqual(res.status_code, 503, res.text)
+        self.assertEqual(res.json()["error"]["code"], "request_cancelled")
+        self.assertIs(res.json()["error"]["retryable"], True)
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                for table in ("operations", "idempotency_keys", "operation_results", "document_versions", "audit_events"):
+                    cur.execute(f"SELECT count(*) AS cnt FROM {table} WHERE project_id = %s", (project_id,))
+                    self.assertEqual(cur.fetchone()["cnt"], 0, table)
+        retry = self.client.post(url, headers=headers, content=self.f01_21)
+        self.assertEqual(retry.status_code, 201, retry.text)
+
     def test_repaired_xref_is_rejected_as_corrupt_pdf_and_publishes_nothing(self) -> None:
         """Behaviour change with the isolation child: any pypdf warning is an invalid PDF,
         so the former 'flagged' 201 for a repaired xref is now a 422 corrupt_pdf with no

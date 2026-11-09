@@ -394,9 +394,16 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         self.assertEqual((big.memory_bytes, big.cpu_seconds), (4 * 512 * 1024 ** 2 + 256 * 1024 ** 2, 69))
         self.assertLessEqual(big.wall_seconds, 180)
 
+    def test_inspection_can_be_cancelled_before_the_child_starts(self) -> None:
+        from lab_parser.artifacts import inspect_pdf_isolated
+        result, pages = inspect_pdf_isolated(self.pdf_1p, Limits(), cancelled=lambda: True)
+        self.assertEqual((result.outcome, result.reason, pages), ("reject", "inspection_cancelled", ()))
+        result, pages = inspect_pdf_isolated(self.pdf_1p, Limits(), cancelled=lambda: False)
+        self.assertEqual((result.outcome, result.page_count, len(pages)), ("accept", 1, 1))
+
     def test_child_failures_map_to_fixed_codes_and_publish_nothing(self) -> None:
         for child_code, expected in (("timeout", "inspection_timeout"), ("memory_limit", "inspection_failed"),
-                                     ("cancelled", "inspection_failed"), ("invalid_child_result", "inspection_failed"),
+                                     ("cancelled", "inspection_cancelled"), ("invalid_child_result", "inspection_failed"),
                                      ("encrypted_pdf", "encrypted_pdf"), ("page_limit_exceeded", "page_limit_exceeded")):
             with self.subTest(child_code=child_code):
                 with patch.object(artifacts, "inspect_geometry", side_effect=InspectionError(child_code)):
