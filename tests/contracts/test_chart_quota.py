@@ -162,6 +162,34 @@ class CrossPageDecisionTests(unittest.TestCase):
         self.assertIn("single_page_evidence", d.reasons)
 
 
+class SinglePageAndFullRemovalTests(unittest.TestCase):
+    def test_chart_question_with_cross_page_reasoning_on_one_page_is_not_necessary(self):
+        q, s, ev = make("q_x", "chart_table", "cross_page_integration",
+                        [("f", 1, "figure"), ("t", 1, "text")])
+        d = decide_necessity(q, s, ev, [res("q_x", {"f"}, False), res("q_x", {"f", "t"}, False)])
+        self.assertEqual((d.verdict, d.reclassify_to), ("not_necessary", "general"))
+        self.assertIn("single_page_evidence", d.reasons)
+        report = chart_coverage(1, [q], {"q_x": d}, material_sufficient=True)
+        self.assertFalse(report.has_cross_page_visual)
+
+    def test_chart_question_with_cross_page_reasoning_on_two_pages_is_still_necessary(self):
+        q, s, ev = make("q_x", "chart_table", "cross_page_integration",
+                        [("f", 1, "figure"), ("t", 2, "text")])
+        d = decide_necessity(q, s, ev, [res("q_x", {"f"}, False), res("q_x", {"t"}, False)])
+        self.assertEqual(d.verdict, "necessary")
+
+    def test_removal_of_every_cited_unit_is_not_a_pass(self):
+        q, s, ev = make("q_x", "chart_table", "value_lookup", [("f", 1, "figure")])
+        d = decide_necessity(q, s, ev, [res("q_x", {"f"}, False)])
+        self.assertEqual(d.verdict, "needs_review")
+        self.assertIn("removes_all_evidence:visual", d.reasons)
+
+    def test_removal_leaving_a_unit_is_unchanged(self):
+        q, s, ev = make("q_x", "chart_table", "value_lookup", [("f", 1, "figure"), ("t", 1, "text")])
+        d = decide_necessity(q, s, ev, [res("q_x", {"f"}, False)])
+        self.assertEqual(d.verdict, "necessary")
+
+
 class IntegrationDecisionTests(unittest.TestCase):
     def test_both_removals_must_break_an_image_text_question(self):
         q, s, ev = make("q_i", "chart_table", "image_text_integration", CHART)

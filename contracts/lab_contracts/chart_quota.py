@@ -12,7 +12,9 @@ required and what their results mean:
   as a chart question (SPEC: "只看 caption／周邊文字即可回答者不計讀圖配額").
 * ``cross_page`` questions: removing the evidence of any single page must make
   it unanswerable; evidence on one page only, or any page that can be dropped,
-  disqualifies it (T17, T20).
+  disqualifies it (T17, T20). The one-page check applies to every question that
+  requires page removals, including a chart question whose reasoning type is
+  ``cross_page_integration``.
 * ``image_text_integration`` questions (any bucket): removing the visual
   evidence and, separately, the text evidence must each make it unanswerable.
 * A chart question whose reasoning type is ``cross_page_integration`` needs the
@@ -21,7 +23,9 @@ required and what their results mean:
 Results from the same model's self-review are never evidence (SPEC: "同一模型
 同輪自評不是獨立證據"); with no independent result for a required removal the
 verdict is ``needs_review``, never a pass. Conflicting independent results are
-kept as ``needs_review``. A verdict only says whether the question may count
+kept as ``needs_review``. A removal that would take away every cited evidence
+unit is never accepted as a pass (the question is trivially unanswerable); it is
+``needs_review`` with ``removes_all_evidence:<kind>``. A verdict only says whether the question may count
 toward its quota; reclassifying is a hint for the planner, not an edit.
 """
 from __future__ import annotations
@@ -103,6 +107,13 @@ def _pages(unit: EvidenceUnit) -> set[int]:
     return {r.page_index for r in unit.regions}
 
 
+def _wants_pages(question: Question) -> bool:
+    return question.quota_bucket is QuotaBucket.cross_page or (
+        question.quota_bucket is QuotaBucket.chart_table
+        and question.reasoning_type is ReasoningType.cross_page_integration
+    )
+
+
 def required_ablations(
     question: Question, source: SourceAnswer, evidence: Mapping[str, EvidenceUnit]
 ) -> tuple[Ablation, ...]:
@@ -118,10 +129,7 @@ def required_ablations(
         or question.reasoning_type is ReasoningType.image_text_integration
     )
     wants_text = question.reasoning_type is ReasoningType.image_text_integration
-    wants_pages = question.quota_bucket is QuotaBucket.cross_page or (
-        question.quota_bucket is QuotaBucket.chart_table
-        and question.reasoning_type is ReasoningType.cross_page_integration
-    )
+    wants_pages = _wants_pages(question)
     out: list[Ablation] = []
     if wants_visual:
         out.append(Ablation("visual", frozenset(i for i in ids if _is_visual(evidence[i]))))
@@ -141,6 +149,7 @@ def decide_necessity(
     results: Iterable[AblationResult],
 ) -> NecessityDecision:
     required = required_ablations(question, source, evidence)
+    cited = frozenset(_evidence_ids(source, evidence))
     qid = question.question_id
     if not required:
         return NecessityDecision(qid, "not_required", ())
@@ -156,7 +165,7 @@ def decide_necessity(
         # No evidence of that kind at all: the question cannot need it.
         not_necessary = True
     pages = [a for a in required if a.kind.startswith("page:")]
-    if question.quota_bucket is QuotaBucket.cross_page and len(pages) < 2:
+    if _wants_pages(question) and len(pages) < 2:
         reasons.append("single_page_evidence")
         not_necessary = True
 
@@ -165,6 +174,12 @@ def decide_necessity(
         reasons.append("self_review_ignored")
     for a in required:
         if not a.removed:
+            continue
+        if a.removed == cited:
+            # Removing every cited unit makes "unanswerable" true by construction,
+            # so the result proves nothing about necessity.
+            reasons.append(f"removes_all_evidence:{a.kind}")
+            review = True
             continue
         relevant = [r for r in mine if r.independent and r.removed == a.removed]
         if not relevant:
