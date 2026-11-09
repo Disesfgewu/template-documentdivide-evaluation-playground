@@ -30,6 +30,7 @@ import uuid
 from typing import Callable
 
 import psycopg
+import psycopg.errors
 
 from lab_db import jobs
 from lab_db.storage import LocalArtifactStore
@@ -118,6 +119,14 @@ def _fail(conn, project_id, lease, code) -> ParseOutcome:
 # or the result was bad would be a lie. The job stays 'running' until its lease expires and is
 # then retried (or finalized by fail_exhausted).
 _INFRASTRUCTURE = (psycopg.OperationalError, psycopg.InterfaceError)
+# OperationalError subclasses that say "this statement is the problem", not "the database is gone":
+# retrying them cannot help, so they are ordinary (deterministic) failures.
+_DETERMINISTIC_DB = (psycopg.errors.QueryCanceled, psycopg.errors.ProgramLimitExceeded)
+
+
+def is_infrastructure(exc: BaseException) -> bool:
+    """A connection-level database failure (connection lost, server down, interface closed)."""
+    return isinstance(exc, _INFRASTRUCTURE) and not isinstance(exc, _DETERMINISTIC_DB)
 
 
 def _unreachable(job_id) -> ParseOutcome:
@@ -126,8 +135,13 @@ def _unreachable(job_id) -> ParseOutcome:
 
 def _stopped(conn, project_id, job_id) -> ParseOutcome:
     """The lease is gone while we ran: acknowledge a cancel, otherwise leave it to the new owner."""
-    if jobs.acknowledge_cancel(conn, project_id, job_id):
-        return ParseOutcome(job_id, "cancelled", "cancel_acknowledged")
+    try:
+        if jobs.acknowledge_cancel(conn, project_id, job_id):
+            return ParseOutcome(job_id, "cancelled", "cancel_acknowledged")
+    except Exception as exc:
+        if is_infrastructure(exc):
+            return _unreachable(job_id)  # the cancel is acknowledged by whoever runs next
+        raise
     return ParseOutcome(job_id, "abandoned", "lease_lost")
 
 
@@ -154,22 +168,32 @@ def process_parse_job(
     try:
         lease = jobs.acquire(conn, project_id, job_id, worker, ttl_seconds)
     except jobs.LeaseUnavailable:
-        jobs.fail_exhausted(conn, project_id, job_id)
+        try:
+            jobs.fail_exhausted(conn, project_id, job_id)
+        except Exception as exc:
+            if not is_infrastructure(exc):
+                raise
+        raise
+    except Exception as exc:
+        if is_infrastructure(exc):
+            return _unreachable(job_id)  # nothing was claimed; the job is still queued or expired
         raise
     try:
         return _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect,
                         ttl_seconds, python, run)
     except jobs.LeaseLost:
         return _stopped(conn, project_id, job_id)
-    except _INFRASTRUCTURE:
-        return _unreachable(job_id)
-    except Exception:
+    except Exception as exc:
+        if is_infrastructure(exc):
+            return _unreachable(job_id)
         try:
             return _fail(conn, project_id, lease, "internal_error")
         except jobs.LeaseLost:
             return _stopped(conn, project_id, job_id)
-        except _INFRASTRUCTURE:
-            return _unreachable(job_id)
+        except Exception as again:
+            if is_infrastructure(again):
+                return _unreachable(job_id)
+            raise
 
 
 def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, ttl_seconds, python, run):
@@ -224,8 +248,10 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
     try:
         jobs.finish(conn, project_id, lease, "succeeded", "parsed",
                     hook=lambda c: persist(c, project_id, lease, batch))
-    except (jobs.LeaseLost, *_INFRASTRUCTURE):
+    except jobs.LeaseLost:
         raise
-    except Exception:
+    except Exception as exc:
+        if is_infrastructure(exc):
+            raise
         return _fail(conn, project_id, lease, "persist_failed")
     return ParseOutcome(job_id, "succeeded", "parsed")
