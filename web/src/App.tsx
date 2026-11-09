@@ -1,7 +1,16 @@
 import { useEffect, useState } from "react";
 import { fetchApiStatus, type ApiStatus } from "./status";
+import { DocumentOperator } from "./DocumentOperator";
 
-export function App({ load = fetchApiStatus }: { load?: () => Promise<ApiStatus> }) {
+export function App({
+  load = fetchApiStatus,
+  fetchFn = fetch,
+  triggerSave,
+}: {
+  load?: () => Promise<ApiStatus>;
+  fetchFn?: typeof fetch;
+  triggerSave?: (blob: Blob, filename: string) => void;
+}) {
   const [status, setStatus] = useState<ApiStatus>({ kind: "loading" });
 
   useEffect(() => {
@@ -17,19 +26,23 @@ export function App({ load = fetchApiStatus }: { load?: () => Promise<ApiStatus>
   }, [load]);
 
   return (
-    <main>
+    <main style={{ maxWidth: "800px", margin: "0 auto", padding: "1rem", fontFamily: "sans-serif" }}>
       <h1>document-seperater-playground LAB</h1>
-      <section aria-label="尚未接入的功能">
-        <h2>尚未接入的功能</h2>
-        <p>
-          文件上傳與解析、題庫、方法接入、評分、比較與 trace 畫面都還沒有實作（#7、#10–#13）。
-          本頁不顯示任何假資料或假進度。
-        </p>
-      </section>
+
       <section aria-label="系統狀態">
         <h2>系統狀態</h2>
         <StatusView status={status} />
       </section>
+
+      <section aria-label="尚未接入的功能">
+        <h2>尚未接入的功能</h2>
+        <p>
+          登入與憑證發行、非同步任務進度、題庫工作台、方法接入、評分、比較與 trace 畫面都還沒有實作。
+          本頁不顯示任何假資料或假進度。文件上傳與下載功能需待後端文件服務就緒。
+        </p>
+      </section>
+
+      <DocumentOperator fetchFn={fetchFn} triggerSave={triggerSave} />
     </main>
   );
 }

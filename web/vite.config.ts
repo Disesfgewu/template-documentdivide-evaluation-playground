@@ -7,7 +7,10 @@ const apiTarget = process.env.LAB_API_URL ?? "http://127.0.0.1:8000";
 export default defineConfig({
   plugins: [react()],
   server: {
-    proxy: { "/api": { target: apiTarget, rewrite: (p) => p.replace(/^\/api/, "") } },
+    proxy: {
+      "/api/readyz": { target: apiTarget, rewrite: () => "/readyz" },
+      "/api": { target: apiTarget },
+    },
   },
   test: { environment: "jsdom" },
 });
