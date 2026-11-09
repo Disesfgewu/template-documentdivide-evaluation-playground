@@ -16,6 +16,19 @@ class LeaseUnavailable(Exception):
     """The job is not claimable (not queued, held by a live lease, or max_attempts reached)."""
 
 
+class ParseJobActive(Exception):
+    """The document version already has a queued or running parse job (a new one is refused)."""
+
+    def __init__(self, job_id: uuid.UUID) -> None:
+        self.job_id = job_id
+        super().__init__(f"parse job {job_id} is already active for this document version")
+
+
+# A job in one of these states still owns the document version's parse; succeeded, failed
+# and cancelled ones do not (a failed one is retried through its own job, not a second job).
+ACTIVE_JOB_STATUSES = ("queued", "running", "paused_budget", "waiting_review", "cancel_requested")
+
+
 class LeaseLost(Exception):
     """The caller's fencing token is no longer the job's current lease."""
 
@@ -241,6 +254,19 @@ def enqueue_parse_job(
     """
     job_id = uuid.uuid4()
     with conn.transaction():
+        # One active parse job per document version: without a cap a client that sends no
+        # Idempotency-Key could queue unlimited identical jobs (and later provider cost). The
+        # advisory lock serializes concurrent requests for the same version.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                     (f"parse_job:{project_id}:{document_version_id}",))
+        active = conn.execute(
+            "SELECT j.id FROM parse_jobs p JOIN jobs j ON j.project_id = p.project_id AND j.id = p.job_id "
+            "WHERE p.project_id = %s AND p.document_version_id = %s AND j.status::text = ANY(%s) "
+            "ORDER BY p.created_at LIMIT 1",
+            (project_id, document_version_id, list(ACTIVE_JOB_STATUSES)),
+        ).fetchone()
+        if active is not None:
+            raise ParseJobActive(active[0])
         conn.execute(
             "INSERT INTO jobs (id, project_id, kind, stage, max_attempts, retryable) "
             "VALUES (%s, %s, 'document.parse', 'queued', %s, true)",

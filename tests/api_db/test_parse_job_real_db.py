@@ -21,6 +21,7 @@ for _sub in (_REPO_ROOT, _REPO_ROOT / "db", _REPO_ROOT / "services" / "api", _RE
 from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
 from lab_api.main import create_app
+from lab_db import jobs
 from fixtures.generators import synthetic_pdf
 
 try:
@@ -126,9 +127,44 @@ class ParseJobRealDbTests(FreshDatabase):
         changed = self.post(owner, doc, {"page_selection": [1, 3]}, **{"Idempotency-Key": "k1"})
         self.assertEqual((changed.status_code, changed.json()["error"]["code"]), (409, "conflict"))
         self.assertEqual(self.count("jobs", project), 1)
-        other = self.post(owner, doc, {"page_selection": [1, 2]}, **{"Idempotency-Key": "k2"})
-        self.assertEqual(other.status_code, 202)
-        self.assertNotEqual(other.json()["job_id"], first.json()["job_id"])
+        self.assertEqual(self.count("jobs", project), 1)
+
+    def test_only_one_active_parse_job_per_document_version(self):
+        project, owner, others, outsider, doc = self.seed()
+        first = self.post(owner, doc, {"page_selection": [1]}, **{"Idempotency-Key": "a"})
+        self.assertEqual(first.status_code, 202, first.text)
+        for headers in ({}, {"Idempotency-Key": "b"}):  # keyless clients are capped too
+            second = self.post(owner, doc, {"page_selection": [1]}, **headers)
+            self.assertEqual((second.status_code, second.json()["error"]["code"]), (409, "conflict"))
+            self.assertEqual(second.json()["error"]["details"]["job_id"], first.json()["job_id"])
+        self.assertEqual(self.count("jobs", project), 1)
+        self.assertEqual(self.count("operations", project, " AND kind = 'document.parse'"), 1)
+        self.assertEqual(self.count("idempotency_keys", project, " AND idempotency_scope = 'document.parse'"), 1)
+        # The refused request stored nothing, so its key is usable once the job is finished.
+        job = uuid.UUID(first.json()["job_id"])
+        with self.connect() as c:
+            lease = jobs.acquire(c, project, job, "worker-1")
+            still = self.post(owner, doc, {"page_selection": [1]}, **{"Idempotency-Key": "b"})
+            self.assertEqual(still.status_code, 409, "a running job still owns the document version")
+            jobs.finish(c, project, lease, "succeeded", "done")
+        later = self.post(owner, doc, {"page_selection": [1]}, **{"Idempotency-Key": "b"})
+        self.assertEqual(later.status_code, 202, later.text)
+        self.assertNotEqual(later.json()["job_id"], first.json()["job_id"])
+        self.assertEqual(self.count("jobs", project), 2)
+
+    def test_the_cap_is_per_document_version_and_concurrent_requests_make_one_job(self):
+        project, owner, others, outsider, doc = self.seed()
+        other_doc = self.client.post(f"/api/v1/documents?project_id={project}&logical_id=second",
+                                     headers=self.headers(owner, **{"Content-Type": "application/pdf"}),
+                                     content=synthetic_pdf.build(3))
+        self.assertEqual(other_doc.status_code, 201, other_doc.text)
+        other = uuid.UUID(other_doc.json()["id"])
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(6) as pool:
+            codes = sorted(f.result().status_code for f in [pool.submit(self.post, owner, doc) for _ in range(6)])
+        self.assertEqual(codes, [202, 409, 409, 409, 409, 409])
+        self.assertEqual(self.count("jobs", project), 1)
+        self.assertEqual(self.post(owner, other).status_code, 202)  # a different version is independent
         self.assertEqual(self.count("jobs", project), 2)
 
     def test_roles_outsiders_unknown_documents_and_missing_auth(self):
