@@ -6,7 +6,8 @@ transaction with its operation, idempotency key and audit event. Nothing is
 parsed here and no provider is called: a worker leases the job later. Access
 follows the role matrix action ``import_and_configure_parse`` (owner and
 maintainer); a non-member and an unknown document are both 404, a member
-without the role gets 403. The same ``Idempotency-Key`` with the same request
+without the role gets 403. At most one parse job per document version may be queued or running (409 ``conflict`` with
+the active ``job_id`` otherwise). The same ``Idempotency-Key`` with the same request
 replays the stored original response (200, ``replayed``); with a different
 request it is a 409.
 """
@@ -31,7 +32,7 @@ from .documents import (
     get_authenticated_actor,
     get_db,
 )
-from lab_db.jobs import enqueue_parse_job  # noqa: E402
+from lab_db.jobs import ParseJobActive, enqueue_parse_job  # noqa: E402
 from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
 
 router = APIRouter()
@@ -129,11 +130,17 @@ def _request_parse(
                 "VALUES (%s, 'document.parse', %s, %s, %s)",
                 (project_id, idempotency_key, request_hash, operation_id),
             )
-        job_id = enqueue_parse_job(
-            conn, project_id=project_id, actor_id=actor_id, operation_id=operation_id,
-            document_version_id=document_id, profile=body.profile,
-            page_selection=body.page_selection, budget_ref=body.budget_ref,
-        )
+        try:
+            job_id = enqueue_parse_job(
+                conn, project_id=project_id, actor_id=actor_id, operation_id=operation_id,
+                document_version_id=document_id, profile=body.profile,
+                page_selection=body.page_selection, budget_ref=body.budget_ref,
+            )
+        except ParseJobActive as active:
+            # Rolls the whole transaction back: no operation or idempotency key is stored,
+            # so the client can retry the same key once the active job has finished.
+            raise ApiError(409, "conflict", "a parse job for this document version is already active",
+                           details={"job_id": str(active.job_id)}) from None
         created = {
             "job_id": str(job_id),
             "document_version_id": str(document_id),

@@ -751,6 +751,31 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         retry = self.client.post(url, headers=headers, content=self.f01_21)
         self.assertEqual(retry.status_code, 201, retry.text)
 
+    def test_a_disconnect_after_a_good_inspection_but_before_the_write_persists_nothing(self) -> None:
+        from lab_api import documents
+        real = documents.inspect_pdf_isolated
+
+        def inspect_then_disconnect(data, limits, cancelled=None):
+            result = real(data, limits, cancelled=cancelled)
+            cancelled.__self__.set()  # the client goes away right after the child finished
+            return result
+
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        headers = {"Authorization": f"Bearer {issue_actor_token(owner_id, self.secret)}",
+                   "Content-Type": "application/pdf", "Idempotency-Key": "cancel-late-1"}
+        url = f"/api/v1/documents?project_id={project_id}&logical_id=doc-cancel-late"
+        with patch("lab_api.documents.inspect_pdf_isolated", side_effect=inspect_then_disconnect):
+            res = self.client.post(url, headers=headers, content=self.f01_21)
+        self.assertEqual((res.status_code, res.json()["error"]["code"]), (503, "request_cancelled"))
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                for table in ("operations", "idempotency_keys", "document_versions", "artifacts", "audit_events"):
+                    cur.execute(f"SELECT count(*) AS cnt FROM {table} WHERE project_id = %s", (project_id,))
+                    self.assertEqual(cur.fetchone()["cnt"], 0, table)
+        retry = self.client.post(url, headers=headers, content=self.f01_21)
+        self.assertEqual(retry.status_code, 201, retry.text)
+
     def test_repaired_xref_is_rejected_as_corrupt_pdf_and_publishes_nothing(self) -> None:
         """Behaviour change with the isolation child: any pypdf warning is an invalid PDF,
         so the former 'flagged' 201 for a repaired xref is now a 422 corrupt_pdf with no

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -14,6 +14,19 @@ from psycopg.types.json import Jsonb
 
 class LeaseUnavailable(Exception):
     """The job is not claimable (not queued, held by a live lease, or max_attempts reached)."""
+
+
+class ParseJobActive(Exception):
+    """The document version already has a queued or running parse job (a new one is refused)."""
+
+    def __init__(self, job_id: uuid.UUID) -> None:
+        self.job_id = job_id
+        super().__init__(f"parse job {job_id} is already active for this document version")
+
+
+# A job in one of these states still owns the document version's parse; succeeded, failed
+# and cancelled ones do not (a failed one is retried through its own job, not a second job).
+ACTIVE_JOB_STATUSES = ("queued", "running", "paused_budget", "waiting_review", "cancel_requested")
 
 
 class LeaseLost(Exception):
@@ -119,12 +132,21 @@ def finish(
     lease: Lease,
     status: str,
     reason: str,
+    hook: Optional[Callable[[psycopg.Connection], None]] = None,
 ) -> None:
     """running -> succeeded/failed/paused_budget/waiting_review/cancel_requested/queued.
-    The DB rejects anything else; leaving 'running' always drops the lease."""
+    The DB rejects anything else; leaving 'running' always drops the lease.
+
+    ``hook`` runs inside the same transaction, after the lease check and before the status
+    update, with the job row locked and still 'running' under this lease. Whatever it writes
+    commits or rolls back together with the status change, so a result can never be stored
+    for a job that did not finish, nor a job finish without its result. A hook that raises
+    rolls everything back and the exception propagates (the job stays 'running')."""
     with conn.transaction():
         _check(conn, project_id, lease)
         _reason(conn, reason)
+        if hook is not None:
+            hook(conn)
         conn.execute(
             """
             UPDATE jobs
@@ -137,6 +159,44 @@ def finish(
             """,
             (status, project_id, lease.job_id),
         )
+
+
+def fail_exhausted(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID) -> bool:
+    """Finalize a job stuck 'running' whose lease expired and whose attempts are used up.
+
+    ``acquire`` refuses such a job (attempt + 1 > max_attempts), so without this nobody could
+    ever move it. Returns True when it was moved to 'failed'."""
+    with conn.transaction():
+        _reason(conn, "lease_exhausted")
+        row = conn.execute(
+            """
+            UPDATE jobs
+            SET status = 'failed', lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+                row_version = row_version + 1
+            WHERE project_id = %s AND id = %s AND status = 'running'
+              AND attempt >= max_attempts AND lease_expires_at < clock_timestamp()
+            RETURNING 1
+            """,
+            (project_id, job_id),
+        ).fetchone()
+    return row is not None
+
+
+def acknowledge_cancel(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID) -> bool:
+    """cancel_requested -> cancelled, called by the worker once it has stopped its work.
+
+    Returns False when the job is not in 'cancel_requested' (nothing is changed)."""
+    with conn.transaction():
+        _reason(conn, "cancel_acknowledged")
+        row = conn.execute(
+            """
+            UPDATE jobs SET status = 'cancelled', row_version = row_version + 1
+            WHERE project_id = %s AND id = %s AND status = 'cancel_requested'
+            RETURNING 1
+            """,
+            (project_id, job_id),
+        ).fetchone()
+    return row is not None
 
 
 def save_checkpoint(
@@ -241,6 +301,19 @@ def enqueue_parse_job(
     """
     job_id = uuid.uuid4()
     with conn.transaction():
+        # One active parse job per document version: without a cap a client that sends no
+        # Idempotency-Key could queue unlimited identical jobs (and later provider cost). The
+        # advisory lock serializes concurrent requests for the same version.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                     (f"parse_job:{project_id}:{document_version_id}",))
+        active = conn.execute(
+            "SELECT j.id FROM parse_jobs p JOIN jobs j ON j.project_id = p.project_id AND j.id = p.job_id "
+            "WHERE p.project_id = %s AND p.document_version_id = %s AND j.status::text = ANY(%s) "
+            "ORDER BY p.created_at LIMIT 1",
+            (project_id, document_version_id, list(ACTIVE_JOB_STATUSES)),
+        ).fetchone()
+        if active is not None:
+            raise ParseJobActive(active[0])
         conn.execute(
             "INSERT INTO jobs (id, project_id, kind, stage, max_attempts, retryable) "
             "VALUES (%s, %s, 'document.parse', 'queued', %s, true)",
