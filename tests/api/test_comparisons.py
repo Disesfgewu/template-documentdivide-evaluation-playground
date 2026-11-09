@@ -21,16 +21,22 @@ ACTOR = uuid.uuid4()
 R1, R2, R3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 BENCH, METHOD = uuid.uuid4(), uuid.uuid4()
 T = datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)
-METRICS = [{"metric_name": "correctness", "scored": 2, "not_applicable": 1, "pending": 0, "error": 0, "mean": 50.0}]
+def metric(name="correctness", scored=2, na=1, pending=0, error=0, mean=50.0, scored_hash="s1"):
+    return {"metric_name": name, "scored": scored, "not_applicable": na, "pending": pending, "error": error,
+            "mean": mean, "scored_hash": scored_hash}
+
+
+METRICS = [metric()]
 
 
 def params(value):
     return QueryParams([("run_ids", value)])
 
 
-def snapshot(bench=BENCH, budget="default", grader="g@1", subset="h1", metrics=METRICS, evaluated=True):
-    ev = (uuid.uuid4(), grader, "provisional", T) if evaluated else (None, None, None, None)
-    return (bench, METHOD, budget, "completed", *ev, metrics if evaluated else [], 3 if evaluated else 0, subset)
+def snapshot(bench=BENCH, budget="default", grader="g@1", subset="h1", metrics=METRICS, evaluated=True,
+             run_status="completed", ev_status="provisional"):
+    ev = (uuid.uuid4(), grader, ev_status, T) if evaluated else (None, None, None, None)
+    return (bench, METHOD, budget, run_status, *ev, metrics if evaluated else [], 3 if evaluated else 0, subset)
 
 
 class ParseTests(unittest.TestCase):
@@ -85,6 +91,50 @@ class CompareTests(unittest.TestCase):
                 self.assertEqual(set(out["blockers"][0]["values"]), {str(R1), str(R2)})
                 self.assertEqual(len(out["runs"]), 2)  # still shown, never ranked
 
+    def test_means_over_different_scored_questions_are_not_comparable(self):
+        # PM repro: run a averaged 2 scored questions, run b averaged 1 (the other was N/A).
+        a = [metric(scored=2, na=0, mean=50.0, scored_hash="both")]
+        b = [metric(scored=1, na=1, mean=40.0, scored_hash="first")]
+        out, _ = self.compare([snapshot(metrics=a), snapshot(metrics=b)])
+        self.assertFalse(out["comparable"])
+        self.assertEqual(out["blockers"], [{
+            "condition": "scored_question_set", "metric": "correctness",
+            "values": {str(R1): {"scored": 2, "hash": "both"}, str(R2): {"scored": 1, "hash": "first"}}}])
+
+    def test_same_count_but_different_questions_is_still_a_blocker(self):
+        out, _ = self.compare([snapshot(metrics=[metric(scored_hash="x")]),
+                               snapshot(metrics=[metric(scored_hash="y")])])
+        self.assertEqual([b["condition"] for b in out["blockers"]], ["scored_question_set"])
+
+    def test_scored_sets_are_compared_per_metric(self):
+        a = [metric("correctness", scored_hash="c1"), metric("faithfulness", scored_hash="f1")]
+        b = [metric("correctness", scored_hash="c1"), metric("faithfulness", scored_hash="f2")]
+        out, _ = self.compare([snapshot(metrics=a), snapshot(metrics=b)])
+        self.assertEqual([(x["condition"], x["metric"]) for x in out["blockers"]],
+                         [("scored_question_set", "faithfulness")])
+
+    def test_pending_or_errored_rows_block(self):
+        for field in ("pending", "error"):
+            with self.subTest(field=field):
+                out, _ = self.compare([snapshot(), snapshot(metrics=[metric(**{field: 2})])])
+                self.assertEqual(out["blockers"], [{"condition": "unfinished_scoring",
+                                                    "values": {str(R2): {"pending": 2 if field == "pending" else 0,
+                                                                         "error": 2 if field == "error" else 0}}}])
+
+    def test_different_metric_sets_block_and_do_not_hide_a_shared_metric_difference(self):
+        a = [metric("correctness")]
+        b = [metric("correctness"), metric("faithfulness")]
+        out, _ = self.compare([snapshot(metrics=a), snapshot(metrics=b)])
+        self.assertEqual([x["condition"] for x in out["blockers"]], ["metric_set"])
+        self.assertEqual(out["blockers"][0]["values"], {str(R1): ["correctness"], str(R2): ["correctness", "faithfulness"]})
+
+    def test_different_run_or_evaluation_status_blocks(self):
+        for name, other in (("run_status", snapshot(run_status="completed_with_errors")),
+                            ("evaluation_status", snapshot(ev_status="published"))):
+            with self.subTest(name=name):
+                out, _ = self.compare([snapshot(), other])
+                self.assertEqual([b["condition"] for b in out["blockers"]], [name])
+
     def test_several_differences_all_listed(self):
         out, _ = self.compare([snapshot(), snapshot(budget="b", grader="g@2")])
         self.assertEqual(sorted(b["condition"] for b in out["blockers"]), ["budget_profile", "grader_revision"])
@@ -105,7 +155,7 @@ class CompareTests(unittest.TestCase):
         self.assertEqual([b["condition"] for b in out["blockers"]], ["grader_revision"])
 
     def test_null_mean_stays_null(self):
-        na = [{"metric_name": "faithfulness", "scored": 0, "not_applicable": 3, "pending": 0, "error": 0, "mean": None}]
+        na = [metric("faithfulness", scored=0, na=3, mean=None, scored_hash="empty")]
         out, _ = self.compare([snapshot(metrics=na), snapshot(metrics=na)])
         self.assertIsNone(out["runs"][0]["metrics"][0]["mean"])
 
