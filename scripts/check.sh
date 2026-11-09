@@ -130,6 +130,24 @@ run_suite() {
       (( rc == 0 )) || return 1
       (cd services/worker && GOTOOLCHAIN=local go build -o /dev/null ./cmd/lab-worker)
       ;;
+    worker-agentkit)
+      # Opt-in, never part of --scope all/auto: needs read access to the
+      # private agentKit submodule (docs/AGENTKIT_SUBMODULE.md). Without the
+      # initialized submodule it is BLOCKED, never passed.
+      if [[ ! -f third_party/agentkit/go.mod ]]; then
+        echo "BLOCKED: suite worker-agentkit needs the initialized third_party/agentkit submodule" >&2
+        return 3
+      fi
+      if ! command -v go >/dev/null 2>&1; then
+        echo "BLOCKED: suite worker-agentkit needs Go (version in services/worker/agentkitsmoke/go.mod)" >&2
+        return 3
+      fi
+      (export GOTOOLCHAIN=local && go version \
+        && echo "agentkit gitlink $(git rev-parse HEAD:third_party/agentkit) checkout $(git -C third_party/agentkit rev-parse HEAD)" \
+        && test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)" \
+        && (cd third_party/agentkit && go test -count=1 ./graph ./model) \
+        && (cd services/worker/agentkitsmoke && go vet ./... && go test -count=1 -v ./...))
+      ;;
     *) echo "unknown suite: $1" >&2; return 2;;
   esac
 }
