@@ -91,8 +91,31 @@ class OpenApiSchemaStructureTests(unittest.TestCase):
             "/api/v1/documents/{document_id}/pages/{page_index}",
             "/documents/{document_id}/pages/{page_index}",
             "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions",
+            # Served by the application but not described by the contract overlay (see README).
+            "/api/v1/benchmarks/{logical_id}/revisions/{revision}",
+            "/api/v1/audit-events",
+            "/api/v1/logs",
+            "/api/v1/runs/{run_id}",
+            "/api/v1/runs/{run_id}/results",
+            "/api/v1/jobs/{job_id}",
+            "/api/v1/resources/{resource_id}/lineage",
+            "/resources/{resource_id}/lineage",
         }
         self.assertEqual(paths, expected_paths)
+
+    def test_page_operation_declares_png_render_and_its_headers(self) -> None:
+        for path in ("/api/v1/documents/{document_id}/pages/{page_index}",
+                     "/documents/{document_id}/pages/{page_index}"):
+            with self.subTest(path=path):
+                responses = self.openapi["paths"][path]["get"]["responses"]
+                ok = responses["200"]
+                self.assertEqual(set(ok["content"]), {"application/json", "image/png"})
+                self.assertEqual(ok["content"]["image/png"]["schema"], {"type": "string", "format": "binary"})
+                self.assertNotIn("headers", ok["content"]["image/png"])
+                self.assertEqual(set(ok["headers"]), {"X-Document-Sha256", "X-Page-Index", "X-Image-Sha256",
+                                                       "X-Image-Width", "X-Image-Height", "Cache-Control"})
+                self.assertIn("504", responses)
+                self.assertNotIn("JSON ONLY", self.openapi["paths"][path]["get"]["description"])
 
     def test_no_credentials_or_gold_fields_in_schema(self) -> None:
         serialized = json.dumps(self.openapi).lower()

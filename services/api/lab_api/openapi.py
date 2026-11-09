@@ -14,6 +14,7 @@ business validation or HTTP behavior.
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
@@ -25,6 +26,7 @@ from .documents import (
     DEFAULT_MAX_PDF_PAGES,
     DEFAULT_UPLOAD_CONCURRENCY,
     DEFAULT_UPLOAD_READ_TIMEOUT_S,
+    PAGE_RESPONSES,
 )
 from .benchmarks import DEFAULT_LIMIT, MAX_LIMIT
 from .schemas import (
@@ -324,12 +326,22 @@ def build_lab_openapi(app: FastAPI) -> dict[str, Any]:
         }
 
     # Page geometry operation spec
+    def page_ok_response() -> dict[str, Any]:
+        # Geometry JSON by default, a PNG render with Accept: image/png. The PNG metadata
+        # headers belong to the response object (not the media type object).
+        response = _json_content("PageGeometryResponse", "Per-page geometry JSON, or a rendered PNG with Accept: image/png")
+        response["content"]["image/png"] = {"schema": {"type": "string", "format": "binary"}}
+        response["headers"] = copy.deepcopy(PAGE_RESPONSES[200]["headers"])
+        return response
+
     def make_page_geometry_operation(op_id: str, summary: str) -> dict[str, Any]:
         return {
             "summary": summary,
             "description": (
                 "Get per-page normalized geometry and dimensions (SPEC 8). "
-                "Current implementation serves geometry JSON ONLY (display dimensions, rotation, label). Owner/maintainer/reviewer/participant may read within the document project; observer is denied."
+                "Serves geometry JSON by default (display dimensions, rotation, label). With Accept: image/png "
+                "it serves a 150 DPI render of the original PDF page (not a verified evidence claim). "
+                "Owner/maintainer/reviewer/participant may read within the document project; observer is denied."
             ),
             "operationId": op_id,
             "security": bearer_security,
@@ -345,13 +357,14 @@ def build_lab_openapi(app: FastAPI) -> dict[str, Any]:
                 p_x_request_id,
             ],
             "responses": {
-                "200": _json_content("PageGeometryResponse", "Per-page normalized geometry and dimensions JSON"),
+                "200": page_ok_response(),
                 "401": _error_response("Unauthorized: missing or invalid Bearer credentials"),
                 "403": _error_response("Permission denied: insufficient project role or observer lacking explicit grant"),
                 "404": _error_response("Document not found or page_index out of range"),
                 "422": _validation_error_response(include_contract_error=False),
                 "500": _error_response("Handled internal error, including authentication not configured"),
-                "503": _error_response("Service unavailable: database unavailable"),
+                "503": _error_response("Service unavailable: database unavailable, server busy or renderer unavailable"),
+                "504": _error_response("Page rendering timed out"),
             },
         }
 

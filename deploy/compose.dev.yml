@@ -20,5 +20,17 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+  migrate:
+    # One-shot Alembic job, not started by `up`. Apply the schema with:
+    #   docker compose -f deploy/compose.dev.yml --profile tools run --rm migrate
+    profiles: ["tools"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.migrate
+    environment:
+      LAB_MIGRATION_DATABASE_URL: postgresql://lab:lab-dev-only@db:5432/lab
+    depends_on:
+      db:
+        condition: service_healthy
 volumes:
   lab-db:
