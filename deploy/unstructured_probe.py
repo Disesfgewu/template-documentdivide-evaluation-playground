@@ -151,7 +151,7 @@ def main() -> int:
     report["checks"] = {
         "plain_and_isolated_legs": ok,
         "mixed_not_quarantined": mixed.quarantine_reason is None,
-        "evidence_only_on_plain_page": sorted(by_page) == [0, 2],
+        "evidence_on_upright_and_crop_pages_only": sorted(by_page) == [0, 2],
         "text_survives_on_all_pages": all(w in seen_text for w in ("alpha", "bravo", "charlie")),
         "observations_on_all_pages": sorted({o.page_index for o in mixed.observations}) == [0, 1, 2],
     }
