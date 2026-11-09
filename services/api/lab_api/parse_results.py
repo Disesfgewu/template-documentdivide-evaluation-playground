@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 
 # .documents puts db/ and contracts/ on sys.path, so it is imported before lab_db.
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db
-from lab_db.parse_results import PageRecord, ParseResultRecord  # noqa: E402
+from lab_db.parse_results import PageRecord, ParseResultRecord, persist_parse_result  # noqa: E402
 from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
 
 router = APIRouter()
@@ -47,6 +47,14 @@ def record_from_batch(batch) -> ParseResultRecord:
     return ParseResultRecord(
         manifest=batch.manifest.model_dump(mode="json"), capabilities=batch.capabilities.model_dump(mode="json"),
         result=result, raw_artifacts=tuple(contents), pages=tuple(pages))
+
+
+def make_persist(store):
+    """The ``persist`` callable for ``parse_worker.process_parse_job``: converts the batch and
+    stores it through ``persist_parse_result`` inside the job's finish transaction."""
+    def persist(conn, project_id, lease, batch):
+        persist_parse_result(conn, store, project_id, lease, record_from_batch(batch))
+    return persist
 
 
 def _readable_result(conn: psycopg.Connection, actor_id: uuid.UUID, document_id: uuid.UUID, job_id: uuid.UUID):

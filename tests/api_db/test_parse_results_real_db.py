@@ -124,6 +124,19 @@ class ParseResultsRealDbTests(FreshDatabase):
         self.assertEqual(result["operation_id"], str(s.op))
         self.assertEqual(len(batch.evidence), 2)
 
+    def test_the_worker_stores_and_finishes_through_make_persist(self):
+        from lab_api.parse_results import make_persist
+        from lab_api.parse_worker import process_parse_job
+        s = self.seed()
+        batch = make_batch(s.doc, s.op)
+        with self.connect() as c:
+            outcome = process_parse_job(c, s.project, s.job, store=self.store, persist=make_persist(self.store),
+                                        worker="w", max_pdf_bytes=64 * 1024 * 1024, connect=self.connect,
+                                        run=lambda data, **kw: batch)
+        self.assertEqual((outcome.status, outcome.reason), ("succeeded", "parsed"))
+        res = self.client.get(f"/api/v1/documents/{s.doc}/parse-results/{s.job}/pages/2", headers=self.headers(s.owner))
+        self.assertEqual([e["raw_content"] for e in res.json()["evidence"]], ["Gamma"])
+
     def test_a_crash_after_persist_leaves_no_result_and_a_running_job(self):
         s = self.seed()
         record = record_from_batch(make_batch(s.doc, s.op))
