@@ -34,10 +34,9 @@ suite_for_base() {
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
     web/*) echo web;;
-    contracts/*|tests/contracts/*) echo "contracts fixtures scoring";;
     scoring/*|tests/scoring/*) echo scoring;;
     fixtures/F06/*) echo "fixtures scoring";;
-    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db";;
+    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db scoring";;
     fixtures/*|tests/fixtures/*) echo "fixtures parser";;
     db/*) echo "db db-unit";;
     tests/db/*) echo db;;
