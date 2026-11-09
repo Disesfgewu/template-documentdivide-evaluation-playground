@@ -62,9 +62,9 @@ def main() -> int:
                 if not len(reader.pages) == len(pages) == renderer_pages:
                     raise ValueError("page_count_disagreement")
                 result = {
-                    "schema_version": "isolated-geometry-1",
+                    "schema_version": "isolated-geometry-2",
                     "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
-                    "pages": [{"page_index": p.page_index, "rotation": p.rotation,
+                    "pages": [{"page_index": p.page_index, "page_label": p.page_label, "rotation": p.rotation,
                                "width_pt": p.display_width_pt, "height_pt": p.display_height_pt}
                               for p in pages],
                 }

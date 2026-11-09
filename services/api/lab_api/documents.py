@@ -25,8 +25,8 @@ from psycopg.types.json import Jsonb
 from lab_db.ingest import IngestRejected, Inspection, PageGeometry, ingest_document
 from lab_db.repo import NotFound, PermissionDenied, authorize
 from lab_db.storage import LocalArtifactStore, StorageCorruption
-from lab_parser.importer import Limits, inspect_pdf
-from lab_parser.pages import extract_pages
+from lab_parser.artifacts import inspect_pdf_isolated
+from lab_parser.importer import Limits
 
 from .auth import AuthError, get_signing_secret, verify_actor_token
 from .config import Settings
@@ -599,22 +599,17 @@ def _upload_core(
                 (proj_id, idempotency_key, request_hash, op_intent_id),
             )
 
-        inspection = inspect_pdf(data, limits=Limits(max_bytes=ctx.max_bytes, max_pages=ctx.max_pages))
+        # Untrusted PDF structure is parsed only in the resource-limited isolation child
+        # (RLIMIT memory/CPU, wall deadline, PDFium page-count cross-check), never in this
+        # process. Any pypdf warning (for example a repaired xref) is an invalid PDF there.
+        inspection, page_infos = inspect_pdf_isolated(
+            data, Limits(max_bytes=ctx.max_bytes, max_pages=ctx.max_pages))
 
         if inspection.outcome == "reject":
             return reject(
                 inspection.reason or "", sha256=inspection.sha256, size_bytes=inspection.size_bytes,
                 page_count=inspection.page_count, warnings=inspection.warnings,
-                db_reason=inspection.reason,  # as before: the inspector's own value, even None
-            )
-
-        try:
-            page_infos = extract_pages(data)
-        except Exception as exc:
-            return reject(
-                "invalid_page_geometry", sha256=inspection.sha256, size_bytes=inspection.size_bytes,
-                page_count=inspection.page_count, error_type=type(exc).__name__,
-                warnings=inspection.warnings,
+                db_reason=inspection.reason,
             )
 
         pages = [
@@ -622,8 +617,8 @@ def _upload_core(
                 page_index=p.page_index,
                 page_label=p.page_label,
                 rotation=p.rotation,
-                display_width_pt=p.display_width_pt,
-                display_height_pt=p.display_height_pt,
+                display_width_pt=p.width_pt,
+                display_height_pt=p.height_pt,
             )
             for p in page_infos
         ]

@@ -57,6 +57,7 @@ class ProcessLimits:
 @dataclass(frozen=True)
 class PageGeometry:
     page_index: int
+    page_label: str | None
     rotation: int
     width_pt: float
     height_pt: float
@@ -144,7 +145,7 @@ def _validate(raw: bytes, digest: str, size: int, limits: ProcessLimits) -> Insp
             raise ValueError
         if set(result) != {"schema_version", "sha256", "size_bytes", "pages"}:
             raise ValueError
-        if (result["schema_version"] != "isolated-geometry-1" or result["sha256"] != digest
+        if (result["schema_version"] != "isolated-geometry-2" or result["sha256"] != digest
                 or type(result["size_bytes"]) is not int or result["size_bytes"] != size):
             raise ValueError
         pages = result["pages"]
@@ -152,7 +153,10 @@ def _validate(raw: bytes, digest: str, size: int, limits: ProcessLimits) -> Insp
             raise ValueError
         checked = []
         for i, page in enumerate(pages):
-            if type(page) is not dict or set(page) != {"page_index", "rotation", "width_pt", "height_pt"}:
+            if type(page) is not dict or set(page) != {"page_index", "page_label", "rotation", "width_pt", "height_pt"}:
+                raise ValueError
+            label = page["page_label"]
+            if label is not None and (type(label) is not str or len(label) > 64):
                 raise ValueError
             if type(page["page_index"]) is not int or page["page_index"] != i:
                 raise ValueError
@@ -163,7 +167,7 @@ def _validate(raw: bytes, digest: str, size: int, limits: ProcessLimits) -> Insp
                         or page[name] <= 0):
                     raise ValueError
             checked.append(PageGeometry(**page))
-        return Inspection("isolated-geometry-1", digest, size, tuple(checked))
+        return Inspection("isolated-geometry-2", digest, size, tuple(checked))
     except InspectionError:
         raise
     except (ValueError, TypeError, OverflowError, RecursionError, UnicodeError):
