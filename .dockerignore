@@ -1,0 +1,42 @@
+# Deny-all by default
+*
+*/**
+
+# Allow Dockerfiles
+!deploy/api.Dockerfile
+!deploy/parser.Dockerfile
+
+# Allow exact locked dependencies needed by COPY
+!services/api/requirements.lock
+!services/parser/requirements.lock
+!contracts/requirements.lock
+
+# Allow exact runtime source directories needed by COPY
+!db/lab_db
+!db/lab_db/**
+!contracts/lab_contracts
+!contracts/lab_contracts/**
+!services/parser/lab_parser
+!services/parser/lab_parser/**
+!services/api/lab_api
+!services/api/lab_api/**
+
+# Ensure secrets, caches, private modules, staff tools, and logs are denied everywhere
+**/__pycache__
+**/*.py[cod]
+**/.env*
+**/*.env
+*secret*
+**/*secret*
+.agy-staff
+**/.agy-staff
+**/.agy-staff/**
+*.log
+**/*.log
+*journal*
+**/*journal*
+*seal*
+**/*seal*
+third_party
+**/third_party
+**/third_party/**
