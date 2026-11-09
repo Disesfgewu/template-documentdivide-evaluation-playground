@@ -135,7 +135,10 @@ func checkEndpoint(e smokeEnv) (host string, real bool, reason string) {
 	if e.AllowedHost == "" || !strings.EqualFold(e.AllowedHost, host) {
 		return host, false, "base url host is not the allowed host"
 	}
-	return host, isRealHost(host), ""
+	if !isRealHost(host) {
+		return host, false, "base url host is not a public DNS name"
+	}
+	return host, true, ""
 }
 
 // runSmoke makes the single pinned call. It never returns the key, prompt or reply text.
@@ -338,10 +341,10 @@ func TestSmokeEndpointRules(t *testing.T) {
 		{"no allowed host", "https://api.example-llm.com", "", false, "not the allowed host"},
 		{"userinfo", "https://user:pw@api.example-llm.com", "api.example-llm.com", false, "invalid base url"},
 		{"query string", "https://api.example-llm.com/v1?key=x", "api.example-llm.com", false, "invalid base url"},
-		{"private ip literal", "https://10.0.0.5/v1", "10.0.0.5", false, ""},
-		{"metadata ip", "https://169.254.169.254/v1", "169.254.169.254", false, ""},
-		{"single label host", "https://llm/v1", "llm", false, ""},
-		{"internal suffix", "https://llm.internal/v1", "llm.internal", false, ""},
+		{"private ip literal", "https://10.0.0.5/v1", "10.0.0.5", false, "not a public DNS name"},
+		{"metadata ip", "https://169.254.169.254/v1", "169.254.169.254", false, "not a public DNS name"},
+		{"single label host", "https://llm/v1", "llm", false, "not a public DNS name"},
+		{"internal suffix", "https://llm.internal/v1", "llm.internal", false, "not a public DNS name"},
 		{"loopback http fake", "http://127.0.0.1:9999", "", false, ""},
 	}
 	for _, c := range cases {

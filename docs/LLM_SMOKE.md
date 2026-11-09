@@ -21,7 +21,7 @@ SPEC 另外要求 embedding 與 vision 各一個真 smoke（可共用 provider�
 - `usage_known`、輸入／輸出 token、`charged_micros`（用量未知時是 `-1`，**不是 0**）、transport 嘗試次數、耗時；
 - 回覆文字只記長度與 sha256；報告不含 key、prompt 或模型文字。
 
-**金鑰保護**：URL 必須是 https、不得含 userinfo／query／fragment，且主機必須等於 `LAB_LLM_SMOKE_ALLOWED_HOST`；HTTP client 永遠不跟隨轉址（部分協定的 key 放在 Go 不會在跨主機轉址時移除的標頭，測試證明轉址目標收到 0 個請求，並以突變驗證）；IP 位址、私有／link-local／metadata 位址、單一標籤與內部網域名稱的主機一律 `real=false`（不能算真 provider）。價格變數有上限（每百萬 token 1,000 USD）。報告另含 `request_sha256`、回應的模型 id；失敗原因都是固定字串。
+**金鑰保護**：URL 必須是 https、不得含 userinfo／query／fragment，且主機必須等於 `LAB_LLM_SMOKE_ALLOWED_HOST`；HTTP client 永遠不跟隨轉址（部分協定的 key 放在 Go 不會在跨主機轉址時移除的標頭，測試證明轉址目標收到 0 個請求，並以突變驗證）；IP 位址、私有／link-local／metadata 位址、單一標籤與內部網域名稱的主機**一律被拒絕**（key 不會送出，除了 loopback 假端點，它永遠 `real=false` 且測試不會把它當成通過）。`LAB_LLM_SMOKE_ALLOWED_HOST` 與 `LAB_LLM_SMOKE_BASE_URL` 來自同一個變數範圍，所以白名單防的是手誤，不是惡意管理員。**Owner 待辦**：請確認 GitHub environment `llm-smoke` 已設定 required reviewers（這是 repo 設定，PM 無法驗證）。價格變數有上限（每百萬 token 1,000 USD）。報告另含 `request_sha256`、回應的模型 id；失敗原因都是固定字串。
 
 通過條件：真實執行必須回報用量（`usage_known` 且 token 數大於 0，否則 failed）；回覆非空；用量已知時帳本花費等於依價格計算的費用；用量未知時帳本花費為 0 且保留 reservation（outcome unknown，不得結算成費用）；端點不是 loopback（本機假端點永遠不算真 provider）。
 
@@ -29,7 +29,7 @@ SPEC 另外要求 embedding 與 vision 各一個真 smoke（可共用 provider�
 
 ## 在 CI 執行
 
-`workflow_dispatch` 勾選 `llm_smoke`（job `llm-smoke`），**只在 `main` 上執行**並使用受保護的 environment `llm-smoke`（請在該 environment 設定 required reviewers，並把 secrets 放在那裡）；在其他 ref 上 dispatch 會跳過這個 job，secrets 不會交給分支上的程式碼。缺少任何一個 secret／variable 時該 job **失敗**並標示 `BLOCKED: no credentials or configuration`（報告 `status: blocked`），所以紅燈就是「還沒證明」。全部齊備時：以只限單一指令的 token 取出 agentKit pin，先跑私有模組套件的全部測試（`go vet`、`go test ./...`，包含對本機假端點的 harness 測試；**這是這些測試唯一的 CI 路徑**，一般 PR 的 CI 不編譯私有模組，所以它們平常只在有 agentKit 存取權的本機跑），再跑 `TestRealProviderSmoke`，並用報告確認 `status == passed` 且 `real == true` 才算通過；報告以 artifact `llm-smoke` 保存。
+`workflow_dispatch` 勾選 `llm_smoke`（job `llm-smoke`），**只在 `main` 上執行**並使用受保護的 environment `llm-smoke`（請在該 environment 設定 required reviewers，並把 secrets 放在那裡）；在其他 ref 上 dispatch 會跳過這個 job，secrets 不會交給分支上的程式碼。缺少任何一個 secret／variable 時該 job **失敗**並標示 `BLOCKED: no credentials or configuration`（報告 `status: blocked`），所以紅燈就是「還沒證明」。全部齊備時：以只限單一指令的 token 取出 agentKit pin，先跑私有模組套件的全部測試（`go vet`、`go test ./...`，包含對本機假端點的 harness 測試；**這是這些測試唯一的 CI 路徑**，一般 PR 的 CI 不編譯私有模組，所以它們平常只在有 agentKit 存取權的本機跑），再單獨跑 `TestRealProviderSmoke` 恰好一次（前一步以 `-skip` 排除它，避免第二次真實呼叫使花費加倍並覆蓋報告），並用報告確認 `status == passed` 且 `real == true` 才算通過；報告以 artifact `llm-smoke` 保存。
 
 安全：這個 job 只能手動 dispatch，且 token 只會交給 dispatch 時選定的 ref；不要對未審查的分支或 fork 啟動它（`docs/AGENTKIT_SUBMODULE.md`：不得把私有 checkout 憑證交給不受信任的 PR 程式）。
 
