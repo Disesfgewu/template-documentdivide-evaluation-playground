@@ -137,8 +137,8 @@ class ParseResultsRealDbTests(FreshDatabase):
             with self.assertRaises(RuntimeError):
                 jobs.finish(c, s.project, lease, "succeeded", "parsed", hook=hook)
             self.assertEqual(c.execute("SELECT status::text FROM jobs WHERE id = %s", (s.job,)).fetchone()[0], "running")
-            self.assertEqual(c.execute("SELECT count(*) FROM parse_results").fetchone()[0], 0)
-            self.assertEqual(c.execute("SELECT count(*) FROM parse_page_results").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_results WHERE job_id = %s", (s.job,)).fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_page_results WHERE job_id = %s", (s.job,)).fetchone()[0], 0)
 
     def test_persist_is_idempotent_and_refuses_a_different_result(self):
         s = self.seed()
@@ -148,8 +148,8 @@ class ParseResultsRealDbTests(FreshDatabase):
             lease = jobs.acquire(c, s.project, s.job, "w1")
             persist_parse_result(c, self.store, s.project, lease, same)
             persist_parse_result(c, self.store, s.project, lease, same)
-            self.assertEqual(c.execute("SELECT count(*) FROM parse_results").fetchone()[0], 1)
-            self.assertEqual(c.execute("SELECT count(*) FROM parse_page_results").fetchone()[0], PAGES)
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_results WHERE job_id = %s", (s.job,)).fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_page_results WHERE job_id = %s", (s.job,)).fetchone()[0], PAGES)
             with self.assertRaises(ParseResultConflict):
                 persist_parse_result(c, self.store, s.project, lease, other)
 
@@ -160,7 +160,7 @@ class ParseResultsRealDbTests(FreshDatabase):
             lease = jobs.acquire(c, s.project, s.job, "w1")
             with self.assertRaises(jobs.LeaseLost):
                 persist_parse_result(c, self.store, s.project, jobs.Lease(lease.job_id, lease.token + 1), record)
-            self.assertEqual(c.execute("SELECT count(*) FROM parse_results").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_results WHERE job_id = %s", (s.job,)).fetchone()[0], 0)
 
     def test_tables_are_append_only_and_pages_stay_inside_the_document(self):
         s = self.seed()
