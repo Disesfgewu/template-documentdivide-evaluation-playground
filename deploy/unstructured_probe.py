@@ -144,6 +144,7 @@ def main() -> int:
     report["mixed_pages"] = {
         "synthetic": True, "quarantine_reason": mixed.quarantine_reason,
         "evidence_pages": sorted(by_page), "observation_pages": sorted({o.page_index for o in mixed.observations}),
+        "observations": [[o.page_index, o.raw_content] for o in mixed.observations],
         "evidence_bbox_page0": [list(e.regions[0].bbox) for e in mixed.evidence if e.regions[0].page_index == 0],
     }
     ok = (ok and mixed.quarantine_reason is None and sorted(by_page) == [0]

@@ -141,6 +141,7 @@ jobs:
         env:
           PYTHONPATH: contracts:services/parser
         run: |
+          set -o pipefail
           "$RUNNER_TEMP/probe-venv/bin/python" -I -c "import sys; sys.path[:0]=['contracts','services/parser','.']; import runpy; runpy.run_path('deploy/unstructured_probe.py', run_name='__main__')" | tee "$RUNNER_TEMP/probe-report.json"
       - uses: actions/upload-artifact@v4
         if: always()
