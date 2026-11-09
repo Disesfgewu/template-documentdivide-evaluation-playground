@@ -51,3 +51,71 @@ scripts/check.sh --scope worker-agentkit
 - `ChatCall`（`model.go`）：把一次 pinned 的 agentKit `model.Client.Chat`（`Router`/`RemoteClient`/`HTTPClient`）包成 NodeRunner effect。transport retry 只由 agentKit HTTPClient 負責：`ValidateModelConfig` 要求 `max_retries` 明確為 1–2（每個 logical call ≤3 次；ce49a71 的 0 代表 5 次重試，因此拒絕）、`timeout_seconds` 與 `requests_per_minute` 明確設定；包成 node 時 runner 必須 `MaxAttempts 1` 且無 `Retryable`，避免重試層數相乘（T27）。必須 pin Router entry（不 failover），回應來自其他模型即拒絕（T26）；`max_output_tokens` 必填（agentKit 會默默補 1024）。HTTP 狀態錯誤是已知失敗；無狀態的傳輸錯誤與呼叫中取消是 `outcome_unknown`；回應沒有 usage 時保留預留為 unknown，不當成 0（T29）。
 
 尚未完成：PostgreSQL 版 store/operation/ledger（依賴 #5）、scheduler、embedding 與 vision 呼叫、JSON 修復上限（T19）、TraceBridge/AuditImporter。
+## Restricted agentlog import foundation (#6)
+
+The `auditimport` command reads the exact `.log`, `.log.journal` and
+`.log.seal` bytes emitted by agentKit revision
+`ce49a7130b17ccda07c755de96ef44c49d0b719c` and creates a metadata-only JSON
+report. It has no private module dependency. Run from `services/worker`:
+
+```bash
+go run ./cmd/auditimport -log /restricted/session.log \
+  -out /restricted/new-report.json -project project-1 \
+  -operation import-operation-1 -source source-bundle-1
+```
+
+The invoking service must authorize these IDs and access to every source artifact.
+`source` is a stable, project-scoped identity for one session's artifact group;
+it must never be reused for another session. No identity in file contents grants
+access. Original files are never changed. The report records raw byte hashes,
+sizes, presence and `restricted=true`; retain the original artifact objects under
+the same gold/source access policy. This command neither uploads nor stores them.
+The CLI targets the Linux worker environment and opens inputs nonblocking before
+requiring regular files, so FIFOs/devices cannot stall artifact admission.
+Input symlinks are refused; output paths must differ from all source paths, even
+when a source or companion is missing.
+The report is created with mode 0600 and refuses an existing path or symlink.
+Exit 0 means verified, 1 means an invalid/incomplete report was written, and 2
+means an invocation/read/write error. Diagnostic messages omit file paths and
+raw parser input. Missing companions produce an incomplete report, never success.
+
+Verifier `lab-agentlog-1` checks the journal's call/parent order, strict JSON,
+completion sequence, raw-byte SHA-256 chain, journal/function/input correspondence,
+consistent producer session, and close-seal counts/final hash/journal hash.
+Completion order is independent of begin order, including child-first completion.
+It decodes JSON structurally, so embedded delimiter-like text cannot override
+metadata. Duplicate/unknown/missing metadata fields, invalid UTF-8, corrupt chains,
+truncated lines and malformed records fail closed. A missing seal or unfinished
+call is incomplete; malformed existing content takes precedence as invalid.
+Zero-call sealed sessions can verify. Hashes detect ordinary alteration; anyone
+able to rewrite all three files can forge them. This is a separate LAB verifier,
+not a claim that upstream `agentlog.Verify` ran or authenticated the producer.
+
+Events retain begin/end sequence, call and parent IDs, UTC occurrence times,
+duration, raw record hash and stable span relationships. The producer session is
+represented by SHA-256 (null when unavailable), avoiding user-bearing agent names.
+Event IDs hash trusted project/source/call/phase plus the raw record hash, making
+exact reimports idempotent; operation IDs do not change those IDs. A future sink
+must also detect the same logical source/call/phase with different content, and
+transactionally deduplicate/persist the events. Incomplete calls get WARN events;
+completion payloads with an `error` member get conservative ERROR/`reported_error`,
+others get INFO/`completed`, irrespective of the raw DEBUG prefix. An error member
+may be application data: these labels are diagnostics, never authoritative job
+state transitions. Missing-event warnings are reconciliation observations rather
+than invented completion timestamps.
+
+No input, output, arbitrary function name, error text, URL, prompt or document
+content is included in normalized events. `metadata-only-1` deliberately marks
+report reproducibility partial: original restricted artifacts are necessary for
+reconstruction. Caller IDs and report hashes remain access-controlled metadata.
+Limits are 16 MiB per artifact, 32 MiB per bundle, 1 MiB per line and 10,000
+calls/completions; CLI reads are bounded before allocation. Larger sessions need
+a separately versioned streaming profile, not silently reduced coverage.
+
+Validation: `scripts/check.sh --scope 'worker governance'` covers the public
+stdlib importer and CLI, including nested calls, delimiter text, errors, replay,
+truncation, tamper, missing artifacts, empty sessions, limits, secret exclusion
+and private file creation. This is an independent R18/R19, T66/T67/T69 and A40
+foundation only. PostgreSQL transaction/dedup, artifact publication, permissions,
+collector buffers/repair, TraceBridge, full log-event schema/API/UI and real
+workflow integration remain #5/#6 gates; this report alone does not satisfy them.

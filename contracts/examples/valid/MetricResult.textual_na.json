@@ -1,0 +1,15 @@
+{
+  "question_id": "q_003",
+  "metric": "textual_consistency",
+  "status": "not_applicable",
+  "raw_value": null,
+  "display_value": null,
+  "rounding": "lab-round-1",
+  "numerator": 0.0,
+  "denominator": 0.0,
+  "reason_codes": [
+    "no_applicable_checks"
+  ],
+  "grader_revision": "grader@1",
+  "support_refs": []
+}

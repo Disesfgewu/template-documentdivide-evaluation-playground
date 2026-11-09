@@ -1,0 +1,1648 @@
+_about: 'SPEC v0.1 R/T/A 追溯表。status: not_started | partial | blocked | passed。partial/blocked/passed 必須附 evidence；passed 還必須有 main 上的 commit 與 CI run，且只有完整情境（含整合/真服務）通過才可標 passed。契約層測試只能讓項目成為 partial。release_owner=#15
+  要求全部項目在發布前 passed。'
+requirements:
+- id: R01
+  title: 匯入
+  owners:
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R02
+  title: 解析/OCR
+  owners:
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R03
+  title: 圖表/跨文本
+  owners:
+  - 7
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R04
+  title: 四部分題庫
+  owners:
+  - 4
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R05
+  title: 題數/配額
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R06
+  title: 建題/驗題
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R07
+  title: 版本/快取
+  owners:
+  - 7
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R08
+  title: LLM
+  owners:
+  - 6
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R09
+  title: 方法接入
+  owners:
+  - 4
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R10
+  title: 提交/溯源
+  owners:
+  - 4
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R11
+  title: 評分
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R12
+  title: 實驗可比性
+  owners:
+  - 2
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R13
+  title: PostgreSQL
+  owners:
+  - 5
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R14
+  title: 血緣
+  owners:
+  - 5
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R15
+  title: pgvector
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R16
+  title: Workflow
+  owners:
+  - 2
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R17
+  title: 恢復/併發
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R18
+  title: Log/trace
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R19
+  title: 稽核/權限
+  owners:
+  - 5
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R20
+  title: 成本/取消
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R21
+  title: UI
+  owners:
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R22
+  title: API
+  owners:
+  - 2
+  - 4
+  - 5
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R23
+  title: 匯出
+  owners:
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R24
+  title: 維運
+  owners:
+  - 3
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R25
+  title: 發布
+  owners:
+  - 2
+  - 3
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R26
+  title: 雙 parser adapter、能力／版本／策略 manifest、共同契約
+  owners:
+  - 4
+  - 8
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R27
+  title: L0–L3、原圖、細節／單位／估讀區間、核對 gate
+  owners:
+  - 7
+  - 8
+  - 9
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R28
+  title: 批次邊界、全文件圖文 linker、關係證據及反例
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R29
+  title: 真讀圖題、必要圖文／跨頁驗證、固定數值 rubric、公平 track
+  owners:
+  - 10
+  - 11
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: R30
+  title: DB 血緣／快取／用量、原圖 UI、真 parser 驗收
+  owners:
+  - 5
+  - 8
+  - 9
+  - 13
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+tests:
+- id: T01
+  title: F01 上傳並下載
+  owners:
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T02
+  title: F05 空/假/損壞/錯 content type
+  owners:
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T03
+  title: 大小/頁數等於限制與超過 1，加密檔
+  owners:
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T04
+  title: 同 bytes 及新 bytes 重送
+  owners:
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T05
+  title: F02 bbox 經預覽與原圖往返
+  owners:
+  - 4
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: F02 fixture 與獨立的 PDFium 渲染基準在 #31（fixture registry）審查／合併後才補 evidence；LAB 實際的座標正規化與預覽往返在 #7。
+- id: T06
+  title: F02 掃描及混合頁核對指定事實
+  owners:
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T07
+  title: 第 n 頁故障後恢復
+  owners:
+  - 7
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T08
+  title: F03 續表、合併 cell、重複 header
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T09
+  title: 必須讀圖題
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T10
+  title: F04 第 18/247 頁必要證據
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T11
+  title: 同詞異年/條件來源
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T12
+  title: 四部分缺欄/不存在 fact/evidence
+  owners:
+  - 4
+  - 10
+  release_owner: 15
+  status: partial
+  evidence:
+  - scope: contract
+    branch: main
+    commit: 5ad3d6e3805be7832d88c6327894f783d0075aa0
+    tests:
+    - tests/contracts/test_benchmark.py::BundleTests.test_t12_unknown_fact_and_evidence_are_located
+    - tests/contracts/test_contracts.py::ExampleTests.test_invalid_examples_rejected_for_the_stated_reason
+  note: '契約層：schema 與跨部分 FK 以欄位路徑回報；DB 層 FK 與 API 422 在 #5/#10。'
+- id: T13
+  title: 四檔順序打亂、缺 ID、重複 ID
+  owners:
+  - 4
+  - 10
+  release_owner: 15
+  status: partial
+  evidence:
+  - scope: contract
+    branch: main
+    commit: 5ad3d6e3805be7832d88c6327894f783d0075aa0
+    tests:
+    - tests/contracts/test_benchmark.py::BundleTests.test_t13_order_independent
+    - tests/contracts/test_benchmark.py::BundleTests.test_t13_missing_and_duplicate_ids
+  note: '契約層：validate_bundle 依 question_id 聯結；檔案匯入流程在 #10。'
+- id: T14
+  title: 頁數 1/19/20/21/500/600
+  owners:
+  - 4
+  - 10
+  release_owner: 15
+  status: partial
+  evidence:
+  - scope: contract
+    branch: main
+    commit: 5ad3d6e3805be7832d88c6327894f783d0075aa0
+    tests:
+    - tests/contracts/test_benchmark.py::TargetCountTests.test_t14_table
+  note: N/Q 計算（U）已依 SPEC 表格測試；以 F01 合成 PDF 讀回頁數的對照在 #31 合併後補 evidence；配額整合（I）在 #10。
+- id: T15
+  title: 同題多 tags、重複題灌配額
+  owners:
+  - 4
+  - 10
+  release_owner: 15
+  status: partial
+  evidence:
+  - scope: contract
+    branch: main
+    commit: 5ad3d6e3805be7832d88c6327894f783d0075aa0
+    tests:
+    - tests/contracts/test_benchmark.py::BundleTests.test_t15_duplicate_question_and_ordinal
+  note: '重複題 hash 與 ordinal 偵測（契約層）；配額桶計數與候選池在 #10。'
+- id: T16
+  title: 無圖表或素材不足
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T17
+  title: 跨頁題新增單頁替代證據
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T18
+  title: 生成不存在來源或錯答案
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T19
+  title: 無效 JSON、一次修復仍無效
+  owners:
+  - 6
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T20
+  title: 移除每份必要證據驗題
+  owners:
+  - 9
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T21
+  title: 抽查放入錯單位/歧義題
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T22
+  title: 重送建題、換方法建立 run
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T23
+  title: freeze 後 PATCH、改 prompt/model/grader
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T24
+  title: 建到第 n 題後重啟
+  owners:
+  - 7
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T25
+  title: text client 接 vision
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T26
+  title: model pin、fallback、embedding mismatch
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T27
+  title: 429/503/timeout/認證失敗
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T28
+  title: 兩 worker 競爭最後預算
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T29
+  title: 付費呼叫中取消或逾時
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T30
+  title: 兩方法 HTTP/JSONL 準備同 PDF
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T31
+  title: 全 API 正常與錯誤/分頁
+  owners:
+  - 2
+  - 4
+  - 11
+  release_owner: 15
+  status: partial
+  evidence:
+  - scope: contract
+    branch: main
+    commit: 5ad3d6e3805be7832d88c6327894f783d0075aa0
+    tests:
+    - tests/contracts/test_contracts.py::ExampleTests
+  - scope: contract
+    branch: main
+    commit: 1b5fe1d300c245ca348750af57b4ae9cb09a3c57
+    tests:
+    - tests/contracts/test_method.py::QueryResponseTests.test_http_status_classes
+  note: 契約層：JSON Schema、合法/非法範例與方法回應的 HTTP status 分類（PR #26）在 CI；method-service OpenAPI 已在 main，但 LAB 實際 API 的 status code 尚未實作。
+- id: T32
+  title: async poll、過期下載 URL、late reply
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T33
+  title: 缺 ID/重 rank/無效 citation/錯 JSONL 行
+  owners:
+  - 4
+  - 11
+  release_owner: 15
+  status: partial
+  evidence:
+  - scope: contract
+    branch: main
+    commit: 1b5fe1d300c245ca348750af57b4ae9cb09a3c57
+    tests:
+    - tests/contracts/test_method.py::JsonlTests.test_lines_are_independent
+  note: 契約層：parse_jsonl 每行獨立（PR #26 合併為 main 1b5fe1d）；DB 冪等與 run lock 在 #5/#11。
+- id: T34
+  title: submission 重送/衝突/finalize 競態
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T35
+  title: 合法 schema 但錯頁/hash，答案正確
+  owners:
+  - 11
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T36
+  title: 缺必要區域/不存在引用/整頁
+  owners:
+  - 11
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T37
+  title: G1={a,b}、G2={c}，只命中 a
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T38
+  title: fact weight=1,1，scores=1,0.5
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T39
+  title: 原文檢查/單位換算/無適用 checks
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T40
+  title: 重 hit/citation、重疊 bbox、預算截斷
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T41
+  title: 答對源錯/忠於錯來源/只含 [ID]
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T42
+  title: 全文新增未列 claim、無引用、拒答
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T43
+  title: 漏答/逾時/N/A/grader fault 混合
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T44
+  title: 同結果 HTTP/JSONL 重評
+  owners:
+  - 4
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T45
+  title: 不同題庫/subset/grader/budget 比較
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T46
+  title: 多 attempts 後答案更高分
+  owners:
+  - 2
+  - 11
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T47
+  title: 真 PostgreSQL 跨 project FK/重版/缺引用
+  owners:
+  - 5
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T48
+  title: 20 個同 key 請求及異 body
+  owners:
+  - 5
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T49
+  title: audit/outbox SQL 故障
+  owners:
+  - 5
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T50
+  title: F08 舊 DB 升級並查資料
+  owners:
+  - 5
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T51
+  title: 從分數開 lineage 與 PDF
+  owners:
+  - 5
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T52
+  title: 黑箱提交/遮罩/artifact 遺失
+  owners:
+  - 5
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T53
+  title: 錯 space/維度、NaN、零向量
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T54
+  title: batch 失敗重送、ready 前查詢
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T55
+  title: 兩方法/專案/gold collection
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T56
+  title: 固定小 corpus exact cosine 與手算
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T57
+  title: exact/HNSW、稀疏 filter、不足 k
+  owners:
+  - 11
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T58
+  title: 未知 node、分支、最大步數
+  owners:
+  - 2
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T59
+  title: node 失敗 patch、nested state 修改、schema 不符
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T60
+  title: 人工 gate/budget pause/改 graph revision
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T61
+  title: node DB 已提交、Store.Save 前 kill
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T62
+  title: lease 到期接手後舊 worker 回寫
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T63
+  title: 外部成功但回應或 DB 結果遺失
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T64
+  title: checkpoint round trip int/float/nested refs、DB 斷線
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T65
+  title: API→worker→router→node→grader
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T66
+  title: begin 無 end、缺 seal、原 log 改一字
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T67
+  title: collector 停止/滿 buffer/重送亂序
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T68
+  title: trace/run/question/level/time 過濾匯出
+  owners:
+  - 6
+  - 13
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T69
+  title: 測試密鑰/Authorization/URL token
+  owners:
+  - 5
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T70
+  title: 所有角色逐端點及跨 project ID
+  owners:
+  - 5
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T71
+  title: 普通帳號修改 frozen/audit、受控刪除
+  owners:
+  - 5
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T72
+  title: 指令注入 PDF/答案、未授權 endpoint、CSV 公式
+  owners:
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T73
+  title: 上傳→建題→審核→freeze→方法→run
+  owners:
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T74
+  title: 比較/單題高亮/替代來源/匯出
+  owners:
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T75
+  title: trace tree/node/錯誤/等待/取消
+  owners:
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T76
+  title: loading/empty/permission/error/partial
+  owners:
+  - 3
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T77
+  title: 非法狀態、cursor 換 filter、未知欄/超限
+  owners:
+  - 4
+  - 5
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T78
+  title: 四部分與結果匯出再匯入驗證
+  owners:
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T79
+  title: 隔離環境備份還原 DB+artifact
+  owners:
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T80
+  title: staging 中斷與 debug 到期
+  owners:
+  - 5
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T81
+  title: 500/600 頁、兩方法、重啟一次
+  owners:
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T82
+  title: 大 log/vector 資料及併發查詢
+  owners:
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T83
+  title: 固定 agentKit、清潔 build、真 DB/pgvector
+  owners:
+  - 2
+  - 3
+  - 14
+  release_owner: 15
+  status: blocked
+  evidence:
+  - scope: ci
+    branch: issue-3-go-worker
+    run: https://github.com/Disesfgewu/template-documentdivide-evaluation-playground/actions/runs/42011161101
+  note: '#3：Go 1.27.1、真 pgvector compose 與各 suite 已在 CI 驗證（該 branch 已由 PR #20 合併為 main 19de4e2）；agentKit 固定 commit 因私有 repo 無 CI 憑證為 BLOCKED（#3 PM 答覆 Q1）。'
+- id: T84
+  title: 真 chat/embedding/vision smoke 與 judge 校準
+  owners:
+  - 12
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T85
+  title: Unstructured OSS 真 hi_res，表格／圖片／文字混合 PDF
+  owners:
+  - 8
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T86
+  title: OSS 傳 API 專屬策略、缺模型導致 fallback
+  owners:
+  - 8
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T87
+  title: Unstructured chunk／TableChunk／description 前後對照
+  owners:
+  - 8
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T88
+  title: MinerU 鎖版真解析／選頁／schema roundtrip
+  owners:
+  - 8
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T89
+  title: F10 向量圖、圖例在圖外、多子圖
+  owners:
+  - 7
+  - 8
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T90
+  title: 雙軸／log／倍率／百分點
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T91
+  title: 可估讀／模糊／數值不可辨版本
+  owners:
+  - 7
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T92
+  title: 跨列 cell／空白／missing／unreadable／無 cell bbox
+  owners:
+  - 8
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T93
+  title: 流程箭頭反向、照片隱含資訊、文字聲稱因果
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T94
+  title: F11 表格跨第 10/11 頁 batch 邊界及斷裂行
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T95
+  title: 同欄名／同圖號但不同年／章節／單位
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T96
+  title: 第 18 頁圖＋247 頁條件＋附錄定義
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T97
+  title: 選頁／分批輸入啟用完整文件限定處理
+  owners:
+  - 8
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T98
+  title: caption-only 題與真正圖文整合題做 evidence ablation
+  owners:
+  - 10
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T99
+  title: numeric golden、換算、容差上下界與相對誤差零值
+  owners:
+  - 4
+  - 10
+  - 12
+  release_owner: 15
+  status: partial
+  evidence:
+  - scope: contract
+    branch: main
+    commit: 5ad3d6e3805be7832d88c6327894f783d0075aa0
+    tests:
+    - tests/contracts/test_benchmark.py::TextCheckTests
+  note: '契約層：TextCheck 的單點/區間判定（含零值的相對誤差陷阱、區間不得再放寬）已測；單位換算與評分整合在 #12。'
+- id: T100
+  title: OCR/VLM 衝突、估讀、雙軸及跨頁合格／錯誤案例
+  owners:
+  - 9
+  - 10
+  - 12
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T101
+  title: 換 crop／模型／linker／verifier、服務中斷與恢復
+  owners:
+  - 7
+  - 8
+  - 10
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T102
+  title: visual lineage、缺 asset、異模型 image/text vector、雙專案
+  owners:
+  - 5
+  - 11
+  - 13
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T103
+  title: raw_pdf_track／shared_parse_track 對照與參賽下載
+  owners:
+  - 10
+  - 11
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: T104
+  title: 兩工具分別跑真 parser＋既有真 vision smoke；500頁按需流程
+  owners:
+  - 8
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+acceptance:
+- id: A01
+  title: 500 頁且素材足夠的 PDF
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A02
+  title: 少於 20 頁的 PDF
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A03
+  title: 無圖表的 PDF
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A04
+  title: 系統與使用者切割不同
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A05
+  title: 遠距跨頁題
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A06
+  title: 可接受替代來源
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A07
+  title: 易混淆來源
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A08
+  title: 表格與圖表題
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A09
+  title: 正確答案但錯來源
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A10
+  title: 整頁及精準區域都覆蓋 gold
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A11
+  title: 相同 PDF 與建題設定重送
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A12
+  title: 第二種方法執行
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A13
+  title: HTTP Agent 與 JSONL 提交
+  owners:
+  - 10
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A14
+  title: 分批建題時中斷
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A15
+  title: API 重送與併發
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A16
+  title: 方法漏答或逾時
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A17
+  title: 評分模型失敗
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A18
+  title: 嘗試讀取 gold
+  owners:
+  - 5
+  - 11
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
+- id: A19
+  title: bbox、頁碼或文件 hash 錯誤
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A20
+  title: gold 修訂
+  owners:
+  - 10
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A21
+  title: 分數血緣查詢
+  owners:
+  - 5
+  - 6
+  - 12
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
+- id: A22
+  title: audit/outbox 寫入故障
+  owners:
+  - 5
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
+- id: A23
+  title: 外部呼叫後中斷
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 6
+- id: A24
+  title: 跨服務執行
+  owners:
+  - 6
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 6
+- id: A25
+  title: 修改凍結結果
+  owners:
+  - 5
+  - 10
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
+- id: A26
+  title: Log 查詢與匯出
+  owners:
+  - 6
+  - 13
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 6
+- id: A27
+  title: collector 中斷及重送
+  owners:
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 6
+- id: A28
+  title: log 含敏感內容
+  owners:
+  - 5
+  - 6
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
+- id: A29
+  title: 備份還原
+  owners:
+  - 14
+  - 5
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 14
+- id: A30
+  title: 清理 DEBUG
+  owners:
+  - 14
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 14
+- id: A31
+  title: artifact 提交中斷
+  owners:
+  - 5
+  - 14
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 5
+- id: A32
+  title: 快取命中
+  owners:
+  - 10
+  - 5
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 10
+- id: A33
+  title: graph checkpoint 失敗後重啟
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A34
+  title: 兩個 worker 接同一 thread
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A35
+  title: 超過步數及人工等待
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A36
+  title: Embedding space 不符
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A37
+  title: pgvector 重建與隔離
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A38
+  title: Exact/ANN 搜尋
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A39
+  title: 圖表及模型 schema
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A40
+  title: agentlog 匯入
+  owners:
+  - 6
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A41
+  title: Agent 引用 [ID] 但來源錯
+  owners:
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A42
+  title: 建置與實際整合
+  owners:
+  - 3
+  - 6
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 3
+- id: A43
+  title: Unstructured／MinerU 均有固定版 adapter 與真解析證據
+  owners:
+  - 8
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A44
+  title: 原始圖像／文字／結構／推論可分開追溯，必要細節可核對
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A45
+  title: 跨批次與遠距圖文連結正確，相似反例不誤合
+  owners:
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A46
+  title: 圖表與跨頁圖文題確有必要性，數值／單位計分一致
+  owners:
+  - 10
+  - 12
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A47
+  title: Gold 隔離、modalities／track 明確、無摘要資料洩漏
+  owners:
+  - 11
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: null
+- id: A48
+  title: 真 parser＋vision／DB 流程及資源用量可重現
+  owners:
+  - 14
+  - 8
+  - 9
+  release_owner: 15
+  status: not_started
+  evidence: []
+  note: 'Primary/協作依 PM 2026-11-05 於 #4 的規劃答覆（A42 另有 #15 全量發布驗收）。'
+  primary: 14

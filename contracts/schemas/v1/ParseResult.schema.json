@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "PageStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "diagnostics": {
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Diagnostics",
+          "type": "array"
+        },
+        "page_index": {
+          "minimum": 0,
+          "title": "Page Index",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "partial",
+            "needs_review",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "page_index",
+        "status",
+        "diagnostics"
+      ],
+      "title": "PageStatus",
+      "type": "object"
+    }
+  },
+  "$id": "lab-contracts/v1/ParseResult.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "manifest_ref": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Manifest Ref",
+      "type": "string"
+    },
+    "normalized_evidence_refs": {
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Normalized Evidence Refs",
+      "type": "array"
+    },
+    "operation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "pages": {
+      "items": {
+        "$ref": "#/$defs/PageStatus"
+      },
+      "minItems": 1,
+      "title": "Pages",
+      "type": "array"
+    },
+    "raw_result_refs": {
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Raw Result Refs",
+      "type": "array"
+    }
+  },
+  "required": [
+    "operation_id",
+    "manifest_ref",
+    "raw_result_refs",
+    "normalized_evidence_refs",
+    "pages"
+  ],
+  "title": "ParseResult",
+  "type": "object"
+}
