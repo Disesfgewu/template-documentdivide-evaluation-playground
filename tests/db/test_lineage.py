@@ -186,6 +186,16 @@ class LineageWalkTests(FreshDatabase):
                     with self.assertRaises(ValueError):
                         walk(conn, project_1, res_1, max_nodes=bad_nodes)
 
+            for bad_edges in (0, 10001, -1, True):
+                with self.subTest(max_edges=bad_edges):
+                    with self.assertRaises(ValueError):
+                        walk(conn, project_1, res_1, max_edges=bad_edges)
+
+            for bad_frontier in (0, 1001, -1, False):
+                with self.subTest(max_frontier=bad_frontier):
+                    with self.assertRaises(ValueError):
+                        walk(conn, project_1, res_1, max_frontier=bad_frontier)
+
             with self.assertRaises(ValueError):
                 walk(conn, project_1, res_1, direction="invalid")  # type: ignore[arg-type]
 
@@ -260,6 +270,135 @@ class LineageWalkTests(FreshDatabase):
             )
             self.assertTrue(res_two.truncated)
             self.assertEqual(res_two.frontier, [b2_id, b3_id, a_id])
+
+    def test_max_frontier_truncation(self) -> None:
+        """Walk truncates frontier collection at max_frontier."""
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            b1 = self._create_resource(conn, project_id, actor_id, "mf_b1")
+            b2 = self._create_resource(conn, project_id, actor_id, "mf_b2")
+            b3 = self._create_resource(conn, project_id, actor_id, "mf_b3")
+            d = self._create_resource(
+                conn, project_id, actor_id, "mf_d",
+                lineage=[(b1, "derived_from"), (b2, "derived_from"), (b3, "derived_from")],
+            )
+
+            res = walk(conn, project_id, d, direction="upstream", max_nodes=1, max_frontier=2)
+            self.assertEqual(len(res.frontier), 2)
+            self.assertTrue(res.truncated)
+
+    def test_multi_operation_edges_truncation(self) -> None:
+        """Walk truncates edges collection at max_edges when multiple operations connect nodes."""
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            p = self._create_resource(conn, project_id, actor_id, "mo_parent")
+            c = self._create_resource(conn, project_id, actor_id, "mo_child", lineage=[(p, "derived_from")])
+            with conn.transaction():
+                for i in range(20):
+                    op_id = uuid.uuid4()
+                    conn.execute(
+                        "INSERT INTO operations (id, project_id, kind, actor_id, status) "
+                        "VALUES (%s, %s, %s, %s, 'succeeded')",
+                        (op_id, project_id, f"test.mo_{i}", actor_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO lineage_edges (project_id, upstream_id, downstream_id, relation, operation_id) "
+                        "VALUES (%s, %s, %s, 'derived_from', %s)",
+                        (project_id, p, c, op_id),
+                    )
+
+            res = walk(conn, project_id, c, direction="upstream", max_edges=5)
+            self.assertEqual(len(res.edges), 5)
+            self.assertTrue(res.truncated)
+
+
+    def _insert_edge(self, conn, project_id, actor_id, upstream, downstream, kind) -> None:
+        op_id = uuid.uuid4()
+        with conn.transaction():
+            conn.execute(
+                "INSERT INTO operations (id, project_id, kind, actor_id, status) VALUES (%s, %s, %s, %s, 'succeeded')",
+                (op_id, project_id, kind, actor_id),
+            )
+            conn.execute(
+                "INSERT INTO lineage_edges (project_id, upstream_id, downstream_id, relation, operation_id) "
+                "VALUES (%s, %s, %s, 'derived_from', %s)",
+                (project_id, upstream, downstream, op_id),
+            )
+
+    def test_exact_edge_cap_on_a_complete_graph_is_not_truncated(self) -> None:
+        """root -> child only: max_edges=1 is used exactly, nothing is omitted (PM finding on 71fc43c)."""
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            root = self._create_resource(conn, project_id, actor_id, "ec_root")
+            child = self._create_resource(conn, project_id, actor_id, "ec_child", lineage=[(root, "derived_from")])
+            for cap in (1, 2):
+                res = walk(conn, project_id, root, direction="downstream", max_depth=3, max_edges=cap)
+                self.assertEqual(set(res.nodes), {root, child})
+                self.assertEqual(len(res.edges), 1)
+                self.assertFalse(res.truncated, f"max_edges={cap}")
+                self.assertEqual(res.frontier, [])
+            up = walk(conn, project_id, child, direction="upstream", max_depth=3, max_edges=1)
+            self.assertFalse(up.truncated)
+
+    def test_one_more_edge_beyond_the_cap_is_truncated(self) -> None:
+        """The paired case: a second edge makes max_edges=1 genuinely omit data."""
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            root = self._create_resource(conn, project_id, actor_id, "oc_root")
+            child = self._create_resource(conn, project_id, actor_id, "oc_child", lineage=[(root, "derived_from")])
+            grand = self._create_resource(conn, project_id, actor_id, "oc_grand", lineage=[(child, "derived_from")])
+            capped = walk(conn, project_id, root, direction="downstream", max_depth=3, max_edges=1)
+            self.assertEqual(len(capped.edges), 1)
+            self.assertTrue(capped.truncated)
+            self.assertEqual(capped.frontier, [grand])
+            full = walk(conn, project_id, root, direction="downstream", max_depth=3, max_edges=2)
+            self.assertEqual(len(full.edges), 2)
+            self.assertFalse(full.truncated)
+
+    def test_omitted_edge_to_a_visited_node_counts_as_truncation(self) -> None:
+        """The only omitted edge points back at a visited node: no unvisited neighbour, still truncated."""
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            root = self._create_resource(conn, project_id, actor_id, "bk_root")
+            child = self._create_resource(conn, project_id, actor_id, "bk_child", lineage=[(root, "derived_from")])
+            self._insert_edge(conn, project_id, actor_id, child, root, "test.back_edge")
+            capped = walk(conn, project_id, root, direction="downstream", max_depth=3, max_edges=1)
+            self.assertEqual(len(capped.edges), 1)
+            self.assertEqual(capped.frontier, [])
+            self.assertTrue(capped.truncated)
+            full = walk(conn, project_id, root, direction="downstream", max_depth=3, max_edges=2)
+            self.assertEqual(len(full.edges), 2)
+            self.assertFalse(full.truncated)
+
+    def test_unexpanded_last_level_with_a_back_edge_is_truncated(self) -> None:
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            a = self._create_resource(conn, project_id, actor_id, "ul_a")
+            b = self._create_resource(conn, project_id, actor_id, "ul_b", lineage=[(a, "derived_from")])
+            c = self._create_resource(conn, project_id, actor_id, "ul_c", lineage=[(b, "derived_from")])
+            self._insert_edge(conn, project_id, actor_id, c, a, "test.back_edge")
+            cut = walk(conn, project_id, a, direction="downstream", max_depth=2)
+            self.assertEqual(set(cut.nodes), {a, b, c})
+            self.assertEqual(cut.frontier, [])
+            self.assertTrue(cut.truncated)
+            done = walk(conn, project_id, a, direction="downstream", max_depth=3)
+            self.assertEqual(len(done.edges), 3)
+            self.assertFalse(done.truncated)
+
+    def test_parallel_operations_exact_cap_is_complete_and_one_more_truncates(self) -> None:
+        with self.connect() as conn:
+            project_id, actor_id = self.make_project(conn)
+            p = self._create_resource(conn, project_id, actor_id, "pc_parent")
+            c = self._create_resource(conn, project_id, actor_id, "pc_child", lineage=[(p, "derived_from")])
+            for i in range(4):
+                self._insert_edge(conn, project_id, actor_id, p, c, f"test.pc_{i}")
+            exact = walk(conn, project_id, c, direction="upstream", max_edges=5)
+            self.assertEqual(len(exact.edges), 5)
+            self.assertFalse(exact.truncated)
+            self._insert_edge(conn, project_id, actor_id, p, c, "test.pc_extra")
+            over = walk(conn, project_id, c, direction="upstream", max_edges=5)
+            self.assertEqual(len(over.edges), 5)
+            self.assertTrue(over.truncated)
 
 
 if __name__ == "__main__":
