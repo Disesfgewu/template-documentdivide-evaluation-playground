@@ -103,7 +103,7 @@ run_suite() {
       PYTHONPATH=contracts python3 -m fixtures.registry_check --verify-signoff
       ;;
     parser)
-      PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
+      PYTHONPATH=services/parser:contracts python3 -m tools.governance.run_tests tests/parser
       ;;
     worker)
       # Go worker. GOTOOLCHAIN=local: never auto-download a different Go;
