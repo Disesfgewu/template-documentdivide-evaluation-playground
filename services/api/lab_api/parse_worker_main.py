@@ -222,7 +222,11 @@ class Worker:
         then cancel their parsers and give the threads a short time to return."""
         if not futures:
             return
-        _, pending = wait(futures, timeout=0 if self.abort.is_set() else self.grace)
+        pending = set(futures)
+        deadline = time.monotonic() + self.grace
+        # Poll so that a second signal (abort) ends the grace wait at once.
+        while pending and not self.abort.is_set() and time.monotonic() < deadline:
+            _, pending = wait(pending, timeout=min(0.2, max(0.0, deadline - time.monotonic())))
         if pending:
             LOG.warning("stopping with %d job(s) still running: cancelling their parsers; leases will expire",
                         len(pending))

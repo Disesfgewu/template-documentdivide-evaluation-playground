@@ -232,6 +232,80 @@ class ParseWorkerMainRealDbTests(FreshDatabase):
                 self.assertLess(time.monotonic() - began, 15)
                 self.assertEqual(self.status(job)[0], "running")  # left to lease expiry, never marked finished
 
+    def test_the_forced_exit_branch_when_a_parser_ignores_cancellation(self):
+        from lab_api import parse_worker_main as module
+        self.drain_foreign_jobs()
+        job = self.queue()
+        started, release = threading.Event(), threading.Event()
+
+        def deaf(data, **kw):  # never looks at cancelled()
+            started.set()
+            release.wait(30)
+            return good_run(data, **kw)
+
+        with patch.object(module, "CANCEL_WAIT_SECONDS", 0.5):
+            worker = self.worker(deaf, grace=0.3)
+            thread = threading.Thread(target=worker.run_forever)
+            thread.start()
+            self.assertTrue(started.wait(30))
+            began = time.monotonic()
+            worker.stop.set()
+            thread.join(20)
+            self.assertFalse(thread.is_alive(), "run_forever must return although the job thread is stuck")
+            self.assertLess(time.monotonic() - began, 10)
+            self.assertTrue(worker.forced)
+            self.assertEqual(self.status(job)[0], "running")   # left to lease expiry, fenced
+        release.set()
+
+    def test_a_forced_worker_exits_the_process_with_status_1(self):
+        from lab_api import parse_worker_main as module
+
+        class Stuck:
+            forced = True
+            abort = threading.Event()
+
+            def __init__(self, *a, **kw):
+                pass
+
+            def run_forever(self):
+                return {}
+
+        class Exited(Exception):
+            pass
+
+        def fake_exit(code):
+            raise Exited(code)
+
+        with patch.dict(os.environ, self.env, clear=True), patch.object(module, "Worker", Stuck), \
+                patch.object(module.os, "_exit", fake_exit):
+            with self.assertRaises(Exited) as raised:
+                module.main([])
+        self.assertEqual(raised.exception.args[0], 1)
+
+    def test_a_second_signal_ends_the_grace_wait_at_once(self):
+        self.drain_foreign_jobs()
+        self.queue()
+        started = threading.Event()
+
+        def stubborn(data, cancelled, **kw):
+            started.set()
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and not cancelled():
+                time.sleep(0.05)
+            raise InspectionError("cancelled")
+
+        worker = self.worker(stubborn, grace=60)
+        thread = threading.Thread(target=worker.run_forever)
+        thread.start()
+        self.assertTrue(started.wait(30))
+        worker.stop.set()
+        time.sleep(1.5)                      # now inside the 60 s grace wait
+        began = time.monotonic()
+        worker.abort.set()                   # what the second SIGTERM does
+        thread.join(20)
+        self.assertFalse(thread.is_alive())
+        self.assertLess(time.monotonic() - began, 5)
+
     def test_stop_lets_the_running_job_finish_and_claims_nothing_new(self):
         self.drain_foreign_jobs()
         first, second = self.queue(), self.queue()
