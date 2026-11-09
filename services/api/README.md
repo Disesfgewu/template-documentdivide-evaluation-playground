@@ -43,6 +43,7 @@ curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 - **嚴格 multipart**（`lab_api/multipart_strict.py`）：只接受固定格式（不接受 preamble、折行或重複 header、`base64`／`quoted-printable` 編碼）、最多 4 個 part、只允許一個 PDF part 與最多一個 `logical_id` 文字欄位；其他 part 一律拒絕而非忽略。PDF part 超過上限回 413，非 PDF 媒體型別回 415。
 - **冪等重播**：帶 `Idempotency-Key` 時，同 key 同內容重送會重播原結果；成功回傳 200 `replayed: true`。被拒絕的請求（例如加密 PDF、頁面幾何錯誤）的**原始回應**與 operation 在同一交易中存入 `operation_results`（0009，append-only），重送時原樣回傳，只換上新請求的 `request_id`，不會重新執行 parser、也不受當下限制或程式版本影響。0009 之前就已失敗、沒有保存回應的 operation 回 409，並說明原回應未保留。同 key 不同內容回 409。
 - **下載**：授權與 artifact 狀態、大小上限、checksum 都先在資料庫層檢查，才讀取檔案；讀檔受 `max_pdf_bytes` 限制並驗證 sha256。
+- **頁面預覽（Accept: image/png）**：`GET /api/v1/documents/{document_id}/pages/{page_index}` 預設回傳 JSON 幾何資訊；帶有 `Accept: image/png` 時，在獨立監督 subprocess 中以固定 150 DPI 渲染原檔 PDF（`lab_parser.render.render_region`，支援旋轉與 CropBox）。受 POSIX 資源上限（CPU/AS/FSIZE）與 hard timeout 控管。預設 2 個 preview 并行 slots（`preview_concurrency`，滿載回 503 `server_busy`），在讀取 PDF 前即授權與取 slot，取消安全保護。回應包含 `X-Document-Sha256`、`X-Page-Index`、`X-Image-Sha256`、`X-Image-Width`、`X-Image-Height`、`Cache-Control: no-store`。超出頁碼回 404、路徑不合法回 422、像素上限回 422、渲染器逾時/故障回 504/503。渲染頁面不宣稱為已驗證之證據。
 
 尚未完成（本增量不宣稱 #67／#7 驗收）：上傳前的連線仍由 request dependency 建立（未驗證 actor 的連線洪流需由部署層限制）；`open`／`verify` 在未指定上限時仍可無上限讀取，需逐一評估呼叫端；project 層級的授權／RLS 完整行為、parse job 與批次、OCR。
 
