@@ -111,6 +111,40 @@ class PublicQuestionsRealDbTests(FreshDatabase):
         self.assertEqual(self.get(f.a, f.p, path="/api/v1/benchmarks/bench_1/revisions/2/questions").status_code, 404)
         self.assertEqual(self.get(f.a, f.p, path="/api/v1/benchmarks/nope/revisions/1/questions").status_code, 404)
 
+    def test_detail_counts_and_visibility(self):
+        f, roles = self.seed()
+        path = "/api/v1/benchmarks/bench_1/revisions/1"
+        body = self.get(roles["participant"], f.p, path=path).json()
+        self.assertEqual(body["status"], "frozen")
+        self.assertEqual(body["question_count"], 5)
+        self.assertNotIn("quota_counts", body)
+        self.assertEqual((body["n_target"], body["q_min"], body["compliance"]), (20, 2, "partial"))
+        self.assertIsNotNone(body["frozen_at"])
+        text = json.dumps(body)
+        self.assertNotIn("SECRET", text)
+        self.assertEqual(self.get(roles["observer"], f.p, path=path).status_code, 403)
+        self.assertEqual(self.get(f.a, f.p, path="/api/v1/benchmarks/bench_1/revisions/2").status_code, 404)
+
+    def test_single_question_partial_quota_is_gold_only(self):
+        f, roles = self.seed(n=1)
+        path = "/api/v1/benchmarks/bench_1/revisions/1"
+        participant = self.get(roles["participant"], f.p, path=path)
+        self.assertEqual(participant.status_code, 200)
+        self.assertEqual(participant.json()["question_count"], 1)
+        self.assertNotIn("quota_counts", participant.json())
+        for actor in (f.a, roles["reviewer"]):
+            response = self.get(actor, f.p, path=path)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["quota_counts"],
+                             {"general": 1, "cross_page": 0, "chart_table": 0, "confusable": 0})
+
+    def test_detail_of_a_draft_is_hidden_from_participants(self):
+        f, roles = self.seed(freeze=False)
+        path = "/api/v1/benchmarks/bench_1/revisions/1"
+        self.assertEqual(self.get(roles["participant"], f.p, path=path).status_code, 404)
+        body = self.get(f.a, f.p, path=path).json()
+        self.assertEqual((body["status"], body["frozen_at"], body["question_count"]), ("draft", None, 5))
+
     def test_bad_cursor_and_limit_are_400(self):
         f, roles = self.seed()
         self.assertEqual(self.get(f.a, f.p, cursor="garbage").status_code, 400)
