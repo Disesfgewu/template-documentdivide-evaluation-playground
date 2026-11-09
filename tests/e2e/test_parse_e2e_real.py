@@ -47,6 +47,63 @@ ENABLED = os.environ.get("LAB_E2E_REAL_UNSTRUCTURED") == "1"
 REPORT = {"synthetic": True, "python": sys.version.split()[0]}
 
 
+def layout_pdf() -> bytes:
+    """Two synthetic pages: (1) a two-column article, (2) a ruled 4x3 table. Hand built, no data."""
+    def text(x, y, line):
+        return f"BT /F1 11 Tf 1 0 0 1 {x} {y} Tm ({line}) Tj ET"
+
+    left = ["LEFTCOL alpha measures the synthetic baseline for the first group of samples.",
+            "LEFTCOL bravo continues the argument and refers to the earlier baseline.",
+            "LEFTCOL charlie closes the left column with a short synthetic summary."]
+    right = ["RIGHTCOL delta opens the right column with an unrelated synthetic remark.",
+             "RIGHTCOL echo adds a second sentence that stays inside the right column.",
+             "RIGHTCOL foxtrot ends the page with a final synthetic statement here."]
+    import textwrap
+
+    def column(x, paragraphs):
+        lines = [chunk for paragraph in paragraphs for chunk in textwrap.wrap(paragraph, 38)]
+        return [text(x, 740 - 16 * i, chunk) for i, chunk in enumerate(lines)]
+
+    page1 = column(72, left) + column(330, right)
+    rows = [("Item", "Quantity", "UnitPrice"), ("Widget", "12", "3.50"), ("Gadget", "7", "10.25"), ("Gizmo", "100", "0.75")]
+    xs, ys = [72, 250, 430, 540], [720, 696, 672, 648, 624]
+    page2 = [text(72, 760, "Synthetic price table TABLEMARK")]
+    for y in ys:
+        page2.append(f"72 {y} m 540 {y} l S")
+    for x in xs:
+        page2.append(f"{x} {ys[0]} m {x} {ys[-1]} l S")
+    for r, row in enumerate(rows):
+        for c, cell in enumerate(row):
+            page2.append(text(xs[c] + 6, ys[r] - 16, cell))
+    return raw_pdf(["\n".join(page1), "\n".join(page2)])
+
+
+def raw_pdf(contents: list[str]) -> bytes:
+    objs = [b"", b""]
+    kids = []
+    font = 3 + 2 * len(contents)
+    for i, content in enumerate(contents):
+        stream = content.encode("ascii")
+        page_id = 3 + 2 * i
+        kids.append(page_id)
+        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {page_id + 1} 0 R "
+                    f"/Resources << /Font << /F1 {font} 0 R >> >> >>".encode())
+        objs.append(b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream")
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objs[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objs[1] = f"<< /Type /Pages /Kids [{' '.join(f'{k} 0 R' for k in kids)}] /Count {len(kids)} >>".encode()
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for n, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % n + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
 def squash(text: str) -> str:
     """pdfminer emits rotated-page text letter by letter; compare without whitespace."""
     return "".join(text.split())
@@ -148,6 +205,43 @@ class ParseEndToEndTests(FreshDatabase):
             self.assertIn(word, squash(" ".join(o["raw_content"] for o in pages[index]["observations"])))
         REPORT["mixed_pages"] = {"evidence_pages": [i for i, p in enumerate(pages) if p["evidence"]],
                                  "synthetic": True}
+
+    def test_two_columns_and_a_ruled_table_characterization(self):
+        """Characterization of what real Unstructured fast extracts from layout it was not built for.
+        Assertions are the safe invariants; everything observed goes into the report."""
+        doc, job = self.upload_and_queue(layout_pdf())
+        self.assertEqual(self.consume(job).status, "succeeded")
+        observed = {}
+        for index in range(2):
+            body = self.page(doc, job, index)
+            observed[index] = {
+                "status": body["status"],
+                "elements": [[o["upstream_type"], o["raw_content"]] for o in body["observations"]],
+                "evidence": [[e["raw_content"], e["regions"][0]["bbox"]] for e in body["evidence"]],
+            }
+            for unit in body["evidence"]:
+                x0, y0, x1, y1 = unit["regions"][0]["bbox"]
+                self.assertTrue(0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1)
+        page1 = squash(" ".join(t for _, t in observed[0]["elements"]))
+        for word in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot"):
+            self.assertIn(word, page1, f"{word} lost from the two-column page")
+        page2 = squash(" ".join(t for _, t in observed[1]["elements"]))
+        for cell in ("TABLEMARK", "Item", "Quantity", "UnitPrice", "Widget", "12", "3.50", "Gadget", "10.25", "Gizmo", "100", "0.75"):
+            self.assertIn(cell, page2, f"cell {cell} lost from the table page")
+        # Observed on CI (run 42692463217) and pinned so a change in the library's behaviour is noticed:
+        # the two columns stay separate reading units, in left-to-right order, with disjoint boxes.
+        left, right = observed[0]["evidence"]
+        self.assertIn("LEFTCOL", left[0])
+        self.assertNotIn("RIGHTCOL", left[0])
+        self.assertIn("RIGHTCOL", right[0])
+        self.assertNotIn("LEFTCOL", right[0])
+        self.assertLess(left[1][2], right[1][0], "left column box must end before the right column starts")
+        # The fast strategy has no table model: cells come out as separate elements, not a Table, and
+        # nothing in the result says which cells share a row. (hi_res would; it is blocked here.)
+        types = {t for t, _ in observed[1]["elements"]}
+        self.assertNotIn("Table", types)
+        self.assertGreaterEqual(len(observed[1]["elements"]), 12)
+        REPORT["layout_characterization"] = {"synthetic": True, "pages": observed}
 
     def test_cancel_stops_the_real_parser_and_stores_nothing(self):
         doc, job = self.upload_and_queue(synthetic_pdf.build(150))
