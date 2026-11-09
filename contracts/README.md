@@ -214,6 +214,13 @@ acceptance remains open. Durable per-line PostgreSQL transactions, cross-batch
 idempotency, run/finalize locks, first-terminal selection, authorization,
 audit/outbox, late/cancel handling and HTTP/grader equivalence remain #5/#6/#11/#12
 integration gates. This preflight is not a submission endpoint or a completed run.
+## Private benchmark transfer
+
+The callable codec and CLI `python -m lab_contracts.transfer` preserve the four
+parts plus evidence/validation snapshots with versioned hashes and bounded
+strict import. Its separate participant projection has an explicit three-field
+allowlist. See [benchmark transfer](../docs/BENCHMARK_TRANSFER.md) for format,
+commands, limits and the remaining authorization/freeze/API gates.
 
 
 ## Generation control

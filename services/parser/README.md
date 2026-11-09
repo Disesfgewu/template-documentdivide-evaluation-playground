@@ -40,3 +40,101 @@ stdout 為單一 `lab-pdf-inspection-1` JSON；不輸出來源路徑、PDF 內�
 Exit 0：接受。Exit 1：拒絕或需審核（JSON 的穩定 `reason` 說明原因，例如 `file_too_large`、`encrypted_pdf`、`xref_repaired`、`invalid_page_geometry`）。Exit 2：參數或 I/O 錯誤（`invalid_arguments`、`input_unavailable`、`not_regular_file`）。`check-config` 保持既有行為。
 
 固定 F01／F02／F05 的 CLI subprocess tests 驗證真 bytes/hash/count、CropBox／旋轉、異常 PDF、邊界與有界讀取。本增量只涵蓋 T01–T05 的本機檢查／頁面 metadata 子情境，不宣稱完整 HTTP 上傳、版本唯一性、PG/artifact 持久化、OCR、批次恢復或 A19 通過；這些仍由 #5／#6／#7 後續整合驗收。
+
+## Local participant retrieval examples (#11 foundation)
+
+`lab_parser.local_methods` provides two **participant-side** native-text
+retrievers. Each consumes original PDF bytes and verifies the caller's expected
+SHA-256; neither accepts system evidence, gold, or an existing system parse.
+`page` uses a whole native-text page per chunk. `window` splits each page into
+nonoverlapping character windows (`--window-chars`, default 512). This changes
+the indexing algorithm, not merely transport. Both rank by the count of distinct
+case-folded Unicode word tokens shared with the question, then physical page and
+character offset for deterministic ties. There is no embedding or paid call.
+
+These are retrieval-only examples: query responses **abstain**, with an empty
+answer and no fabricated claims/citations. Actual retrieved text remains available
+for source evaluation. They do not implement the full HTTP method service or
+answer generator, and do not satisfy complete T30/A04 acceptance. All text hits
+use honest coarse `kind=page`, `[0,0,1,1]` geometry and zero-based physical pages;
+character windows do not imply measured text boxes. Native text is unverified
+extraction, not gold. Rotation does not change that full-page region.
+
+Run from the repository root after installing the parser lock file:
+
+```bash
+export PYTHONPATH=services/parser:contracts
+python -m fixtures.generators.synthetic_pdf 2 /tmp/local-example.pdf
+# Copy the SHA printed by the generator into this variable.
+PDF_SHA=$(sha256sum /tmp/local-example.pdf | cut -d ' ' -f 1)
+python -m lab_parser.local_method_cli prepare \
+  --pdf /tmp/local-example.pdf --sha256 "$PDF_SHA" --document-id local-doc \
+  --strategy page > /tmp/local-prepare.json
+```
+
+The result follows `PrepareResult`. Its immutable index fingerprint covers raw
+PDF hash, document identity, pypdf version, method revision, full config, all
+chunks, coverage and tokenizer profile. `local-page` and `local-window` have
+distinct identities/fingerprints. The frozen in-memory index uses only immutable
+values; modifying any extraction/configuration requires new preparation.
+
+To query, create a `QueryRequest` JSON using the returned `index_id`, for example:
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+prepared = json.loads(Path('/tmp/local-prepare.json').read_text())
+request = dict(protocol_version='1.0', request_id='request-1', run_id='run-1',
+               question_id='question-1', index_id=prepared['index_id'],
+               question='Measured value for item 1',
+               budget=dict(top_k=10, max_evidence_tokens=12000,
+                           max_visual_regions=8, timeout_seconds=180))
+Path('/tmp/local-query.json').write_text(json.dumps(request))
+PY
+python -m lab_parser.local_method_cli query \
+  --pdf /tmp/local-example.pdf --sha256 "$PDF_SHA" --document-id local-doc \
+  --strategy page --request /tmp/local-query.json
+```
+
+Repeat preparation/query with `--strategy window --window-chars 64` for the
+second algorithm; use its own returned `index_id`. Each CLI invocation prepares
+again in memory; this is not a durable index, cache, job, or run-state service.
+Wrong index binding fails. Query input rejects duplicate keys, nonfinite numbers,
+unknown fields and invalid contract values. Files must be bounded regular files
+(FIFO/device input fails without waiting). Errors exit 2 without stdout JSON;
+success exits 0 with a bounded JSON result.
+
+The example budget profile is **`utf8-bytes-1`**, counting every UTF-8 byte of
+hit content (including whitespace) as one evidence unit. It is conservative for
+native text and versioned in the fingerprint/trace, but is **not the LAB official
+scorer tokenizer**. The ranked prefix stops at the first over-budget hit; it
+never skips that hit to backfill later ones. `top_k` is additionally capped at
+the contract's 200 hits. Every coarse page region also consumes one visual-region
+budget unit, including native-text windows; `max_visual_regions=0` returns no
+hits. Query telemetry records zero model calls/tokens because
+no model is invoked; evidence budget units are reported separately in the trace.
+
+Limitations and remaining gates:
+
+- This native-text-only example does not read scans, tables, charts, or images;
+  pages without native text are listed explicitly. A ready **text index** does
+  not mean the document was fully interpreted. CropBox different from MediaBox
+  is rejected because pypdf may extract text outside the visible crop.
+- Default hard logical caps are 16 MiB PDF bytes, 2000 pages, 32,000 extracted
+  characters per page, 1,000,000 total characters and 10,000 chunks. Limits fail
+  preparation; no truncated index is published. Native extraction warnings also
+  fail preparation (pypdf can otherwise return partial text); raw warning operands
+  are suppressed, and globally disabled warning monitoring fails closed. Query JSON is at most 64 KiB,
+  stdout JSON at most 16 MiB. Extraction caps are checked after pypdf extraction;
+  they do not bound decompression CPU/RSS. Run untrusted PDFs in a separately
+  resource-limited process; this increment does not provide that isolation or
+  claim the 500/600-page resource acceptance.
+- No DB persistence/authorization, HTTP transport, cancellation scheduler,
+  pgvector, model-answer generation, visual reasoning or official ranking is
+  claimed. #11 parent integration and #4/#6/#7 prerequisites remain open.
+
+Validation runs actual pypdf on synthetic PDFs and real F02 rotation/crop
+fixtures in `tests/parser/test_local_methods.py`; no parser/provider mocks stand
+in for extraction. Relevant checks: `scripts/check.sh --scope 'parser contracts
+governance'` (with installed pinned dependencies).

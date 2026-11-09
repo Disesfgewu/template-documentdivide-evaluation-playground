@@ -34,7 +34,7 @@ suite_for_base() {
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
     web/*) echo web;;
-    contracts/*|tests/contracts/*) echo "contracts fixtures";;
+    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db";;
     fixtures/*|tests/fixtures/*) echo "fixtures parser";;
     db/*) echo "db db-unit";;
     tests/db/*) echo db;;
@@ -61,7 +61,7 @@ run_suite() {
       python3 -m tools.governance.run_tests tests/governance
       ;;
     api)
-      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api
+      PYTHONPATH=services/api:contracts python3 -m tools.governance.run_tests tests/api
       ;;
     api-db)
       # Real PostgreSQL/pgvector only. Missing database = BLOCKED, never passed.
@@ -69,7 +69,7 @@ run_suite() {
         echo "BLOCKED: suite api-db needs LAB_TEST_DATABASE_URL (see docs/TESTING.md)" >&2
         return 3
       fi
-      PYTHONPATH=services/api python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
+      PYTHONPATH=services/api:contracts python3 -m tools.governance.run_tests tests/api_db --fail-on-skip
       ;;
     web)
       # React frontend: locked install, unit tests, type check, production build.
@@ -103,7 +103,7 @@ run_suite() {
       PYTHONPATH=contracts python3 -m fixtures.registry_check --verify-signoff
       ;;
     parser)
-      PYTHONPATH=services/parser python3 -m tools.governance.run_tests tests/parser
+      PYTHONPATH=services/parser:contracts python3 -m tools.governance.run_tests tests/parser
       ;;
     worker)
       # Go worker. GOTOOLCHAIN=local: never auto-download a different Go;
