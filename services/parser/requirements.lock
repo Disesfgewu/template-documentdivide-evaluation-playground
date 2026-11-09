@@ -20,3 +20,10 @@ typing_extensions==4.16.0
 uvicorn==0.54.0
 pypdf==6.21.1
 pypdfium2==5.14.0
+
+# Upstream-output schema validator (same pins as requirements-dev.txt)
+jsonschema==4.26.0
+attrs==26.1.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.9.1

@@ -42,6 +42,46 @@ Exit 0：接受。Exit 1：拒絕或需審核（JSON 的穩定 `reason` 說明�
 
 固定 F01／F02／F05 的 CLI subprocess tests 驗證真 bytes/hash/count、CropBox／旋轉、異常 PDF、邊界與有界讀取。本增量只涵蓋 T01–T05 的本機檢查／頁面 metadata 子情境，不宣稱完整 HTTP 上傳、版本唯一性、PG/artifact 持久化、OCR、批次恢復或 A19 通過；這些仍由 #5／#6／#7 後續整合驗收。
 
+## 鎖版解析 Normalization 邊界（#8 基礎）
+
+`lab_parser.normalize` 提供鎖版解析輸出的純記憶體正規化邊界（無任何上游程序啟動、外部檔案讀寫或網路 I/O），嚴格將上游結構映射至 LAB 共同契約（`CapabilityManifest`、`ParseResult`、`EvidenceUnit`、`Observation`）：
+
+- **Unstructured OSS 0.27.36**：
+  - 鎖定版本 `0.27.36`、schema `unstructured.elements-0.27.36`，支援 `fast`、`hi_res`、`ocr_only` 策略。
+  - `infer_table_structure=True` 限定 `hi_res` 策略。
+  - 將 PixelSpace 座標系轉換至已旋轉 CropBox 頂點歸一化空間 `[0, 1]`；版面尺寸不符時不採用座標，頁面標記 `needs_review`。
+  - 切割元素（`CompositeElement`、`TableChunk`）解壓縮 `orig_elements`（受限於 16 MB 上限與 zlib 完整性檢查）並展開子 Artifact，保留回源觀測記錄，衍生文字不覆蓋原始元素。
+  - 保存 Table HTML（`text_as_html`）與圖像/圖表引用。
+  - 偵測到 API 端點（`endpoint_deployment_id`）或 postprocess 標記時隔離（`quarantine`）。
+- **MinerU 4.1.7 / DocVortex Middle JSON 2.0**：
+  - 鎖定版本 `4.1.7`、schema `docvortex.middle-2.0`（依 `upstream_schemas/docvortex-middle-2.0.json` 嚴格校驗），支援 `flash`、`basic`、`standard`、`advanced` 品質檔位。
+  - 透過 `docvortex_layout`（version 1）驗證頁面尺寸與 `DisplayFrame` 一致性；未認證時不採納 block bbox，標記 `unattested_layout_geometry`。
+  - 不具備 cell 幾何時宣告 `cell_geometry=unsupported`，不捏造儲存格座標。
+  - 全文件後處理旗標（`is_full_document`）必須涵蓋全文件頁面，否則隔離；付費或全文件後處理旗標隔離。
+  - 遞迴擷取各區塊（文字、程式碼、公式、標題、圖表/圖片標註）文字，保存 `table_body` HTML 與圖片/圖表資產引用。
+- **嚴格錯誤與隔離原則**：
+  - 未知版本、未鎖定 schema、schema 漂移、區塊或頁面順序錯誤、非有限數值（NaN/Inf）、重複 JSON 鍵等一律隔離（`batch.quarantine_reason` 設定，頁面 `status="failed"`，清空 evidence）。
+  - 幾何缺失、策略降級（`fallback_reason` 存在）、未解析資產引用等標記頁面 `needs_review`，不造假幾何或憑空產生 evidence。
+  - 測試使用合成上游結構 fixtures（`tests/parser/test_normalize.py`），明確標註為 synthetic，不宣稱真實模型推論。
+  - 真實 20 頁多模態 golden 標註、#5/#6/#7 服務與資料庫持久化整合保持 gated 狀態。
+
+### 來源、鎖版與 Vendored 檔案查核（Auditability）
+
+為確保上游 schema、套件散布與授權條款具備精確可審核性，DocVortex（MinerU Middle JSON 格式提供者）之專案儲存庫與 PyPI release 發布資訊、本機 vendored 檔案與經 `sha256sum` 與位元組計數驗證之雜湊記錄如下：
+
+- **DocVortex 專案儲存庫**：`https://github.com/myhloli/DocVortex`（非 MinerU 儲存庫；鎖版 tag `v0.6.13`，commit `6b3c6641b89d3c2389bb35a5b362f79f21a1c261`）
+- **PyPI Release 詮釋資料**：`https://pypi.org/pypi/docvortex/0.6.13/json`
+- **PyPI 官方發行檔（Linux x86_64 wheel）**：
+  - 檔名：`docvortex-0.6.13-cp311-abi3-manylinux_2_28_x86_64.whl`
+  - 官方 SHA256 摘要：`bc366ece6b0bbee8c6ee63366ba7c0779be5195395749c79a6af69f936ba95ad`
+
+| 元件／檔案 | 官方來源 URL | 鎖版 Commit / Tag | Vendored 檔案路徑 | SHA256 雜湊 (Verified) | 大小 (bytes) | 授權條款 |
+| --- | --- | --- | --- | --- | --- | --- |
+| DocVortex Middle JSON 2.0 Schema | `https://raw.githubusercontent.com/myhloli/DocVortex/6b3c6641b89d3c2389bb35a5b362f79f21a1c261/schemas/middle-2.0.json` | tag `v0.6.13` (`6b3c6641b89d3c2389bb35a5b362f79f21a1c261`) | `services/parser/lab_parser/upstream_schemas/docvortex-middle-2.0.json` | `c13491ba1363943b239bd7bbf41fbce0e2d4b7e03d1e71d3741b0328a7b1b38b` | 61,255 | MIT |
+| DocVortex License | `https://raw.githubusercontent.com/myhloli/DocVortex/6b3c6641b89d3c2389bb35a5b362f79f21a1c261/LICENSE.md` | tag `v0.6.13` (`6b3c6641b89d3c2389bb35a5b362f79f21a1c261`) | `services/parser/lab_parser/upstream_schemas/DOCVORTEX-LICENSE.md` | `ff54576f0fa4b4a677eaf63497a546d78502398d6c9dddb0984cfa02e5294d3b` | 1,079 | MIT |
+| Unstructured OSS 0.27.36 | `https://github.com/Unstructured-IO/unstructured` | tag `0.27.36` (release `v0.27.36`) | `unstructured.elements-0.27.36` (Python element dict schema) | N/A（上游套件元件規格） | N/A | Apache-2.0 |
+
+此雜湊已於 `tests/parser/test_normalize.py` 中納入自動化迴歸驗證（`test_vendored_schemas_and_licenses_match_verified_hashes`），任何未經審查之檔案漂移皆會直接阻擋測試通過。
 ## Bounded L3 arithmetic derivations (#9 foundation)
 
 `lab_parser.derivations.evaluate_derivation(request)` evaluates an explicit JSON
