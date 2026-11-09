@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SUITES=(governance api api-db worker parser web contracts fixtures db db-unit)
+SUITES=(governance api api-db worker parser web contracts fixtures db db-unit scoring)
 scope=auto
 base=origin/main
 selected=()
@@ -34,7 +34,9 @@ suite_for_base() {
     services/worker/*) echo worker;;
     services/parser/*|tests/parser/*) echo parser;;
     web/*) echo web;;
-    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db";;
+    scoring/*|tests/scoring/*) echo scoring;;
+    fixtures/F06/*) echo "fixtures scoring";;
+    contracts/*|tests/contracts/*) echo "contracts fixtures api api-db scoring";;
     fixtures/*|tests/fixtures/*) echo "fixtures parser";;
     db/*) echo "db db-unit";;
     tests/db/*) echo db;;
@@ -102,6 +104,10 @@ run_suite() {
       # is used, and an unreachable GitHub fails a human review (never passes).
       PYTHONPATH=contracts python3 -m fixtures.registry_check --verify-signoff
       ;;
+    scoring)
+      # Rule-based scorer (SPEC 16.5): exact fractions, cross-checked with F06.
+      PYTHONPATH=contracts:scoring python3 -m tools.governance.run_tests tests/scoring
+      ;;
     parser)
       PYTHONPATH=services/parser:contracts python3 -m tools.governance.run_tests tests/parser
       ;;
@@ -129,6 +135,44 @@ run_suite() {
       rm -f "$gojson"
       (( rc == 0 )) || return 1
       (cd services/worker && GOTOOLCHAIN=local go build -o /dev/null ./cmd/lab-worker)
+      ;;
+    worker-agentkit)
+      # Opt-in, never part of --scope all/auto: needs read access to the
+      # private agentKit submodule (docs/AGENTKIT_SUBMODULE.md). Without the
+      # initialized submodule it is BLOCKED, never passed.
+      if [[ ! -f third_party/agentkit/go.mod ]]; then
+        echo "BLOCKED: suite worker-agentkit needs the initialized third_party/agentkit submodule" >&2
+        return 3
+      fi
+      if ! command -v go >/dev/null 2>&1; then
+        echo "BLOCKED: suite worker-agentkit needs Go (version in services/worker/agentkitsmoke/go.mod)" >&2
+        return 3
+      fi
+      (export GOTOOLCHAIN=local && go version \
+        && echo "agentkit gitlink $(git rev-parse HEAD:third_party/agentkit) checkout $(git -C third_party/agentkit rev-parse HEAD)" \
+        && test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)" \
+        && (cd third_party/agentkit && go test -count=1 ./graph ./model) \
+        && (cd services/worker/agentkitsmoke && go vet ./... && go test -count=1 -v ./...))
+      ;;
+    worker-agentkit)
+      # Opt-in, never part of --scope all/auto: needs read access to the
+      # private agentKit submodule (docs/AGENTKIT_SUBMODULE.md). Without the
+      # initialized submodule it is BLOCKED, never passed.
+      if [[ ! -f third_party/agentkit/go.mod ]]; then
+        echo "BLOCKED: suite worker-agentkit needs the initialized third_party/agentkit submodule" >&2
+        return 3
+      fi
+      if ! command -v go >/dev/null 2>&1; then
+        echo "BLOCKED: suite worker-agentkit needs Go (version in services/worker/agentkitsmoke/go.mod)" >&2
+        return 3
+      fi
+      (export GOTOOLCHAIN=local && go version \
+        && echo "agentkit gitlink $(git rev-parse HEAD:third_party/agentkit) checkout $(git -C third_party/agentkit rev-parse HEAD)" \
+        && test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)" \
+        && (cd third_party/agentkit && go test -count=1 ./graph ./model) \
+        && for m in services/worker/agentkitsmoke services/worker/agentflow; do \
+             test -z "$(cd "$m" && gofmt -l .)" || { echo "gofmt needed in $m" >&2; exit 1; }; \
+             (cd "$m" && go vet ./... && go test -count=1 -race -v ./...) || exit 1; done)
       ;;
     *) echo "unknown suite: $1" >&2; return 2;;
   esac
