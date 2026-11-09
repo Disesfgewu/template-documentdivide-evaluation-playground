@@ -139,6 +139,29 @@ class BatchParseTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "timeout")     # the consumer can requeue this exactly as before
         self.assertEqual(len(run.calls), 3)                  # no per-page retries
 
+    def test_every_batch_failing_transiently_with_different_codes_is_still_a_job_level_error(self):
+        codes = {tuple(range(0, 10)): "timeout", tuple(range(10, 20)): "process_unavailable", (20,): "inspection_io_failed"}
+
+        def behaviour(pages, nth):
+            raise InspectionError(codes[pages])
+        run = Recorder(behaviour)
+        with self.assertRaises(InspectionError) as ctx:
+            self.parse(run)
+        self.assertIn(ctx.exception.code, set(codes.values()))
+        self.assertEqual(len(run.calls), 3)
+
+    def test_an_unexpected_exception_stops_batches_that_have_not_started(self):
+        started = []
+
+        def behaviour(pages, nth):
+            started.append(pages)
+            raise RuntimeError("boom")
+        run = Recorder(behaviour, delay=0.3)
+        with self.assertRaises(RuntimeError):
+            parse_in_batches(build_pdf([{"mediabox": (0, 0, 595, 842)}] * 41), document_id="doc-many", budget_ref="b",
+                             operation_id="op", run_batch=run, limits=BatchLimits(batch_size=10, overlap_pages=0, parallel_batches=2))
+        self.assertLessEqual(len(run.calls), 2 + 1)   # the two running children and at most one more that raced the flag
+
     def test_systemic_codes_stop_at_once(self):
         for code in ("unsupported_platform", "invalid_input"):
             with self.subTest(code):

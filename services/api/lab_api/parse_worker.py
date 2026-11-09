@@ -237,8 +237,9 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
         except InspectionError as exc:
             batch, error = None, exc.code
         except PartialParseFailure as exc:
-            # Some pages stayed failed after the retry budget: never published as a success.
-            batch, error = None, exc.code
+            # Some pages stayed failed after the retry budget: never published as a success. The count
+            # goes into the job's transition reason (never page content).
+            batch, error = None, f"{exc.code}:{len(exc.failed_pages)}"
     if beat.lost.is_set() or error == "cancelled":
         return _stopped(conn, project_id, job_id)
     if error is not None:
