@@ -50,6 +50,32 @@ class BlockingWorkTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(started.is_set())
         return task, release, log
 
+    async def test_cancellation_sets_the_cancel_event_before_waiting_for_the_worker(self) -> None:
+        """A disconnect must reach a long worker (the PDF isolation child) at once, not after it ends."""
+        started, release, seen = threading.Event(), threading.Event(), []
+        cancel = threading.Event()
+
+        def worker():
+            started.set()
+            release.wait(5)
+            seen.append(cancel.is_set())  # still blocked here: the event was set while we waited
+            return "done"
+
+        task = asyncio.ensure_future(documents._run_blocking(fake_request(), "upload", worker, cancel=cancel))
+        await asyncio.get_running_loop().run_in_executor(None, wait_in_thread, started)
+        self.assertFalse(cancel.is_set())
+        task.cancel()
+        await asyncio.sleep(0.05)
+        self.assertTrue(cancel.is_set(), "cancel event was not set when the request was cancelled")
+        self.assertFalse(task.done(), "the request must still wait for its worker")
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(seen, [True])
+
+    async def test_a_worker_without_a_cancel_event_behaves_as_before(self) -> None:
+        self.assertEqual(await documents._run_blocking(fake_request(), "upload", lambda: 7), 7)
+
     async def test_event_loop_stays_responsive_during_blocking_work(self) -> None:
         ticks = 0
 

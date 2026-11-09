@@ -6,6 +6,7 @@ import dataclasses
 import functools
 import hashlib
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -303,8 +304,13 @@ def _positive_int(request: Request, name: str, default: int) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else default
 
 
-async def _run_blocking(request: Request, pool: str, fn, *args):
-    """Run ``fn(*args)`` in a worker thread; cancellation is deferred until it ends."""
+async def _run_blocking(request: Request, pool: str, fn, *args, cancel: "threading.Event | None" = None):
+    """Run ``fn(*args)`` in a worker thread; cancellation is deferred until it ends.
+
+    ``cancel`` (optional) is set the moment the request is cancelled (client disconnect,
+    shutdown, timeout) so a long worker, for example the PDF isolation child, can stop early
+    instead of running to its own deadline while the request waits for it.
+    """
     size = DEFAULT_METADATA_CONCURRENCY
     if pool == "upload":
         size = _positive_int(request, "upload_concurrency", DEFAULT_UPLOAD_CONCURRENCY)
@@ -323,6 +329,8 @@ async def _run_blocking(request: Request, pool: str, fn, *args):
     try:
         await asyncio.wait({job})  # cancelling this wait never cancels the job
     except asyncio.CancelledError:
+        if cancel is not None:
+            cancel.set()
         with anyio.CancelScope(shield=True):
             while not job.done():
                 try:
@@ -429,6 +437,7 @@ class _UploadContext:
     idempotency_key: Optional[str]
     request_id: str
     logical_hint: Optional[str]  # query parameter or X-Logical-Id header
+    cancel: Optional[threading.Event] = None  # set when the client goes away
 
 
 def _authorize_upload(conn: psycopg.Connection, project_id: uuid.UUID, actor_id: uuid.UUID) -> None:
@@ -603,7 +612,14 @@ def _upload_core(
         # (RLIMIT memory/CPU, wall deadline, PDFium page-count cross-check), never in this
         # process. Any pypdf warning (for example a repaired xref) is an invalid PDF there.
         inspection, page_infos = inspect_pdf_isolated(
-            data, Limits(max_bytes=ctx.max_bytes, max_pages=ctx.max_pages))
+            data, Limits(max_bytes=ctx.max_bytes, max_pages=ctx.max_pages),
+            cancelled=ctx.cancel.is_set if ctx.cancel is not None else None)
+
+        if inspection.reason == "inspection_cancelled":
+            # The client went away: abort and roll back. Nothing is persisted, in particular no
+            # failed operation, so a retry with the same Idempotency-Key is not answered with
+            # a cached failure.
+            raise ApiError(503, "request_cancelled", "request cancelled before inspection finished", retryable=True)
 
         if inspection.outcome == "reject":
             return reject(
@@ -694,6 +710,7 @@ async def upload_document_handler(
         idempotency_key=idempotency_key or None,
         request_id=request.headers.get("X-Request-Id", "req-1"),
         logical_hint=request.query_params.get("logical_id") or request.headers.get("X-Logical-Id"),
+        cancel=threading.Event(),
     )
 
     # Authorize before a single body byte is read or a slot is taken (and again
@@ -703,7 +720,8 @@ async def upload_document_handler(
     slot = _take_slot(request, "upload", DEFAULT_UPLOAD_CONCURRENCY, "uploads")
     try:
         raw = await _read_upload_within_deadline(request, max_bytes)
-        status, content = await _run_blocking(request, "upload", _upload_core, conn, store, ctx, raw)
+        status, content = await _run_blocking(request, "upload", _upload_core, conn, store, ctx, raw,
+                                              cancel=ctx.cancel)
     finally:
         slot.release()
     return JSONResponse(status_code=status, content=content)
