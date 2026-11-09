@@ -11,6 +11,7 @@ from .audit import router as audit_router
 from .benchmarks import router as benchmarks_router
 from .config import Settings, load_settings
 from .documents import ApiError, DownloadAdmissionMiddleware, router as documents_router
+from .comparisons import router as comparisons_router
 from .logs import router as logs_router
 from .results import router as results_router
 from .runs import router as runs_router
@@ -55,6 +56,7 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
     app.include_router(logs_router)
     app.include_router(runs_router)
     app.include_router(results_router)
+    app.include_router(comparisons_router)
     app.include_router(jobs_router)
     app.include_router(lineage_router)
     app.include_router(benchmarks_router)
