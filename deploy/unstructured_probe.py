@@ -140,7 +140,8 @@ def main() -> int:
     by_page = {}
     for e in mixed.evidence:
         by_page.setdefault(e.regions[0].page_index, []).append(e.raw_content)
-    seen_text = " ".join(o.raw_content for o in mixed.observations)
+    # Real finding: pdfminer emits rotated-page text letter by letter ("b r a v o").
+    seen_text = "".join(o.raw_content for o in mixed.observations).replace(" ", "")
     report["mixed_pages"] = {
         "synthetic": True, "quarantine_reason": mixed.quarantine_reason,
         "evidence_pages": sorted(by_page), "observation_pages": sorted({o.page_index for o in mixed.observations}),
