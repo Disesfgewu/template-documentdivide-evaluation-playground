@@ -244,6 +244,52 @@ class ParseEndToEndTests(FreshDatabase):
         self.assertGreaterEqual(len(observed[1]["elements"]), 12)
         REPORT["layout_characterization"] = {"synthetic": True, "pages": observed}
 
+    def test_bbox_frames_of_real_unstructured_versus_pdfium_measurement(self):
+        """MEASUREMENT for the rotated/CropBox question (PM list item D). No translation is applied and
+        nothing here makes a page attestable: it records, per page geometry, where real pdfminer/Unstructured
+        puts the text versus where PDFium puts it, so a translation can be derived and validated later."""
+        import tempfile as tmp
+        import pypdfium2
+        from unstructured.partition.pdf import partition_pdf
+        cases = {
+            "plain": "", "crop_offset_same_size": "/CropBox [50 50 662 842]", "crop_smaller": "/CropBox [100 100 400 500]",
+            "rotate_90": "/Rotate 90", "rotate_180": "/Rotate 180", "rotate_270": "/Rotate 270",
+            "rotate_90_crop_smaller": "/Rotate 90 /CropBox [100 100 400 500]",
+        }
+        measured = {}
+        for name, extra in cases.items():
+            pdf = hand_built_pdf([(["Alpha bravo charlie", "Delta echo foxtrot", "Golf hotel india"], extra)])
+            with tmp.NamedTemporaryFile(suffix=".pdf") as handle:
+                handle.write(pdf)
+                handle.flush()
+                elements = partition_pdf(filename=handle.name, strategy="fast")
+            boxes, layout = [], None
+            for element in elements:
+                coords = element.metadata.coordinates
+                if coords is None:
+                    continue
+                layout = [coords.system.width, coords.system.height]
+                xs = [pt[0] for pt in coords.points]
+                ys = [pt[1] for pt in coords.points]
+                boxes.append([min(xs), min(ys), max(xs), max(ys)])
+            document = pypdfium2.PdfDocument(pdf)
+            page = document[0]
+            textpage = page.get_textpage()
+            rects = [textpage.get_rect(i) for i in range(textpage.count_rects())]
+            measured[name] = {
+                "unstructured": {"layout": layout, "element_boxes": boxes,
+                                 "union": [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                                           max(b[2] for b in boxes), max(b[3] for b in boxes)] if boxes else None,
+                                 "texts": [e.text for e in elements]},
+                "pdfium": {"display_size": list(page.get_size()), "rotation": page.get_rotation(),
+                           "mediabox": list(page.get_mediabox()), "cropbox": list(page.get_cropbox()),
+                           "text_rects_left_bottom_right_top": [list(r) for r in rects]},
+            }
+            page.close()
+            document.close()
+        REPORT["bbox_measurement"] = {"synthetic": True, "cases": measured}
+        self.assertEqual(set(measured), set(cases))
+
     def test_cancel_stops_the_real_parser_and_stores_nothing(self):
         doc, job = self.upload_and_queue(synthetic_pdf.build(150))
         result = {}
