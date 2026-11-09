@@ -1,18 +1,23 @@
-"""Consumer for ``document.parse`` jobs (PM plan item 5, Refs #7).
+"""Consumer for ``document.parse`` jobs (PM plan item 5, Refs #7). See docs/PARSE_WORKER.md.
 
-One blocking call, ``process_parse_job``, claims a queued job with a fenced lease, reads
-the document's original bytes, runs the parser in its resource-bounded child while a
-heartbeat keeps the lease alive, and hands the normalized batch to ``persist``. The job is
-marked succeeded only after ``persist`` returned; there is no default persistence, so the
+``process_parse_job`` claims a queued job with a fenced lease, reads the document's
+original bytes, runs the parser in its resource-bounded child while a heartbeat (on its own
+connection) keeps the lease alive and watches for cancellation, and then stores the result
+and marks the job succeeded in ONE transaction (``jobs.finish(..., hook=persist)``).
+
+Persist contract: ``persist(conn, project_id, lease, batch)`` runs inside that transaction,
+after the lease check, with the job row locked and still ``running`` under ``lease``. It must
+be idempotent on (job_id, operation_id) and write only through ``conn``. If it raises, nothing
+is stored and the job is failed with ``persist_failed``. There is no default persist, so the
 function cannot report success for a result nobody stored.
 
 Failure policy (fixed reason codes, never document or parser text):
-* deterministic problems (unsupported profile or page selection, bad PDF, parser output
-  quarantined, resource exhaustion, artifact unreadable, persistence failed) -> ``failed``;
-* transient ones (timeout, process unavailable, I/O) -> back to ``queued`` while attempts
-  remain, else ``failed``;
-* lease lost or the job cancelled while running -> nothing is persisted and the job is left
-  to whoever now owns it.
+* deterministic problems (unsupported profile or page selection, bad PDF, quarantined parser
+  output, resource exhaustion, unreadable artifact, failed persist, unexpected error) -> ``failed``;
+* transient ones (timeout, process unavailable, I/O) -> ``queued`` while attempts remain, else
+  ``failed``. The caller's loop must back off between attempts; there is no not-before column;
+* lease lost -> nothing is persisted, the new owner decides (``abandoned``);
+* cancel requested -> the child is stopped and the worker acknowledges (``cancelled``).
 """
 from __future__ import annotations
 
@@ -34,6 +39,8 @@ __all__ = ["ParseOutcome", "SUPPORTED_PROFILE", "process_parse_job"]
 
 SUPPORTED_PROFILE = "unstructured-oss-fast"
 _TRANSIENT = {"timeout", "process_unavailable", "inspection_io_failed"}
+_MAX_BEAT_INTERVAL = 2.0   # also the worst-case cancel latency, whatever the lease ttl
+_BEAT_RETRIES = 3
 
 Persist = Callable[[psycopg.Connection, uuid.UUID, jobs.Lease, NormalizedBatch], None]
 
@@ -41,29 +48,55 @@ Persist = Callable[[psycopg.Connection, uuid.UUID, jobs.Lease, NormalizedBatch],
 @dataclass(frozen=True)
 class ParseOutcome:
     job_id: uuid.UUID
-    status: str  # succeeded | failed | queued | abandoned
+    status: str  # succeeded | failed | queued | cancelled | abandoned
     reason: str
 
 
 class _Heartbeat:
-    """Keeps the lease alive; trips ``lost`` when the lease is gone or the job was cancelled."""
+    """Extends the lease on its own connection; trips ``lost`` when the lease is gone or the
+    job is no longer running (cancelled or taken over). Transient errors are retried."""
 
-    def __init__(self, conn, project_id, lease, ttl_seconds):
+    def __init__(self, connect, project_id, lease, ttl_seconds):
         self.lost = threading.Event()
         self._stop = threading.Event()
-        self._conn, self._project, self._lease, self._ttl = conn, project_id, lease, ttl_seconds
+        self._connect, self._project, self._lease, self._ttl = connect, project_id, lease, ttl_seconds
+        self._interval = max(0.05, min(ttl_seconds / 3, _MAX_BEAT_INTERVAL))
         self._thread = threading.Thread(target=self._run, daemon=True)
 
-    def _run(self):
-        while not self._stop.wait(max(0.05, self._ttl / 3)):
+    def _beat_once(self, conn):
+        failures = 0
+        while True:
             try:
-                jobs.heartbeat(self._conn, self._project, self._lease, self._ttl)
+                if conn is None:
+                    conn = self._connect()
+                jobs.heartbeat(conn, self._project, self._lease, self._ttl)
+                return conn
             except jobs.LeaseLost:
-                self.lost.set()  # includes cancel_requested: the job is no longer running
-                return
+                raise
             except Exception:
-                self.lost.set()
-                return
+                failures += 1
+                try:
+                    if conn is not None:
+                        conn.close()
+                except Exception:
+                    pass
+                conn = None
+                if failures >= _BEAT_RETRIES or self._stop.wait(0.2):
+                    raise
+
+    def _run(self):
+        conn = None
+        try:
+            while not self._stop.wait(self._interval):
+                conn = self._beat_once(conn)
+        except Exception:
+            self.lost.set()
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
     def __enter__(self):
         self._thread.start()
@@ -79,6 +112,13 @@ def _fail(conn, project_id, lease, code) -> ParseOutcome:
     return ParseOutcome(lease.job_id, "failed", code)
 
 
+def _stopped(conn, project_id, job_id) -> ParseOutcome:
+    """The lease is gone while we ran: acknowledge a cancel, otherwise leave it to the new owner."""
+    if jobs.acknowledge_cancel(conn, project_id, job_id):
+        return ParseOutcome(job_id, "cancelled", "cancel_acknowledged")
+    return ParseOutcome(job_id, "abandoned", "lease_lost")
+
+
 def process_parse_job(
     conn: psycopg.Connection,
     project_id: uuid.UUID,
@@ -88,13 +128,37 @@ def process_parse_job(
     persist: Persist,
     worker: str,
     max_pdf_bytes: int,
+    connect: Callable[[], psycopg.Connection],
     ttl_seconds: int = 60,
     python: str | None = None,
     run: Callable[..., NormalizedBatch] = run_unstructured_fast,
 ) -> ParseOutcome:
-    """Claim and execute one parse job. Raises ``jobs.LeaseUnavailable`` if it is not claimable."""
-    lease = jobs.acquire(conn, project_id, job_id, worker, ttl_seconds)
-    with conn.transaction():  # never leave an implicit transaction open under the heartbeat thread
+    """Claim and execute one parse job. Raises ``jobs.LeaseUnavailable`` if it is not claimable.
+
+    ``connect`` opens a second connection for the heartbeat thread (``conn`` is never shared
+    across threads). Every path after the claim ends in a terminal or requeued job, or in
+    ``abandoned`` when the lease is already gone; a job whose lease expired with attempts used
+    up is finalized as ``failed(lease_exhausted)`` the next time anyone asks to claim it."""
+    try:
+        lease = jobs.acquire(conn, project_id, job_id, worker, ttl_seconds)
+    except jobs.LeaseUnavailable:
+        jobs.fail_exhausted(conn, project_id, job_id)
+        raise
+    try:
+        return _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect,
+                        ttl_seconds, python, run)
+    except jobs.LeaseLost:
+        return _stopped(conn, project_id, job_id)
+    except Exception:
+        try:
+            return _fail(conn, project_id, lease, "internal_error")
+        except jobs.LeaseLost:
+            return _stopped(conn, project_id, job_id)
+
+
+def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, ttl_seconds, python, run):
+    job_id = lease.job_id
+    with conn.transaction():  # no implicit transaction may stay open across the parse
         row = conn.execute(
             """
             SELECT p.profile, p.page_selection, p.budget_ref, p.operation_id,
@@ -125,7 +189,7 @@ def process_parse_job(
     if hashlib.sha256(data).hexdigest() != doc_sha:
         return _fail(conn, project_id, lease, "artifact_unreadable")
 
-    with _Heartbeat(conn, project_id, lease, ttl_seconds) as beat:
+    with _Heartbeat(connect, project_id, lease, ttl_seconds) as beat:
         try:
             batch = run(data, python=python, cancelled=beat.lost.is_set, document_id=str(doc_id),
                         budget_ref=budget_ref or "unbudgeted", operation_id=str(operation_id))
@@ -133,7 +197,7 @@ def process_parse_job(
         except InspectionError as exc:
             batch, error = None, exc.code
     if beat.lost.is_set() or error == "cancelled":
-        return ParseOutcome(job_id, "abandoned", "lease_lost_or_cancelled")
+        return _stopped(conn, project_id, job_id)
     if error is not None:
         if error in _TRANSIENT and attempt < max_attempts:
             jobs.finish(conn, project_id, lease, "queued", error)
@@ -142,10 +206,10 @@ def process_parse_job(
     if batch.quarantine_reason is not None:
         return _fail(conn, project_id, lease, "quarantined:" + batch.quarantine_reason)
     try:
-        persist(conn, project_id, lease, batch)
+        jobs.finish(conn, project_id, lease, "succeeded", "parsed",
+                    hook=lambda c: persist(c, project_id, lease, batch))
     except jobs.LeaseLost:
-        return ParseOutcome(job_id, "abandoned", "lease_lost_or_cancelled")
+        raise
     except Exception:
         return _fail(conn, project_id, lease, "persist_failed")
-    jobs.finish(conn, project_id, lease, "succeeded", "parsed")
     return ParseOutcome(job_id, "succeeded", "parsed")

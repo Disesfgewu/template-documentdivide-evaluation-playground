@@ -56,10 +56,20 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.client = TestClient(create_app(settings=settings, checks={}))
         self.secret = get_signing_secret(settings)
         self.store = LocalArtifactStore(self.root)
-        self.persisted = []
+        with self.connect() as c, c.transaction():
+            c.execute("CREATE TABLE IF NOT EXISTS persisted_results (job_id uuid NOT NULL, lease_token bigint NOT NULL)")
+            c.execute("TRUNCATE persisted_results")
 
     def persist(self, conn, project, lease, batch):
-        self.persisted.append((project, lease.job_id, lease.token, batch))
+        """Stands in for the real persistence: asserts the contract, writes through ``conn``."""
+        status, token = conn.execute("SELECT status::text, lease_token FROM jobs WHERE id = %s",
+                                     (lease.job_id,)).fetchone()
+        assert (status, token) == ("running", lease.token), (status, token)
+        conn.execute("INSERT INTO persisted_results VALUES (%s, %s)", (lease.job_id, lease.token))
+
+    def persisted_count(self):
+        with self.connect() as c:
+            return c.execute("SELECT count(*) FROM persisted_results").fetchone()[0]
 
     def headers(self, actor, **extra):
         return {"Authorization": f"Bearer {issue_actor_token(actor, self.secret)}", **extra}
@@ -77,11 +87,11 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual(res.status_code, 202, res.text)
         return project, uuid.UUID(res.json()["job_id"])
 
-    def process(self, project, job, run, ttl=60, persist=None):
+    def process(self, project, job, run, ttl=60, persist=None, connect=None):
         with self.connect() as c:
             return process_parse_job(c, project, job, store=self.store, persist=persist or self.persist,
                                      worker="test-worker", max_pdf_bytes=64 * 1024 * 1024,
-                                     ttl_seconds=ttl, run=run)
+                                     connect=connect or self.connect, ttl_seconds=ttl, run=run)
 
     def job_state(self, job):
         with self.connect() as c:
@@ -101,8 +111,7 @@ class ParseWorkerRealDbTests(FreshDatabase):
         seen = []
         outcome = self.process(project, job, self.ok_run(seen))
         self.assertEqual((outcome.status, outcome.reason), ("succeeded", "parsed"))
-        self.assertEqual(len(self.persisted), 1)
-        self.assertEqual(self.persisted[0][1], job)
+        self.assertEqual(self.persisted_count(), 1)
         self.assertGreater(seen[0][0], 100)  # the real uploaded bytes reached the parser
         status, attempt, reasons = self.job_state(job)
         self.assertEqual((status, attempt), ("succeeded", 1))
@@ -115,7 +124,7 @@ class ParseWorkerRealDbTests(FreshDatabase):
         run = self.ok_run(seen := [])
         outcome = self.process(project, job, run)
         self.assertEqual((outcome.status, outcome.reason), ("failed", "profile_unsupported"))
-        self.assertEqual((seen, self.persisted), ([], []))
+        self.assertEqual((seen, self.persisted_count()), ([], 0))
 
     def test_partial_page_selection_is_failed_and_the_full_range_is_accepted(self):
         project, job = self.queue({"page_selection": [0, 5]})
@@ -128,7 +137,7 @@ class ParseWorkerRealDbTests(FreshDatabase):
         project, job = self.queue()
         outcome = self.process(project, job, lambda data, **kw: SimpleNamespace(quarantine_reason="invalid_unstructured_output"))
         self.assertEqual((outcome.status, outcome.reason), ("failed", "quarantined:invalid_unstructured_output"))
-        self.assertEqual(self.persisted, [])
+        self.assertEqual(self.persisted_count(), 0)
 
     def test_transient_error_requeues_until_attempts_run_out(self):
         project, job = self.queue()
@@ -153,13 +162,13 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual((outcome.status, outcome.reason), ("failed", "child_failed"))
         self.assertEqual(self.job_state(job)[:2], ("failed", 1))
 
-    def test_cancel_while_running_stops_the_parser_and_persists_nothing(self):
+    def test_cancel_while_running_stops_the_parser_acknowledges_and_persists_nothing(self):
         project, job = self.queue()
         started = threading.Event()
 
         def run(data, cancelled, **kw):
             started.set()
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 if cancelled():
                     raise InspectionError("cancelled")
@@ -170,16 +179,91 @@ class ParseWorkerRealDbTests(FreshDatabase):
             started.wait(10)
             with self.connect() as c, c.transaction():
                 c.execute("SELECT set_config('lab.transition_reason', 'user cancel', true)")
-                c.execute("UPDATE jobs SET status = 'cancel_requested', lease_owner = NULL, lease_token = NULL, row_version = row_version + 1, "
-                          "lease_expires_at = NULL WHERE id = %s", (job,))
+                # The jobs CHECK allows a lease only on 'running', so a cancel request drops it.
+                c.execute("UPDATE jobs SET status = 'cancel_requested', lease_owner = NULL, lease_token = NULL, "
+                          "lease_expires_at = NULL, row_version = row_version + 1 WHERE id = %s", (job,))
 
         t = threading.Thread(target=cancel)
         t.start()
-        outcome = self.process(project, job, run, ttl=1)
+        began = time.monotonic()
+        outcome = self.process(project, job, run)  # default 60 s ttl: latency must not scale with it
+        elapsed = time.monotonic() - began
         t.join(10)
-        self.assertEqual((outcome.status, outcome.reason), ("abandoned", "lease_lost_or_cancelled"))
-        self.assertEqual(self.persisted, [])
-        self.assertEqual(self.job_state(job)[0], "cancel_requested")
+        self.assertEqual((outcome.status, outcome.reason), ("cancelled", "cancel_acknowledged"))
+        self.assertLess(elapsed, 8)
+        self.assertEqual(self.persisted_count(), 0)
+        self.assertEqual(self.job_state(job)[0], "cancelled")
+
+    def test_a_run_that_raises_anything_fails_the_job_instead_of_leaving_it_running(self):
+        project, job = self.queue()
+
+        def boom(data, **kw):
+            raise RuntimeError("unexpected")
+
+        outcome = self.process(project, job, boom)
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "internal_error"))
+        self.assertEqual(self.job_state(job)[0], "failed")
+
+    def test_losing_the_lease_to_another_worker_abandons_without_persisting(self):
+        project, job = self.queue()
+
+        def run(data, cancelled, **kw):
+            with self.connect() as c, c.transaction():  # another worker takes the job over
+                c.execute("UPDATE jobs SET lease_token = lease_token + 1000, lease_owner = 'thief', "
+                          "row_version = row_version + 1 WHERE id = %s", (job,))
+            deadline = time.monotonic() + 20
+            while not cancelled() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            raise InspectionError("cancelled")
+
+        outcome = self.process(project, job, run)
+        self.assertEqual((outcome.status, outcome.reason), ("abandoned", "lease_lost"))
+        self.assertEqual(self.persisted_count(), 0)
+        self.assertEqual(self.job_state(job)[0], "running")  # the thief owns it now
+
+    def test_takeover_after_a_crash_runs_once_and_the_stale_writer_is_fenced(self):
+        project, job = self.queue()
+        with self.connect() as c:
+            stale = jobs.acquire(c, project, job, "crashed-worker", ttl_seconds=1)  # never finishes
+        time.sleep(1.4)
+        outcome = self.process(project, job, self.ok_run())
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(self.job_state(job)[:2], ("succeeded", 2))
+        self.assertEqual(self.persisted_count(), 1)
+        calls = []
+        with self.connect() as c, self.assertRaises(jobs.LeaseLost):
+            jobs.finish(c, project, stale, "succeeded", "late", hook=lambda conn: calls.append(1))
+        self.assertEqual((calls, self.persisted_count()), ([], 1))
+
+    def test_a_job_whose_attempts_are_used_up_by_crashes_is_finalized_not_stuck(self):
+        project, job = self.queue()
+        for n in range(3):
+            with self.connect() as c:
+                jobs.acquire(c, project, job, f"crashed-{n}", ttl_seconds=1)
+            time.sleep(1.3)
+        self.assertEqual(self.job_state(job)[:2], ("running", 3))
+        with self.assertRaises(jobs.LeaseUnavailable):
+            self.process(project, job, self.ok_run())
+        status, attempt, reasons = self.job_state(job)
+        self.assertEqual((status, attempt, reasons[-1]), ("failed", 3, "lease_exhausted"))
+
+    def test_a_failed_heartbeat_connection_is_retried(self):
+        project, job = self.queue()
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise ConnectionError("transient")
+            return self.connect()
+
+        def slow(data, **kw):
+            time.sleep(4.5)
+            return GOOD
+
+        outcome = self.process(project, job, slow, ttl=2, connect=flaky)
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertGreaterEqual(len(calls), 2)
 
     def test_heartbeat_keeps_a_short_lease_alive_during_a_long_parse(self):
         project, job = self.queue()
@@ -196,11 +280,13 @@ class ParseWorkerRealDbTests(FreshDatabase):
         project, job = self.queue()
 
         def broken(conn, project, lease, batch):
-            raise RuntimeError("disk full")
+            conn.execute("INSERT INTO persisted_results VALUES (%s, %s)", (lease.job_id, lease.token))
+            raise RuntimeError("crash after the write, before the status change")
 
         outcome = self.process(project, job, self.ok_run(), persist=broken)
         self.assertEqual((outcome.status, outcome.reason), ("failed", "persist_failed"))
         self.assertEqual(self.job_state(job)[0], "failed")
+        self.assertEqual(self.persisted_count(), 0)  # the write rolled back with the status change
 
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
