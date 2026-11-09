@@ -88,3 +88,7 @@ Regressions use hand-built PDFs with a correct xref (`/Count` below and above
 `/Kids`, one page object listed three times) and an honest control. Related
 Issue #7. The non-zero exit versus signal distinction (resource kills) is
 unchanged and still reported as `child_failed`.
+
+## Result schema 2 and the upload path
+
+The child result is `isolated-geometry-2`: each page also carries `page_label` (`null` or a string of at most 64 characters, from `/PageLabels`), so the page rows can be written from the child's output alone. `lab_parser.artifacts.inspect_pdf_isolated(data, limits)` wraps the cheap checks (size, empty, `%PDF-` header) and the child, and returns an `ImportResult` with fixed reason codes plus the pages. Both the artifact ingest hook and the authenticated upload (`lab_api.documents._upload_core`) use it, so untrusted PDF structure is no longer parsed in the API process. Child failures map to `corrupt_pdf`, `encrypted_pdf`, `page_limit_exceeded`, `inspection_timeout` and `inspection_failed`; the last two answer 422 `invalid_pdf` with the reason in `details`. Any pypdf warning (for example a repaired xref) is an invalid PDF, so the earlier "flagged" 201 outcome no longer exists; `flagged` stays in the response body as `false` and `warnings` as `[]` for contract stability.

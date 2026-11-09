@@ -30,6 +30,7 @@ import lab_db.ingest
 from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
 from lab_api.documents import get_db
+from lab_parser.isolation import InspectionError
 from lab_api.main import create_app
 from lab_api.readiness import connect
 from lab_db.lineage import walk
@@ -675,8 +676,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             raise AssertionError("a replay must not run the parser again")
 
         # 1. Replay touches neither the inspector nor the geometry extractor.
-        with patch("lab_api.documents.inspect_pdf", side_effect=forbidden), \
-                patch("lab_api.documents.extract_pages", side_effect=forbidden):
+        with patch("lab_api.documents.inspect_pdf_isolated", side_effect=forbidden):
             replay = self.client.post(url, headers={**headers, "X-Request-Id": "req-replay"}, content=enc)
         self.assertEqual(replay.status_code, 422)
         self.assertEqual(
@@ -688,7 +688,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         accepting = types.SimpleNamespace(
             outcome="accept", reason=None, sha256="0" * 64, size_bytes=1, page_count=1, warnings=()
         )
-        with patch("lab_api.documents.inspect_pdf", return_value=accepting):
+        with patch("lab_api.documents.inspect_pdf_isolated", return_value=(accepting, ())):
             changed = self.client.post(url, headers=headers, content=enc)
         self.assertEqual(changed.status_code, 422)
         self.assertEqual(changed.json()["error"]["code"], "unsupported_encryption")
@@ -702,21 +702,21 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                     cur.execute(f"SELECT count(*) AS cnt FROM {table} WHERE project_id = %s{extra}", (project_id,))
                     self.assertEqual(cur.fetchone()["cnt"], 1, table)
 
-    def test_success_replay_is_the_stored_original_including_flags_and_warnings(self) -> None:
-        """A flagged upload (repaired xref) answered 201 with flagged/warnings;
-        its replay must carry the same fields, not a reconstruction without them."""
+    def test_success_replay_is_the_stored_original(self) -> None:
+        """The replay of an accepted upload carries the stored original response, not a
+        reconstruction from rows, and does not run the inspector again."""
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
         headers = {"Authorization": f"Bearer {issue_actor_token(owner_id, self.secret)}",
-                   "Content-Type": "application/pdf", "Idempotency-Key": "flagged-replay-1"}
-        url = f"/api/v1/documents?project_id={project_id}&logical_id=doc-flagged"
-        pdf = bad_pdfs.build("bad_xref")
+                   "Content-Type": "application/pdf", "Idempotency-Key": "success-replay-1"}
+        url = f"/api/v1/documents?project_id={project_id}&logical_id=doc-replay"
 
-        first = self.client.post(url, headers=headers, content=pdf)
+        first = self.client.post(url, headers=headers, content=self.f01_21)
         self.assertEqual(first.status_code, 201, first.text)
         original = first.json()
-        self.assertTrue(original["flagged"])
-        self.assertTrue(original["warnings"])
+        self.assertIs(original["flagged"], False)
+        self.assertEqual(original["warnings"], [])
+        self.assertEqual(original["page_count"], 21)
 
         with self.connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -725,11 +725,44 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual([r["http_status"] for r in saved], [201])
         self.assertEqual(self._decode_jsonb(saved[0]["response_body"]), original)
 
-        with patch("lab_api.documents.inspect_pdf", side_effect=AssertionError("replay must not re-inspect")):
-            replay = self.client.post(url, headers=headers, content=pdf)
+        with patch("lab_api.documents.inspect_pdf_isolated", side_effect=AssertionError("replay must not re-inspect")):
+            replay = self.client.post(url, headers=headers, content=self.f01_21)
         self.assertEqual(replay.status_code, 200)
         self.assertEqual({k: v for k, v in replay.json().items() if k != "replayed"}, original)
         self.assertIs(replay.json()["replayed"], True)
+
+    def test_repaired_xref_is_rejected_as_corrupt_pdf_and_publishes_nothing(self) -> None:
+        """Behaviour change with the isolation child: any pypdf warning is an invalid PDF,
+        so the former 'flagged' 201 for a repaired xref is now a 422 corrupt_pdf with no
+        document version and no artifact."""
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        headers = {"Authorization": f"Bearer {issue_actor_token(owner_id, self.secret)}",
+                   "Content-Type": "application/pdf"}
+        res = self.client.post(f"/api/v1/documents?project_id={project_id}&logical_id=doc-xref",
+                               headers=headers, content=bad_pdfs.build("bad_xref"))
+        self.assertEqual(res.status_code, 422, res.text)
+        self.assertEqual(res.json()["error"]["code"], "corrupt_pdf")
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT count(*) AS cnt FROM document_versions WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
+
+    def test_lying_page_count_is_rejected_before_any_version_exists(self) -> None:
+        """/Count says 1 while /Kids lists 3: pypdf and PDFium disagree, so the upload fails closed."""
+        from tests.parser.test_isolation import crafted
+        with self.connect() as conn:
+            project_id, owner_id = self.make_project(conn, role="owner")
+        headers = {"Authorization": f"Bearer {issue_actor_token(owner_id, self.secret)}",
+                   "Content-Type": "application/pdf"}
+        res = self.client.post(f"/api/v1/documents?project_id={project_id}&logical_id=doc-lie",
+                               headers=headers, content=crafted(3, 1, True))
+        self.assertEqual(res.status_code, 422, res.text)
+        self.assertEqual(res.json()["error"]["code"], "corrupt_pdf")
+        with self.connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT count(*) AS cnt FROM document_versions WHERE project_id = %s", (project_id,))
+                self.assertEqual(cur.fetchone()["cnt"], 0)
 
     def test_failed_operation_without_a_saved_result_is_not_recomputed(self) -> None:
         """An operation that failed before 0009 has no saved response: the
@@ -751,7 +784,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                     (project_id, request_hash, op_id),
                 )
         token = issue_actor_token(owner_id, self.secret)
-        with patch("lab_api.documents.inspect_pdf", side_effect=AssertionError("must not re-parse")):
+        with patch("lab_api.documents.inspect_pdf_isolated", side_effect=AssertionError("must not re-parse")):
             res = self.client.post(
                 f"/api/v1/documents?project_id={project_id}&logical_id={logical_id}",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/pdf",
@@ -762,8 +795,8 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(res.json()["error"]["code"], "conflict")
         self.assertIn("not retained", res.json()["error"]["message"])
 
-    def test_invalid_page_geometry_rejection_and_atomic_replay_in_real_db(self) -> None:
-        """Invalid page geometry persists failure without outbox; replay returns original 422, changed body is 409."""
+    def test_isolation_child_rejection_is_persisted_and_replayed_atomically_in_real_db(self) -> None:
+        """A PDF the isolation child rejects persists the failure without outbox; replay returns the original 422, changed body is 409."""
         with self.connect() as conn:
             project_id, owner_id = self.make_project(conn, role="owner")
             reviewer_id = self.add_member(conn, project_id, role="reviewer")
@@ -773,10 +806,10 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         rev_token = issue_actor_token(reviewer_id, self.secret)
         other_token = issue_actor_token(other_id, self.secret)
 
-        def failing_extract_pages(*args, **kwargs):
-            raise ValueError("corrupted font dictionary / invalid page geometry")
+        def failing_child(*args, **kwargs):
+            raise InspectionError("invalid_pdf")
 
-        with patch("lab_api.documents.extract_pages", side_effect=failing_extract_pages):
+        with patch("lab_parser.artifacts.inspect_geometry", side_effect=failing_child):
             res_bad_geom = self.client.post(
                 f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
                 headers={
@@ -787,15 +820,9 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 content=self.f01_1,
             )
             self.assertEqual(res_bad_geom.status_code, 422)
-            self.assertEqual(res_bad_geom.json()["error"]["code"], "invalid_page_geometry")
-            self.assertEqual(
-                res_bad_geom.json()["error"]["message"],
-                "failed to parse page geometry from PDF",
-            )
-            self.assertEqual(
-                res_bad_geom.json()["error"]["details"],
-                {"error": "ValueError"},
-            )
+            self.assertEqual(res_bad_geom.json()["error"]["code"], "corrupt_pdf")
+            self.assertEqual(res_bad_geom.json()["error"]["message"], "document rejected: corrupt_pdf")
+            self.assertEqual(res_bad_geom.json()["error"]["details"]["reason"], "corrupt_pdf")
 
         # Verify PostgreSQL audit and that rejection did NOT create outbox records
         with self.connect() as conn:
@@ -807,7 +834,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 audit_row = cur.fetchone()
                 self.assertIsNotNone(audit_row)
                 self.assertEqual(audit_row["outcome"], "failed")
-                self.assertEqual(audit_row["reason"], "invalid_page_geometry")
+                self.assertEqual(audit_row["reason"], "corrupt_pdf")
 
                 cur.execute(
                     "SELECT count(*) AS cnt FROM outbox_events WHERE project_id = %s",
@@ -816,7 +843,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 self.assertEqual(cur.fetchone()["cnt"], 0)
 
         # 1. Identical request with same Idempotency-Key replays original 422 and exact response
-        with patch("lab_api.documents.extract_pages", side_effect=failing_extract_pages):
+        with patch("lab_parser.artifacts.inspect_geometry", side_effect=failing_child):
             res_replay = self.client.post(
                 f"/api/v1/documents?project_id={project_id}&logical_id=doc-geom",
                 headers={
@@ -827,7 +854,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
                 content=self.f01_1,
             )
             self.assertEqual(res_replay.status_code, 422)
-            self.assertEqual(res_replay.json()["error"]["code"], "invalid_page_geometry")
+            self.assertEqual(res_replay.json()["error"]["code"], "corrupt_pdf")
             self.assertEqual(
                 res_replay.json()["error"]["message"],
                 res_bad_geom.json()["error"]["message"],

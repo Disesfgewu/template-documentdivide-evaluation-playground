@@ -268,7 +268,7 @@ class IsolatedGeometryTests(unittest.TestCase):
     def test_actual_bootstrap_file_limit_and_no_partial_result(self):
         # The result's JSON exceeds RLIMIT_FSIZE; the child exits unsuccessfully.
         self.assert_code("child_failed", self._run_fault,
-                         " class P:\n  page_index=0; rotation=0; display_width_pt='x'*10000; display_height_pt=1\n return [P()]\n",
+                         " class P:\n  page_index=0; page_label=None; rotation=0; display_width_pt='x'*10000; display_height_pt=1\n return [P()]\n",
                          ProcessLimits(output_bytes=1024))
 
     def test_wall_timeout_and_cancellation_reap(self):
@@ -304,7 +304,7 @@ class IsolatedGeometryTests(unittest.TestCase):
                 f" try: os.write({descriptor}, b'leak')\n"
                 " except OSError: pass\n"
                 " else: raise AssertionError\n"
-                " class P:\n  page_index=0; rotation=0; display_width_pt=2; display_height_pt=3\n return [P()]\n"
+                " class P:\n  page_index=0; page_label=None; rotation=0; display_width_pt=2; display_height_pt=3\n return [P()]\n"
             )
             try:
                 with patch.dict(os.environ, {"LAB_SECRET_CANARY": "secret", "PYTHONPATH": "BAD"}):
@@ -314,15 +314,30 @@ class IsolatedGeometryTests(unittest.TestCase):
             finally:
                 os.close(descriptor)
 
+    def test_page_labels_come_back_from_the_child(self):
+        from pypdf import PdfWriter
+        writer = PdfWriter()
+        for _ in range(3):
+            writer.add_blank_page(100, 100)
+        writer.set_page_label(0, 1, style="/r")           # i, ii
+        writer.set_page_label(2, 2, style="/D", prefix="A-")  # A-1
+        buffer = io.BytesIO(); writer.write(buffer)
+        result = inspect_geometry(buffer.getvalue())
+        self.assertEqual([p.page_label for p in result.pages], ["i", "ii", "A-1"])
+        self.assertEqual([p.page_label for p in inspect_geometry(self.pdf).pages], [None, None])
+
     def test_result_validator_rejects_ambiguous_and_nonfinite_metadata(self):
         digest = hashlib.sha256(self.pdf).hexdigest()
-        valid = {"schema_version": "isolated-geometry-1", "sha256": digest, "size_bytes": len(self.pdf),
-                 "pages": [{"page_index": 0, "rotation": 0, "width_pt": 1, "height_pt": 1}]}
+        valid = {"schema_version": "isolated-geometry-2", "sha256": digest, "size_bytes": len(self.pdf),
+                 "pages": [{"page_index": 0, "page_label": None, "rotation": 0, "width_pt": 1, "height_pt": 1}]}
         bad = [b'{"error":"invalid_pdf","error":"encrypted_pdf"}', b'{"error":[]}',
                b'{"error":"CANARY-secret"}', b'[]', b'\xff', b'{"error":NaN}']
         for change in ({"sha256": "0"*64}, {"size_bytes": True}, {"extra": 1},
-                       {"pages": []}, {"pages": [{"page_index": 0, "rotation": False, "width_pt": 1, "height_pt": 1}]},
-                       {"pages": [{"page_index": 0, "rotation": 0, "width_pt": float("inf"), "height_pt": 1}]}):
+                       {"pages": []}, {"pages": [{"page_index": 0, "page_label": None, "rotation": False, "width_pt": 1, "height_pt": 1}]},
+                       {"pages": [{"page_index": 0, "page_label": None, "rotation": 0, "width_pt": float("inf"), "height_pt": 1}]},
+                       {"pages": [{"page_index": 0, "page_label": 7, "rotation": 0, "width_pt": 1, "height_pt": 1}]},
+                       {"pages": [{"page_index": 0, "page_label": "x" * 65, "rotation": 0, "width_pt": 1, "height_pt": 1}]},
+                       {"pages": [{"page_index": 0, "rotation": 0, "width_pt": 1, "height_pt": 1}]}):
             bad.append(json.dumps(valid | change).encode())
         for raw in bad:
             with self.subTest(raw=raw):

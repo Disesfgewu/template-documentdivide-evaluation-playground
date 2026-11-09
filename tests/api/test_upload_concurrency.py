@@ -478,7 +478,7 @@ class UploadEndpointDeadlineAndReauthTests(UploadEndpointCase):
 
         with mock.patch.object(documents, "_authorize_upload", authorize_then_revoke), \
                 mock.patch.object(documents, "ingest_document") as ingest, \
-                mock.patch.object(documents, "inspect_pdf") as inspect:
+                mock.patch.object(documents, "inspect_pdf_isolated") as inspect:
             r = TestClient(self.app).post(self.url, content=self.pdf, headers={"Content-Type": "application/pdf"})
         self.assertEqual((r.status_code, r.json()["error"]["code"]), (403, "permission_denied"))
         self.assertEqual(calls, [False, True], "once before the body, once inside the transaction")

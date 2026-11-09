@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import errno
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -32,6 +33,7 @@ __all__ = [
     "PdfArtifactError",
     "IngestedPdfArtifact",
     "ingest_pdf_artifact",
+    "inspect_pdf_isolated",
 ]
 
 OBJECT_VERSION = "1"
@@ -155,6 +157,45 @@ def _read_staged(stage_fd: int, size_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+def _cheap_reject(size_bytes: int, head: bytes, limits: Limits) -> str | None:
+    """Reason for the checks that need no PDF parsing, in the importer's order."""
+    if size_bytes > limits.max_bytes:
+        return "file_too_large"
+    if size_bytes == 0:
+        return "empty_file"
+    stripped = head.lstrip(b" \t\r\n\f\v\0")
+    if len(head) - len(stripped) >= 1024 or not stripped.startswith(b"%PDF-"):
+        return "not_a_pdf"
+    return None
+
+
+def _run_child(data: bytes, sha256: str, limits: Limits) -> tuple[ImportResult, tuple]:
+    size_bytes = len(data)
+    try:
+        inspection = inspect_geometry(data, _process_limits(size_bytes, limits))
+    except InspectionError as exc:
+        return ImportResult(outcome="reject", reason=_CHILD_CODES.get(exc.code, "inspection_failed"),
+                            sha256=sha256, size_bytes=size_bytes, page_count=None, warnings=()), ()
+    return ImportResult(outcome="accept", reason=None, sha256=sha256, size_bytes=size_bytes,
+                        page_count=inspection.page_count, warnings=()), inspection.pages
+
+
+def inspect_pdf_isolated(data: bytes, limits: Limits) -> tuple[ImportResult, tuple]:
+    """Inspect PDF bytes in the isolation child; one inspector for ingest and upload.
+
+    Returns ``(result, pages)``: a reject result (fixed reason code) with no pages,
+    or an accept result whose ``page_count`` is the number pypdf, the geometry
+    extractor and PDFium agree on, with the child's per-page geometry and label.
+    Never raises for a bad PDF; only the cheap checks run in the caller process.
+    """
+    sha256 = hashlib.sha256(data).hexdigest()
+    reason = _cheap_reject(len(data), data[:_HEAD_BYTES], limits)
+    if reason is not None:
+        return ImportResult(outcome="reject", reason=reason, sha256=sha256, size_bytes=len(data),
+                            page_count=None, warnings=()), ()
+    return _run_child(data, sha256, limits)
+
+
 def _inspect_staged_fd(
     stage_fd: int,
     *,
@@ -163,27 +204,15 @@ def _inspect_staged_fd(
     head: bytes,
     limits: Limits,
 ) -> ImportResult:
-    def rejected(reason: str, page_count: int | None = None) -> ImportResult:
+    reason = _cheap_reject(size_bytes, head, limits)
+    if reason is not None:
         return ImportResult(outcome="reject", reason=reason, sha256=sha256, size_bytes=size_bytes,
-                            page_count=page_count, warnings=())
-
-    if size_bytes > limits.max_bytes:
-        return rejected("file_too_large")
-    if size_bytes == 0:
-        return rejected("empty_file")
-    stripped = head.lstrip(b" \t\r\n\f\v\0")
-    if len(head) - len(stripped) >= 1024 or not stripped.startswith(b"%PDF-"):
-        return rejected("not_a_pdf")
+                            page_count=None, warnings=())
     try:
         data = _read_staged(stage_fd, size_bytes)
     except OSError:
         raise PdfArtifactError("artifact_root_unavailable") from None
-    try:
-        inspection = inspect_geometry(data, _process_limits(size_bytes, limits))
-    except InspectionError as exc:
-        return rejected(_CHILD_CODES.get(exc.code, "inspection_failed"))
-    return ImportResult(outcome="accept", reason=None, sha256=sha256, size_bytes=size_bytes,
-                        page_count=inspection.page_count, warnings=())
+    return _run_child(data, sha256, limits)[0]
 
 
 def ingest_pdf_artifact(
