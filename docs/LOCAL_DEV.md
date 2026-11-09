@@ -44,7 +44,7 @@ curl -s localhost:8100/readyz
 curl -s localhost:8081/healthz
 ```
 
-服務的啟動參數與設定細節，請見各服務目錄下的 `README.md`（`services/api/`、`services/parser/`、`services/worker/`、`web/`）。
+服務的啟動參數與設定細節，請見各服務目錄下的 `README.md`（`services/api/`、`services/parser/`、`services/worker/`、`web/`）。容器化執行（API 與 parser service 的非 root Docker runtime 映像）請見 [Docker 執行映像說明](../deploy/README.md)。
 
 `LAB_PROVIDER_MODE=mock` 是本機開發用的路徑，畫面會標示「本機假資料，非真模型」。`real` 模式目前會被拒絕（沒有真 provider adapter，T84 還沒做），不會偷偷退回 mock。
 
