@@ -118,9 +118,10 @@ def parse_in_batches(
     lock = threading.Lock()
 
     codes: dict[str, str] = {}
+    stop = threading.Event()   # set by the first unexpected failure: queued batches then never start a child
 
     def run(pages: Sequence[int], op: str) -> dict[int, _Page]:
-        if cancelled():
+        if cancelled() or stop.is_set():
             raise InspectionError("cancelled")
         if time.monotonic() >= deadline:
             raise InspectionError("timeout")
@@ -132,6 +133,9 @@ def parse_in_batches(
                 raise
             codes[op] = exc.code
             return {p: _failed(exc.code) for p in pages}
+        except BaseException:
+            stop.set()
+            raise
         return _pages_of(batch)
 
     def report(page: int, state: _Page, op: str, attempt: int | None) -> BatchPageReport:
@@ -149,6 +153,7 @@ def parse_in_batches(
             try:
                 got = future.result()
             except BaseException as exc:  # noqa: BLE001 - cancel or an unexpected failure: stop everything
+                stop.set()
                 error = error or exc
                 continue
             with lock:
@@ -160,8 +165,10 @@ def parse_in_batches(
             raise error
 
     first_codes = [codes.get(r.operation_id) for r in results]
-    if first_codes and all(c in TRANSIENT_CODES for c in first_codes) and len(set(first_codes)) == 1:
-        raise InspectionError(first_codes[0])  # nothing worked: a whole-job transient failure, not page failures
+    if first_codes and all(c in TRANSIENT_CODES for c in first_codes):
+        # Nothing worked and every failure was transient (even with different codes): a whole-job
+        # transient failure the consumer can requeue, not page failures.
+        raise InspectionError(first_codes[0])
     coverage = evaluate_coverage(plan, results)
     if len(coverage.failed_pages) + len(coverage.missing_pages) > max_failed_fraction * len(geometry.pages):
         raise PartialParseFailure(sorted(set(coverage.failed_pages) | set(coverage.missing_pages)))

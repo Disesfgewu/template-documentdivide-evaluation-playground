@@ -371,9 +371,26 @@ class ParseWorkerRealDbTests(FreshDatabase):
             raise PartialParseFailure([3, 4])
 
         outcome = self.process(project, job, partial)
-        self.assertEqual((outcome.status, outcome.reason), ("failed", "pages_failed"))
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "pages_failed:2"))   # the count, never content
         self.assertEqual(self.persisted_count(), 0)
         self.assertEqual(self.job_state(job)[:2], ("failed", 1))   # deterministic: not requeued
+
+    def test_a_batch_wide_transient_failure_is_requeued_with_its_own_code(self):
+        from lab_parser.batch_parse import parse_in_batches
+        project, job = self.queue()
+        calls = []
+
+        def failing_batch(data, **kw):
+            calls.append(kw["page_indices"])
+            raise InspectionError("timeout")
+
+        def batched(data, **kw):
+            return parse_in_batches(data, run_batch=failing_batch, **kw)
+
+        outcome = self.process(project, job, batched)
+        self.assertEqual((outcome.status, outcome.reason), ("queued", "timeout"))   # exactly as an unbatched run
+        self.assertEqual(self.job_state(job)[:2], ("queued", 1))
+        self.assertEqual(len(calls), 3)   # 21 pages: three batches, no page-by-page retry
 
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
