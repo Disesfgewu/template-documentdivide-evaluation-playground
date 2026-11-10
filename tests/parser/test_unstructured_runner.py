@@ -27,14 +27,22 @@ PLAIN = {"rotation": 0, "mediabox": [0, 0, 612, 792], "cropbox": [0, 0, 612, 792
 SMALL = {"rotation": 0, "mediabox": [0, 0, 300, 400], "cropbox": [0, 0, 300, 400]}
 
 
-def child_source(version="0.27.36", elements=(ELEMENT,), pages="[True, True]", extra="", geometry=None):
+def full_ink(pages="[True, True]") -> str:
+    """Every page fully inked: nothing is dropped by the render cross-check."""
+    return f"open('ink.json','xb').write(json.dumps({{'grid': 128, 'pages': [['f' * 32] * 128 for _ in {pages}]}}).encode())\n"
+
+
+FULL_INK = full_ink()
+
+
+def child_source(version="0.27.36", elements=(ELEMENT,), pages="[True, True]", extra="", geometry=None, ink=None):
     """A double child. ``geometry`` is what the real child reports per page (default: the two plain
     pages of the standard test PDF); a child that reports none attests nothing."""
     geometry = [PLAIN, SMALL] if geometry is None else geometry
     return ("import json\n"
             f"open('meta.json','xb').write(json.dumps({{'unstructured': {version!r}, 'attestable_pages': {pages}, "
             f"'page_geometry': {geometry!r}}}).encode())\n"
-            f"open('elements.json','xb').write(json.dumps({list(elements)!r}).encode())\n" + extra)
+            f"open('elements.json','xb').write(json.dumps({list(elements)!r}).encode())\n" + (full_ink(pages) if ink is None else ink) + extra)
 
 
 def limited_child(body: str) -> str:
@@ -153,6 +161,33 @@ class RunnerTests(Base):
                 self.assertNotIn(code, second.diagnostics)
                 self.assertEqual(second.status, "ok")
 
+    def test_evidence_with_no_ink_under_its_region_is_dropped_with_its_observation(self):
+        elements = (self.element(1, (612, 792)), self.element(2, (300, 400)))
+        # The test element sits at pixel (40..80, 30..60) of a 612x792 / 300x400 layout; page 1 has no ink at all.
+        blank = ["0" * 32] * 128
+        inked = ["f" * 32] * 128
+        for pages, expect in (([blank, inked], {1}), ([inked, blank], {0}), ([blank, blank], set()), ([inked, inked], {0, 1})):
+            ink = ("open('ink.json','xb').write(json.dumps({'grid': 128, 'pages': " + repr(pages) + "}).encode())\n")
+            with self.subTest(expect):
+                batch = self.run_it(child_source(elements=elements, ink=ink))
+                self.assertEqual({e.regions[0].page_index for e in batch.evidence}, expect)
+                self.assertEqual({o.page_index for o in batch.observations}, expect)
+                for page in batch.result.pages:
+                    has = page.page_index in expect
+                    self.assertEqual(("region_without_ink" in page.diagnostics), not has)
+                    self.assertEqual(page.status, "ok" if has else "needs_review")
+
+    def test_malformed_ink_output_is_refused(self):
+        for ink in ("open('ink.json','xb').write(b'not json')\n",
+                    "open('ink.json','xb').write(json.dumps({'grid': 64, 'pages': []}).encode())\n",
+                    "open('ink.json','xb').write(json.dumps({'grid': 128, 'pages': [None]}).encode())\n"):   # wrong page count
+            with self.subTest(ink), self.assertRaises(InspectionError) as ctx:
+                self.run_it(child_source(ink=ink))
+            self.assertEqual(ctx.exception.code, "invalid_child_result")
+        with self.assertRaises(InspectionError) as ctx:         # no ink.json at all
+            self.run_it(child_source(ink="pass\n"))
+        self.assertEqual(ctx.exception.code, "invalid_child_result")
+
     def test_malformed_unsafe_page_reports_are_refused(self):
         elements = (self.element(1, (612, 792)),)
         for junk in ("'x'", "[[0]]", "[[0, 'other']]", "[[5, 'text_not_visible']]", "[[-1, 'text_not_visible']]",
@@ -188,7 +223,7 @@ class RunnerTests(Base):
         for meta_pages in ("[True, True]",):
             source = ("import json\nopen('meta.json','xb').write(json.dumps({'unstructured': '0.27.36', "
                       f"'attestable_pages': {meta_pages}}}).encode())\n"
-                      f"open('elements.json','xb').write(json.dumps([{el!r}]).encode())\n")
+                      f"open('elements.json','xb').write(json.dumps([{el!r}]).encode())\n" + FULL_INK)
             batch = self.run_it(source)
             self.assertEqual((len(batch.evidence), len(batch.observations)), (0, 1))
             for junk in ("'x'", "{}", "None"):
@@ -240,7 +275,7 @@ class RunnerTests(Base):
     def test_garbage_elements_are_quarantined(self):
         batch = self.run_it("import json\n"
                             "open('meta.json','xb').write(json.dumps({'unstructured': '0.27.36', 'attestable_pages': [True, True]}).encode())\n"
-                            "open('elements.json','xb').write(b'not json')\n")
+                            "open('elements.json','xb').write(b'not json')\n" + FULL_INK)
         self.assertEqual(batch.quarantine_reason, "invalid_unstructured_output")
         self.assertEqual(len(batch.evidence), 0)
 

@@ -61,6 +61,16 @@ def _hidden_text_pages(path: str) -> list[list]:
     return module.scan_document(PdfReader(path, strict=True))
 
 
+def _ink_maps(path: str) -> list:
+    """Per page an occupancy map of what PDFium renders (see ``_ink``), or None when it cannot be rendered."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_ink", Path(__file__).with_name("_ink.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.document_ink(path)
+
+
 def _pages_with_lost_text(path: str, elements: list) -> list[int]:
     """0-based pages with real pypdf text, but only when Unstructured returned NO element at all.
 
@@ -118,6 +128,11 @@ def main() -> int:
         info = _page_info(source)
         lost = _pages_with_lost_text(source, json.loads(payload))
         unsafe = _hidden_text_pages(source)
+        ink = _ink_maps(source)
+        flagged = {i for i, _ in unsafe}
+        # A page PDFium cannot render within the caps cannot be cross-checked: fail closed like unparseable content.
+        unsafe += [[i, "content_unparseable"] for i, rows in enumerate(ink) if rows is None and i not in flagged]
+        unsafe.sort()
         meta = json.dumps({"unstructured": md.version("unstructured"),
                            "lost_text_pages": lost, "unsafe_text_pages": unsafe,
                            # Text units are intact only for upright (0) and upside-down (180) pages; 90 and
@@ -126,6 +141,8 @@ def main() -> int:
                            "page_geometry": info}).encode("utf-8")
         with open("elements.json", "xb") as stream:
             stream.write(payload)
+        with open("ink.json", "xb") as stream:
+            stream.write(json.dumps({"grid": 128, "pages": ink}, separators=(",", ":")).encode("ascii"))
         with open("meta.json", "xb") as stream:
             stream.write(meta)
         return 0

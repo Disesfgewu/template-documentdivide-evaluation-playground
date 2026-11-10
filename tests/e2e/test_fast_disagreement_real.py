@@ -6,7 +6,8 @@ the report records, per case, the number of elements, pypdf's non-whitespace cha
 and diagnostics, and whether the page was flagged suspect. It asserts that the control page (plain text) is
 parsed with elements and evidence and not flagged, so a broken measurement fails, and (gap G8) that pages with
 invisible text (render mode 3 or 7, alone or next to visible text) are needs_review/text_not_visible with no
-evidence; the other rows are data, not policy.
+evidence, and (G8 (b)) that white text on a white page has no evidence (region_without_ink); the other rows are
+data, not policy.
 Not covered: Type3 fonts and odd encodings (not built here). Runs only with ``LAB_E2E_REAL_UNSTRUCTURED=1``.
 """
 from __future__ import annotations
@@ -65,6 +66,12 @@ CASES = {
     "clip_only_render_mode_7": one_page_pdf(body_ops("7 Tr")),
     "visible_body_plus_invisible_run": one_page_pdf(
         body_ops() + "\nBT 3 Tr /F1 14 Tf 72 300 Td (An invisible run on a page that also has visible text.) Tj ET"),
+    "white_text_on_white_page": one_page_pdf(body_ops("1 g")),
+    "text_clipped_to_a_10pt_square": one_page_pdf("q 0 0 10 10 re W n\n" + body_ops() + "\nQ"),
+    "text_far_outside_the_page": one_page_pdf(
+        "BT /F1 14 Tf 3000 700 Td (This text is far outside the page box so nobody sees it.) Tj ET"),
+    "visible_body_plus_white_run": one_page_pdf(
+        body_ops() + "\nBT 1 g /F1 14 Tf 72 300 Td (A white run on a page that also has visible text.) Tj ET"),
     "grey_diagonal_watermark_only": one_page_pdf(
         "BT 0.9 g /F1 60 Tf 0.7071 0.7071 -0.7071 0.7071 150 200 Tm (SYNTHETIC WATERMARK TEXT FOR THE MEASUREMENT) Tj ET"),
     "watermark_under_body": one_page_pdf(
@@ -109,6 +116,10 @@ class FastDisagreementMeasurement(unittest.TestCase):
             row = rows[name]
             self.assertEqual((row.get("outcome"), row.get("status"), row.get("evidence")), ("parsed", "needs_review", 0), (name, row))
             self.assertIn("text_not_visible", row["diagnostics"], (name, row))
+        # Gap G8 (b): evidence needs rendered ink under its region. White text on a white page has none.
+        white = rows["white_text_on_white_page"]
+        self.assertEqual((white.get("outcome"), white.get("evidence")), ("parsed", 0), white)
+        self.assertIn("region_without_ink", white["diagnostics"], white)
 
 
 if __name__ == "__main__":

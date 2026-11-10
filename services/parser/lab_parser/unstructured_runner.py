@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -37,6 +38,44 @@ _VERSION = "0.27.36"
 # Library imports are large; the geometry child's 512 MiB cannot hold them.
 RUNNER_LIMITS = ProcessLimits(memory_bytes=4 * 1024 * 1024 * 1024, cpu_seconds=60,
                               wall_seconds=120, output_bytes=16 * 1024 * 1024)
+
+
+INK_GRID = 128
+
+
+def _parse_ink(raw: bytes, page_indices: Sequence[int]):
+    """The child's per-page occupancy maps as ``check(page_index, bbox) -> bool`` (True: some ink under the box).
+
+    Strictly validated; a page whose map is ``null`` has no entry (the child also quarantined it)."""
+    try:
+        data = json.loads(raw)
+        maps = data["pages"]
+        if (type(data) is not dict or set(data) != {"grid", "pages"} or data["grid"] != INK_GRID
+                or type(maps) is not list or len(maps) != len(page_indices)):
+            raise ValueError
+        by_page = {}
+        for page_index, rows in zip(page_indices, maps):
+            if rows is None:
+                continue
+            if type(rows) is not list or len(rows) != INK_GRID or any(
+                    type(r) is not str or len(r) != INK_GRID // 4 for r in rows):
+                raise ValueError
+            by_page[page_index] = [int(r, 16) for r in rows]
+    except (ValueError, TypeError, KeyError):
+        raise InspectionError("invalid_child_result") from None
+
+    def has_ink(page_index: int, bbox) -> bool:
+        rows = by_page.get(page_index)
+        if rows is None:
+            return False
+        x0, y0, x1, y1 = bbox
+        # Round outward so that antialiasing at a box edge cannot hide the ink of a real glyph.
+        c0, c1 = max(0, math.floor(x0 * INK_GRID)), min(INK_GRID, math.ceil(x1 * INK_GRID))
+        r0, r1 = max(0, math.floor(y0 * INK_GRID)), min(INK_GRID, math.ceil(y1 * INK_GRID))
+        mask = ((1 << max(0, c1 - c0)) - 1) << c0
+        return any(rows[r] & mask for r in range(r0, r1))
+
+    return has_ink
 
 
 def _read_regular(directory: str, name: str, limit: int) -> bytes:
@@ -106,6 +145,7 @@ def run_unstructured_fast(
                        env={"LANG": "C.UTF-8", "HOME": directory, "TMPDIR": directory})
             raw = _read_regular(directory, "elements.json", limits.output_bytes)
             meta_raw = _read_regular(directory, "meta.json", 4096)
+            ink_raw = _read_regular(directory, "ink.json", limits.output_bytes)
     except InspectionError:
         raise
     except OSError:
@@ -129,6 +169,7 @@ def run_unstructured_fast(
                    or e[1] not in UNSAFE_CODES for e in unsafe_raw)):
         raise InspectionError("invalid_child_result")
     unsafe = {page_indices[e[0]]: e[1] for e in unsafe_raw}   # original page index -> diagnostic
+    ink = _parse_ink(ink_raw, page_indices)
     attestable = meta.get("attestable_pages")
     if (type(attestable) is not list or len(attestable) != len(page_indices)
             or any(type(v) is not bool for v in attestable)):
@@ -174,7 +215,7 @@ def run_unstructured_fast(
     batch = UnstructuredParser().normalize(
         raw, request, manifest, UnstructuredProfile(strategy="fast"),
         document_id=document_id, document_sha256=sha, frames=frames,
-        document_page_count=total_pages)
+        document_page_count=total_pages, ink=ink)
     if unsafe and batch.quarantine_reason is None:
         # The whole page is quarantined (PM-DECISION, gap G8): needs_review with a specific diagnostic, no
         # evidence (no frame above) and no observation, so no hidden run can reach a consumer. The raw

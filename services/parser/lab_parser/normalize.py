@@ -206,7 +206,7 @@ def _capabilities(parser):
 
 
 class _Builder:
-    def __init__(self, raw, req, manifest, document_id, document_sha256, frames, asset_refs, document_page_count):
+    def __init__(self, raw, req, manifest, document_id, document_sha256, frames, asset_refs, document_page_count, ink=None):
         if type(document_page_count) is not int or document_page_count < 1 or any(p >= document_page_count for p in req.page_indices):
             raise ValueError("invalid_document_page_count_or_selection")
         if any(type(p) is not int or not isinstance(f, DisplayFrame) for p, f in frames.items()):
@@ -228,6 +228,7 @@ class _Builder:
         self.document_id, self.document_sha256 = document_id, document_sha256
         self.frames, self.asset_refs = frames, asset_refs
         self.document_page_count = document_page_count
+        self.ink = ink   # optional check(page_index, bbox) -> bool: is there rendered ink under the region?
         self.evidence, self.observations = [], []
         self._evidence_ids: set[str] = set()  # O(1) duplicate check, was a scan of every evidence unit
         self.diagnostics = {p: [] for p in req.page_indices}
@@ -250,6 +251,11 @@ class _Builder:
                 if page not in self.frames:
                     raise ValueError("unattested_coordinate_frame")
                 region = _bbox(bbox)
+                if self.ink is not None and not self.ink(page, region):
+                    # Text with no rendered ink under its box (white on white, off the page, clipped away) is not
+                    # visible to a reader: no evidence and no observation, only a page diagnostic (gap G8 (b)).
+                    self.warn(page, "region_without_ink")
+                    return
                 assets = []
                 for image in images:
                     if image not in self.asset_refs:
@@ -322,8 +328,8 @@ class UnstructuredParser:
     def normalize(self, raw: bytes, request: ParseRequest, manifest: ParseManifest,
                   profile: UnstructuredProfile, *, document_id: str, document_sha256: str,
                   frames: dict[int, DisplayFrame], document_page_count: int,
-                  asset_refs: dict[str, str] | None = None) -> NormalizedBatch:
-        b = _Builder(raw, request, manifest, document_id, document_sha256, frames, asset_refs or {}, document_page_count)
+                  asset_refs: dict[str, str] | None = None, ink=None) -> NormalizedBatch:
+        b = _Builder(raw, request, manifest, document_id, document_sha256, frames, asset_refs or {}, document_page_count, ink)
         if (manifest.parser_name != "unstructured" or manifest.package_or_service_version != profile.version
                 or manifest.output_schema != "unstructured.elements-0.27.36"):
             return b.quarantine("unsupported_unstructured_version_or_schema")
