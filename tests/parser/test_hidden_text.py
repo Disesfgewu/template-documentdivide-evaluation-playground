@@ -170,6 +170,8 @@ class HiddenTextTests(unittest.TestCase):
 
     def test_a_form_xobject_that_is_not_a_stream_is_unparseable(self):
         # /Subtype /Form on a plain dictionary (no stream): not analysable, so not clean (PM P3 on #134).
+        # Note: pypdf itself raises on this shape, so the explicit _stream_or_fail guard is belt and braces; this
+        # test pins the outcome (a mutation that removes only the guard stays green by design).
         pdf = make_pdf("/Fm1 Do", {"Fm1": "BT ET"})
         bad = pdf.replace(b"/Length 5 >>\nstream\nBT ET\nendstream", b">>")
         self.assertNotEqual(pdf, bad)
