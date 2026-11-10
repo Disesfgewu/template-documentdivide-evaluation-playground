@@ -62,6 +62,23 @@ def _partition_directly() -> dict:
             out["child_stderr_tail"] = run.stderr.decode("utf-8", "replace")[-1500:]
             elements = Path(directory, "elements.json")
             out["elements_json"] = elements.read_text()[:600] if elements.exists() else None
+            probe = (
+                "import logging, sys\n"
+                "logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)\n"
+                "from pdfminer.high_level import extract_text\n"
+                "print('pdfminer text:', repr(extract_text('source.pdf')[:200]))\n"
+                "from unstructured.partition.pdf import partition_pdf\n"
+                "els = partition_pdf(filename='source.pdf', strategy='fast')\n"
+                "print('elements:', [(type(e).__name__, e.text) for e in els])\n"
+                "import importlib.util\n"
+                "print('libmagic:', importlib.util.find_spec('magic') is not None)\n"
+            )
+            more = subprocess.run([sys.executable, "-I", "-c", probe], cwd=directory,
+                                  env={"LANG": "C.UTF-8", "HOME": directory, "TMPDIR": directory},
+                                  capture_output=True, timeout=180)
+            out["probe_exit"] = more.returncode
+            out["probe_stdout"] = more.stdout.decode("utf-8", "replace")[-1200:]
+            out["probe_stderr_tail"] = more.stderr.decode("utf-8", "replace")[-2500:]
     except BaseException as exc:  # noqa: BLE001 - a diagnostic must report, not raise
         out["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
     return out
