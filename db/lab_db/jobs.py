@@ -164,15 +164,30 @@ def finish(
         )
 
 
-def release_for_shutdown(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease) -> None:
-    """running -> queued with the reason ``released: worker shutdown``, so the next worker can claim the job at once.
+def release_for_shutdown(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease) -> str:
+    """Give a running job back when its worker shuts down. Returns the job's new status: ``queued`` or ``failed``.
 
-    Only the CURRENT lease holder can do this: it is the same fenced check as ``finish`` (job locked ``FOR UPDATE``,
-    status ``running``, matching token, lease not expired), so a stale holder, a job the user already moved to
-    ``cancel_requested``/``cancelled`` (the cancel wins: it is never requeued), or an expired lease raises
-    ``LeaseLost`` and changes nothing. The lease fields are cleared by the existing guarded transition. It does not
-    undo the attempt: the next acquire counts as attempt + 1 (docs/PARSE_WORKER.md)."""
-    finish(conn, project_id, lease, "queued", "released: worker shutdown")
+    * ``attempt < max_attempts``: running -> queued, reason ``released: worker shutdown``; the next worker claims
+      it at once (it still counts as an attempt: the next acquire is attempt + 1).
+    * ``attempt >= max_attempts`` (the LAST attempt was interrupted): running -> failed, reason ``lease_exhausted``,
+      the same terminal outcome ``fail_exhausted`` gives when a lease expires with no attempts left. Requeueing it
+      would strand a ``queued`` job that ``acquire`` refuses (attempt + 1 > max_attempts) and ``fail_exhausted``
+      never finalizes, blocking the document version until a user cancels.
+
+    Only the CURRENT lease holder can do this: the job is locked ``FOR UPDATE`` and ``finish`` repeats the fenced
+    check (status ``running``, matching token, lease not expired), so a stale holder, an expired lease, or a job the
+    user already moved to ``cancel_requested``/``cancelled`` (the cancel wins) raises ``LeaseLost`` and changes
+    nothing. The lease fields are cleared by the existing guarded transition."""
+    with conn.transaction():
+        row = conn.execute("SELECT attempt, max_attempts FROM jobs WHERE project_id = %s AND id = %s FOR UPDATE",
+                           (project_id, lease.job_id)).fetchone()
+        if row is None:
+            raise LeaseLost(f"job {lease.job_id} not found")
+        if row[0] >= row[1]:
+            finish(conn, project_id, lease, "failed", "lease_exhausted")
+            return "failed"
+        finish(conn, project_id, lease, "queued", "released: worker shutdown")
+        return "queued"
 
 
 class JobNotCancellable(Exception):

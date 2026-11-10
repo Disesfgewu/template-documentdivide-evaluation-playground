@@ -251,7 +251,7 @@ class Worker:
         while pending and not self.abort.is_set() and time.monotonic() < deadline:
             _, pending = wait(pending, timeout=min(0.2, max(0.0, deadline - time.monotonic())))
         if pending:
-            LOG.warning("stopping with %d job(s) still running: cancelling their parsers; leases will expire",
+            LOG.warning("stopping with %d job(s) still running: cancelling their parsers; each is released for the next worker (or, if that fails, its lease expires)",
                         len(pending))
             self.abort.set()
             _, pending = wait(pending, timeout=CANCEL_WAIT_SECONDS)

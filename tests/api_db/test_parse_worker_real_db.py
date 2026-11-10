@@ -504,6 +504,26 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual(self.process(project, job, self.ok_run()).status, "succeeded")
         self.assertEqual(self.job_state(job)[:2], ("succeeded", 5))
 
+    def test_a_release_on_the_last_attempt_fails_the_job_instead_of_stranding_it_queued(self):
+        """PM review of #143 (P1): a shutdown-abort when attempt == max_attempts must end terminal, never 'queued'."""
+        project, job = self.queue()
+        with self.connect() as c:
+            limit = c.execute("SELECT max_attempts FROM jobs WHERE id = %s", (job,)).fetchone()[0]
+        for n in range(1, limit):
+            outcome = self.process(project, job, self.aborted, shutdown=lambda: True)
+            self.assertEqual((outcome.status, outcome.reason), ("queued", "released: worker shutdown"), n)
+        last = self.process(project, job, self.aborted, shutdown=lambda: True)      # the last attempt is interrupted
+        self.assertEqual((last.status, last.reason), ("failed", "lease_exhausted"))
+        status, attempt, reasons = self.job_state(job)
+        self.assertEqual((status, attempt, reasons[-1]), ("failed", limit, "lease_exhausted"))
+        with self.connect() as c, self.assertRaises(jobs.LeaseUnavailable):         # nothing can claim it, and it is terminal
+            jobs.acquire(c, project, job, "late")
+        with self.connect() as c:                                                    # the document version is free again
+            active = c.execute("SELECT count(*) FROM parse_jobs p JOIN jobs j ON j.project_id = p.project_id AND j.id = p.job_id "
+                               "WHERE p.job_id = %s AND j.status::text = ANY(%s)", (job, list(jobs.ACTIVE_JOB_STATUSES))).fetchone()[0]
+        self.assertEqual(active, 0)
+        self.assertEqual(self.persisted_count(), 0)
+
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
         blobs = [p for p in self.root.rglob("*") if p.is_file()]

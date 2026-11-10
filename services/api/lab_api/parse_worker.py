@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import logging
 import threading
 import uuid
 from typing import Callable
@@ -37,6 +38,8 @@ from lab_db.storage import LocalArtifactStore
 from lab_parser.isolation import InspectionError
 from lab_parser.normalize import NormalizedBatch
 from lab_parser.batch_parse import PartialParseFailure, parse_in_batches
+
+LOG = logging.getLogger("lab.parse_worker")
 
 __all__ = ["ParseOutcome", "SUPPORTED_PROFILE", "process_parse_job"]
 
@@ -249,13 +252,15 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
             # holder can (fenced); a user cancel wins (LeaseLost -> _stopped acknowledges it); any other failure
             # falls back to the old behaviour, lease expiry.
             try:
-                jobs.release_for_shutdown(conn, project_id, lease)
+                if jobs.release_for_shutdown(conn, project_id, lease) == "failed":
+                    return ParseOutcome(job_id, "failed", "lease_exhausted")   # the last attempt was interrupted
                 return ParseOutcome(job_id, "queued", "released: worker shutdown")
             except jobs.LeaseLost:
-                pass
+                LOG.info("job %s: shutdown release refused (lease lost or user cancel)", job_id)
             except Exception as exc:
                 if not is_infrastructure(exc):
                     raise
+                LOG.warning("job %s: shutdown release failed (infrastructure); the lease will expire", job_id)
         return _stopped(conn, project_id, job_id)
     if error is not None:
         if error in _TRANSIENT and attempt < max_attempts:
