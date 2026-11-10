@@ -23,6 +23,21 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 
 取消延遲：heartbeat 在自己的連線上最多每 2 秒執行一次（與 lease ttl 無關），同時偵測取消與 lease 遺失；暫時性錯誤重試 3 次才放棄。`jobs` 的 CHECK 只允許 `running` 帶 lease，所以 cancel 請求一定會清掉 lease。
 
+## 使用者取消 API（Refs #7）
+
+`POST /api/v1/jobs/{job_id}/cancel`（`lab_api/jobs.py`、`lab_db.jobs.request_cancel`）。需要角色動作 `import_and_configure_parse`（owner、maintainer）；授權在寫入交易內、鎖住 job 列之後再做一次。
+
+| 結果 | 狀況 |
+|---|---|
+| 200 `{job_id, status, changed}` | `queued`／`paused_budget`／`waiting_review` → `cancelled`（`changed:true`）；`running` 且 lease 有效 → `cancel_requested`（worker 的 heartbeat 最多 2 秒後看到並停止子程序、以 `acknowledge_cancel` 轉 `cancelled`）；`running` 但 lease 已過期（worker 已死）→ 同一交易內直接 `cancelled` |
+| 200 `changed:false` | 已經 `cancelled`，或 `cancel_requested` 且還在寬限內（`CANCEL_ACK_GRACE_SECONDS`＝30 秒）：什麼都不寫。超過寬限仍是 `cancel_requested` 時，重複請求會把它轉成 `cancelled`（卡住的 job 的出路） |
+| 401／404／403 | 未認證；非成員或不存在的 job（兩者都是 404，不洩漏存在與否）；成員但角色不足 |
+| 409 | job 已 `succeeded` 或 `failed`，不能取消 |
+
+- **冪等性靠狀態，不靠 `Idempotency-Key`**：這個端點**忽略** `Idempotency-Key` 標頭；重送同一請求安全，因為第二次會得到 `changed:false`（或 409，若 job 在兩次之間已完成）。
+- **與完成的競態**：取消與 worker 的 `finish()` 都先鎖住 job 列，所以只有兩種結果：worker 先完成 → 取消看到已完成的 job 得 409，結果照常提交；取消先 → lease 被丟棄，worker 晚到的 `finish` 得 `LeaseLost`、結果寫入回滾。兩種順序都有真實 PG 測試（`tests/api_db/test_job_cancel_real_db.py`），但測試只釘住這兩種順序，不證明所有交錯。
+- 每個有效的變更連同其 operation 與 audit 事件（`job.cancel_requested`）在同一交易提交；`changed:false` 不寫任何列。
+
 ## 尚未涵蓋（已知）
 
 - 沒有 not-before／backoff：transient 重排後呼叫端迴圈必須自己退避。
@@ -47,7 +62,7 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 - 公平性：認領順序是 `ORDER BY id`，不保證專案之間公平，一個專案的大量 job 可以排在其他專案前面。
 - `QueryCanceled`（statement／lock timeout）是確定性錯誤：persist 內遇到就是 `failed(persist_failed)`，沒有有界重試。
 - 資料庫連不上時只記固定代碼並在下一輪重試，不會崩潰。
-- 尚未涵蓋：頁數上限、部署（systemd／容器）、多 worker 間的公平性、health endpoint、以及使用者取消 API（目前沒有 HTTP 端點可以送出取消）。
+- 尚未涵蓋：頁數上限、多 worker 間的公平性、health endpoint（容器探針只代表存活，見容器部署一節）。使用者取消 API 見下一節。
 
 ## 批次解析（PM-DECISION B，Refs #7）
 
