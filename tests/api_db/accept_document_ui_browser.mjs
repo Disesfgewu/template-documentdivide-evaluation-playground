@@ -69,45 +69,40 @@ if (!browserPath || !fs.existsSync(browserPath)) {
   process.exit(3);
 }
 
-const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "chrome-ui-accept-"));
+// Browser launch: see browser_launcher.mjs (retry with a fresh profile, every failed attempt recorded).
+import { launchBrowser } from "./browser_launcher.mjs";
 
-const browserProc = spawn(browserPath, [
-  "--headless=new",
-  "--remote-debugging-port=0",
-  "--remote-debugging-address=127.0.0.1",
-  "--disable-gpu",
-  "--no-sandbox",
-  `--user-data-dir=${userDataDir}`,
-]);
-
+let currentAttempt = null;
 let killed = false;
 function cleanup() {
   if (killed) return;
   killed = true;
-  try { browserProc.kill(); } catch {}
-  try { fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {}
+  if (currentAttempt) {
+    try { process.kill(-currentAttempt.proc.pid, "SIGKILL"); } catch {}
+    try { currentAttempt.proc.kill("SIGKILL"); } catch {}
+    try { fs.rmSync(currentAttempt.userDataDir, { recursive: true, force: true }); } catch {}
+  }
 }
 process.on("exit", cleanup);
 process.on("SIGINT", () => { cleanup(); process.exit(1); });
 process.on("SIGTERM", () => { cleanup(); process.exit(1); });
 
-const portPromise = new Promise((resolve, reject) => {
-  const timeout = setTimeout(() => reject(new Error("Browser startup timeout")), 15000);
-  browserProc.stderr.on("data", (data) => {
-    const m = data.toString().match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//);
-    if (m) {
-      clearTimeout(timeout);
-      resolve(m[1]);
-    }
-  });
-  browserProc.on("error", (err) => {
-    clearTimeout(timeout);
-    reject(err);
-  });
+const redactSecrets = (text) => {
+  let out = text;
+  if (token) out = out.split(token).join("[REDACTED_TOKEN]");
+  if (otherToken) out = out.split(otherToken).join("[REDACTED_OTHER_TOKEN]");
+  return out;
+};
+const portPromise = launchBrowser({ browserPath, startupMs: 20000, attempts: 3, redact: redactSecrets }).then((launched) => {
+  currentAttempt = launched.attempt;
+  return launched;
 });
 
 async function run() {
-  const port = await portPromise;
+  const launched = await portPromise;
+  const port = launched.port;
+  const launchRecord = { attempts: launched.attempts, startup_ms: launched.startupMs, failed_attempts: launched.failedAttempts };
+  console.log(`browser started on attempt ${launched.attempts} after ${launched.startupMs} ms`);
 
   // Fetch page target
   const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
@@ -414,6 +409,7 @@ async function run() {
     schema: "document-ui-browser-acceptance-v1",
     profile: "synthetic-f01-21-pages",
     status: "provisional",
+    launch: launchRecord,
     timestamp: new Date().toISOString(),
     browser: {
       product: browserVersion.product || "Chrome",
