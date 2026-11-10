@@ -212,6 +212,22 @@ def check_secrets(root: Path, files: list[Path]) -> list[str]:
     return errors
 
 
+FORBIDDEN_SUFFIXES = (".pem", ".key")
+ALLOWED_ENV_TEMPLATES = (".example",)
+
+
+def check_forbidden_files(root: Path, files: list[Path]) -> list[str]:
+    """Credential-shaped files must never be tracked: ``.env``/``.env.*`` (only ``*.example`` templates are
+    allowed) and ``*.pem``/``*.key``. The file names are reported, never their contents."""
+    errors = []
+    for path in files:
+        name = path.name
+        is_env = name == ".env" or (name.startswith(".env.") and not name.endswith(ALLOWED_ENV_TEMPLATES))
+        if is_env or name.endswith(FORBIDDEN_SUFFIXES):
+            errors.append(f"{path.relative_to(root)}: credential-shaped file is tracked (only *.example templates are allowed)")
+    return errors
+
+
 def run_all(root: Path) -> list[str]:
     files = tracked_files(root)
     errors: list[str] = []
@@ -222,6 +238,7 @@ def run_all(root: Path) -> list[str]:
     errors += check_codeowners(root)
     errors += check_markdown_links(root, files)
     errors += check_secrets(root, files)
+    errors += check_forbidden_files(root, files)
     return errors
 
 
