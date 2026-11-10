@@ -204,6 +204,17 @@ class BatchParseTests(unittest.TestCase):
         self.assertEqual(merged.result.pages[20].status, "needs_review")
         self.assertTrue(all(p.status == "ok" for p in merged.result.pages[:20]))
 
+    def test_hidden_text_pages_count_as_proof_that_elements_existed(self):
+        """Their observations are dropped by the runner; a suspect page elsewhere must not turn that into a 'total loss'."""
+        def behaviour(pages, nth):
+            batch = fake_batch(pages, "doc-batch", f"op{nth}", "b", blank=set(pages))
+            marked = [PageStatus(page_index=p.page_index, status="needs_review",
+                                 diagnostics=[*p.diagnostics, "text_not_visible" if p.page_index % 2 else LOST_TEXT_DIAGNOSTIC])
+                      for p in batch.result.pages]
+            return replace(batch, result=batch.result.model_copy(update={"pages": marked}))
+        merged = self.parse(Recorder(behaviour))
+        self.assertTrue(all(p.status == "needs_review" for p in merged.result.pages))
+
     def test_the_failure_code_does_not_depend_on_the_document_size(self):
         for pdf_pages in (1, 5):
             pdf = build_pdf([{"mediabox": (0, 0, 595, 842)}] * pdf_pages)

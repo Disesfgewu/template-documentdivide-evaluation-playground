@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from lab_parser import unstructured_runner
 from lab_parser.isolation import InspectionError, ProcessLimits
-from lab_parser.unstructured_runner import LOST_TEXT_DIAGNOSTIC, run_unstructured_fast
+from lab_parser.unstructured_runner import HIDDEN_TEXT_DIAGNOSTIC, LOST_TEXT_DIAGNOSTIC, UNPARSEABLE_CONTENT_DIAGNOSTIC, run_unstructured_fast
 from tests.parser.pdfgen import build_pdf
 
 ELEMENT = {"type": "NarrativeText", "element_id": "e1", "text": "Synthetic runner text",
@@ -137,6 +137,30 @@ class RunnerTests(Base):
         self.assertAlmostEqual(x0, 22 / 562)
         self.assertAlmostEqual(y0, 60.9 / 742)
         self.assertAlmostEqual(x1, (191.8 - 50) / 562)
+
+    def test_a_page_with_hidden_text_is_quarantined_with_no_evidence_and_no_observation(self):
+        elements = (self.element(1, (612, 792)), self.element(2, (300, 400)))
+        plain = self.run_it(child_source(elements=elements))
+        self.assertEqual({e.regions[0].page_index for e in plain.evidence}, {0, 1})   # control: both pages have evidence
+        for code in (HIDDEN_TEXT_DIAGNOSTIC, UNPARSEABLE_CONTENT_DIAGNOSTIC):
+            source = child_source(elements=elements).replace("'attestable_pages'", f"'unsafe_text_pages': [[0, '{code}']], 'attestable_pages'")
+            with self.subTest(code):
+                batch = self.run_it(source)
+                self.assertEqual({e.regions[0].page_index for e in batch.evidence}, {1})      # page 0: no evidence
+                self.assertEqual({o.page_index for o in batch.observations}, {1})             # nor observations
+                first, second = batch.result.pages
+                self.assertEqual((first.status, code in first.diagnostics), ("needs_review", True))
+                self.assertNotIn(code, second.diagnostics)
+                self.assertEqual(second.status, "ok")
+
+    def test_malformed_unsafe_page_reports_are_refused(self):
+        elements = (self.element(1, (612, 792)),)
+        for junk in ("'x'", "[[0]]", "[[0, 'other']]", "[[5, 'text_not_visible']]", "[[-1, 'text_not_visible']]",
+                     "[[True, 'text_not_visible']]", "{}"):
+            source = child_source(elements=elements).replace("'attestable_pages'", f"'unsafe_text_pages': {junk}, 'attestable_pages'")
+            with self.subTest(junk), self.assertRaises(InspectionError) as ctx:
+                self.run_it(source)
+            self.assertEqual(ctx.exception.code, "invalid_child_result")
 
     def test_pages_whose_text_unstructured_lost_are_reported_as_suspect_not_failed(self):
         for lost, suspect in (([0], {0}), ([1], {1}), ([0, 1], {0, 1})):

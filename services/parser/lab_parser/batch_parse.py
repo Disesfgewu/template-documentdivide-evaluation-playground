@@ -34,7 +34,7 @@ from .batch_coverage import BatchLimits, BatchPageReport, BatchResultInput, eval
 from .batch_retry import RetryTargetPage, derive_retry_plan, execute_and_merge_retry
 from .isolation import InspectionError, inspect_geometry
 from .normalize import Artifact, NormalizedBatch
-from .unstructured_runner import LOST_TEXT_DIAGNOSTIC, run_unstructured_fast
+from .unstructured_runner import LOST_TEXT_DIAGNOSTIC, UNSAFE_CODES, run_unstructured_fast
 
 __all__ = ["DEFAULT_LIMITS", "MAX_RETRY_ROUNDS", "PartialParseFailure", "parse_in_batches"]
 
@@ -196,7 +196,10 @@ def parse_in_batches(
     if failed:
         raise PartialParseFailure(failed)
     merged = _merge(outcome, operation_id, len(geometry.pages))
-    if not merged.observations and any(LOST_TEXT_DIAGNOSTIC in p.diagnostics for p in merged.result.pages):
+    quarantined = any(code in p.diagnostics for p in merged.result.pages for code in UNSAFE_CODES)
+    # Observations of hidden-text pages are dropped by the runner, so such a page proves elements existed.
+    if (not merged.observations and not quarantined
+            and any(LOST_TEXT_DIAGNOSTIC in p.diagnostics for p in merged.result.pages)):
         # The WHOLE document produced no element while pypdf finds text on some page: the parser silently
         # lost the text (for example its spaCy model could not be installed). Transient: never a clean
         # empty success. With any element anywhere, a suspect page stays needs_review with a diagnostic.

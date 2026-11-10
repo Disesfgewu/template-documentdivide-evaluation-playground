@@ -25,9 +25,12 @@ from .frame_transform import display_transform
 from .isolation import Inspection, InspectionError, ProcessLimits, _run_child, inspect_geometry
 from .normalize import ADAPTER_REVISION, DisplayFrame, NormalizedBatch, UnstructuredParser, UnstructuredProfile
 
-__all__ = ["LOST_TEXT_DIAGNOSTIC", "RUNNER_LIMITS", "run_unstructured_fast"]
+__all__ = ["HIDDEN_TEXT_DIAGNOSTIC", "LOST_TEXT_DIAGNOSTIC", "UNPARSEABLE_CONTENT_DIAGNOSTIC", "RUNNER_LIMITS", "run_unstructured_fast"]
 
 LOST_TEXT_DIAGNOSTIC = "text_present_but_no_element"
+HIDDEN_TEXT_DIAGNOSTIC = "text_not_visible"
+UNPARSEABLE_CONTENT_DIAGNOSTIC = "content_unparseable"
+UNSAFE_CODES = (HIDDEN_TEXT_DIAGNOSTIC, UNPARSEABLE_CONTENT_DIAGNOSTIC)
 
 _CHILD = Path(__file__).with_name("_unstructured_child.py")
 _VERSION = "0.27.36"
@@ -120,6 +123,12 @@ def run_unstructured_fast(
         raise InspectionError("invalid_child_result")
     if any(i >= len(page_indices) for i in lost):
         raise InspectionError("invalid_child_result")
+    unsafe_raw = meta.get("unsafe_text_pages", [])
+    if (type(unsafe_raw) is not list
+            or any(type(e) is not list or len(e) != 2 or type(e[0]) is not int or not 0 <= e[0] < len(page_indices)
+                   or e[1] not in UNSAFE_CODES for e in unsafe_raw)):
+        raise InspectionError("invalid_child_result")
+    unsafe = {page_indices[e[0]]: e[1] for e in unsafe_raw}   # original page index -> diagnostic
     attestable = meta.get("attestable_pages")
     if (type(attestable) is not list or len(attestable) != len(page_indices)
             or any(type(v) is not bool for v in attestable)):
@@ -134,8 +143,8 @@ def run_unstructured_fast(
         geometry_info = []   # a child that reports no page boxes attests nothing: no frame, text only
     frames = {}
     for k, (page_index, ok) in enumerate(zip(page_indices, attestable)):
-        if not ok:
-            continue
+        if not ok or page_index in unsafe:
+            continue   # a page with hidden or unanalysable text claims no region, so it has no evidence
         page = pages_by_index[page_index]
         transform_ref = f"l0:{sha[:16]}:p{page_index}"
         try:
@@ -166,6 +175,15 @@ def run_unstructured_fast(
         raw, request, manifest, UnstructuredProfile(strategy="fast"),
         document_id=document_id, document_sha256=sha, frames=frames,
         document_page_count=total_pages)
+    if unsafe and batch.quarantine_reason is None:
+        # The whole page is quarantined (PM-DECISION, gap G8): needs_review with a specific diagnostic, no
+        # evidence (no frame above) and no observation, so no hidden run can reach a consumer. The raw
+        # output artifact still holds the full element text for audit.
+        pages = [PageStatus(page_index=p.page_index, status="needs_review",
+                            diagnostics=list(dict.fromkeys([*p.diagnostics, unsafe[p.page_index]])))
+                 if p.page_index in unsafe else p for p in batch.result.pages]
+        batch = replace(batch, result=batch.result.model_copy(update={"pages": pages}),
+                        observations=tuple(o for o in batch.observations if o.page_index not in unsafe))
     if lost and batch.quarantine_reason is None:
         # pypdf sees text on these pages but this run produced no element at all. Reported as information
         # only: whether it is a total loss (e.g. the spaCy model could not be installed) is decided over the

@@ -3,8 +3,10 @@
 The PM review of #127 asked for real fast output on rotated, CropBox and watermark pages before any single
 page is treated as fatal. Each case is a one-page SYNTHETIC PDF run through the real ``run_unstructured_fast``;
 the report records, per case, the number of elements, pypdf's non-whitespace character count, the page status
-and diagnostics, and whether the page was flagged suspect. It asserts only that the control page (plain text) is
-parsed with elements and not flagged, so a broken measurement fails; the other rows are data, not policy.
+and diagnostics, and whether the page was flagged suspect. It asserts that the control page (plain text) is
+parsed with elements and evidence and not flagged, so a broken measurement fails, and (gap G8) that pages with
+invisible text (render mode 3 or 7, alone or next to visible text) are needs_review/text_not_visible with no
+evidence; the other rows are data, not policy.
 Not covered: Type3 fonts and odd encodings (not built here). Runs only with ``LAB_E2E_REAL_UNSTRUCTURED=1``.
 """
 from __future__ import annotations
@@ -60,6 +62,9 @@ CASES = {
     "cropbox_clips_all_text": one_page_pdf(body_ops(), "/CropBox [400 0 612 792]"),
     "cropbox_clips_half": one_page_pdf(body_ops(), "/CropBox [200 0 612 792]"),
     "invisible_text_render_mode_3": one_page_pdf(body_ops("3 Tr")),
+    "clip_only_render_mode_7": one_page_pdf(body_ops("7 Tr")),
+    "visible_body_plus_invisible_run": one_page_pdf(
+        body_ops() + "\nBT 3 Tr /F1 14 Tf 72 300 Td (An invisible run on a page that also has visible text.) Tj ET"),
     "grey_diagonal_watermark_only": one_page_pdf(
         "BT 0.9 g /F1 60 Tf 0.7071 0.7071 -0.7071 0.7071 150 200 Tm (SYNTHETIC WATERMARK TEXT FOR THE MEASUREMENT) Tj ET"),
     "watermark_under_body": one_page_pdf(
@@ -98,6 +103,12 @@ class FastDisagreementMeasurement(unittest.TestCase):
         self.assertEqual(control.get("outcome"), "parsed", control)
         self.assertGreater(control["elements"], 0, control)
         self.assertFalse(control["suspect"], control)
+        self.assertEqual(control["evidence"], 1, control)
+        # PM-DECISION on gap G8: a page with text the reader cannot see is quarantined as a whole.
+        for name in ("invisible_text_render_mode_3", "clip_only_render_mode_7", "visible_body_plus_invisible_run"):
+            row = rows[name]
+            self.assertEqual((row.get("outcome"), row.get("status"), row.get("evidence")), ("parsed", "needs_review", 0), (name, row))
+            self.assertIn("text_not_visible", row["diagnostics"], (name, row))
 
 
 if __name__ == "__main__":
