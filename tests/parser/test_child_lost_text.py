@@ -51,8 +51,9 @@ class LostTextTests(unittest.TestCase):
     def test_pages_with_text_but_no_element_are_flagged(self):
         self.assertEqual(self.lost([self.LONG, self.LONG, self.LONG], []), [0, 1, 2])
 
-    def test_pages_that_have_an_element_are_not_flagged(self):
-        self.assertEqual(self.lost([self.LONG, self.LONG, self.LONG], [self.element(2)]), [0, 2])
+    def test_any_element_at_all_means_no_total_loss_so_nothing_is_flagged(self):
+        # A page without an element next to parsed pages stays an honest needs_review page.
+        self.assertEqual(self.lost([self.LONG, self.LONG, self.LONG], [self.element(2)]), [])
         self.assertEqual(self.lost([self.LONG, self.LONG], [self.element(1), self.element(2)]), [])
 
     def test_blank_pages_and_scraps_of_text_are_not_evidence_of_lost_content(self):
@@ -62,7 +63,8 @@ class LostTextTests(unittest.TestCase):
         self.assertEqual(self.lost(["x" * 20], []), [0])
 
     def test_junk_elements_do_not_break_it(self):
-        self.assertEqual(self.lost([self.LONG], [None, "x", {"metadata": None} if False else {}]), [0])
+        self.assertEqual(self.lost([self.LONG], [None, "x", 3]), [0])      # no element dict: still a total loss
+        self.assertEqual(self.lost([self.LONG], [{"metadata": None}]), [])  # an element exists; null metadata is fine
 
     def test_a_pdf_without_any_text_layer_is_never_flagged(self):
         with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:

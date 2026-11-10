@@ -50,21 +50,22 @@ def _page_info(path: str) -> list[dict]:
 MIN_LOST_TEXT_CHARS = 20   # shorter pypdf text (a page number, a stray mark) is not evidence of lost content
 
 
-def _pages_with_lost_text(path: str, elements: list[dict]) -> list[int]:
-    """0-based pages of ``path`` where pypdf finds real text but Unstructured produced no element.
+def _pages_with_lost_text(path: str, elements: list) -> list[int]:
+    """0-based pages with real pypdf text, but only when Unstructured returned NO element at all.
 
     Unstructured 0.27.36 downloads a spaCy model on first use; when that fails (read-only site-packages,
     no network) it logs one debug line and returns NO elements, so a document's text can vanish while the
-    run looks successful. The parent turns a non-empty list into ``text_extraction_empty``.
+    run looks successful. Only that total loss is flagged: when any element exists, a page without one
+    stays an honest ``needs_review`` page (pypdf and pdfminer may legitimately disagree on a single page).
+    The parent turns a non-empty list into ``text_extraction_empty``.
     """
     from pypdf import PdfReader
 
-    seen = {e.get("metadata", {}).get("page_number") for e in elements if isinstance(e, dict)}
+    if any(isinstance(e, dict) for e in elements):
+        return []
     reader = PdfReader(path, strict=True)
     lost = []
     for index, page in enumerate(reader.pages):
-        if index + 1 in seen:
-            continue
         try:
             text = page.extract_text() or ""
         except Exception:

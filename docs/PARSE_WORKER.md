@@ -54,6 +54,7 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 預設的解析函式是 `lab_parser.batch_parse.parse_in_batches`：同一個 job 內依 `plan_batches`（預設每批 10 頁）把文件切成批次，只解析各批次的**核心頁**（overlap 脈絡頁是給後續 LLM 階段用的，所以頁面不會被解析兩次、evidence 不會重複），最多 2 個批次子程序同時執行；失敗的頁面依 `derive_retry_plan`／`execute_and_merge_retry` 逐頁重試，最多 `retry_rounds`（預設 2、上限 5）輪；結果合併成一個 `NormalizedBatch`（原始 0-based 實體頁碼、各頁 status／diagnostics），再由既有的 persist 存入，沒有新表。
 
 - **失敗政策**：重試預算用完仍是 `failed` 的頁面 → `PartialParseFailure` → job `failed(pages_failed)`，**不發布任何部分結果**（好的頁面也不存）。`needs_review`（沒有可認定的幾何／空白頁）是誠實的不確定，不算失敗。
+- **無聲丟字防護（Refs #7）**：unstructured 0.27.36 第一次用到時會下載 spaCy 模型 `en_core_web_sm`；唯讀根或沒有網路時下載失敗，只留一行 debug log 並**回傳零個元素**，job 本來會成功、頁面全是 `needs_review`。子程序現在只在「整次執行沒有任何元素、但 pypdf 在某頁找到至少 20 個非空白字元」時回報 `lost_text_pages`，runner 以 `text_extraction_empty` 失敗；這是 transient 碼：單一批次先逐頁重試，所有批次都這樣則 job 重排（次數有界），最後 `failed(text_extraction_empty)`，不發布空的成功結果。只要有任何元素，沒有元素的頁面仍是誠實的 `needs_review`，不致命。**不涵蓋**部分遺失、向量外框字（pypdf 抽不出）、少於 20 字元的頁面。呈現給使用者的 job 代碼會隨批次大小而異（一批以內為 `text_extraction_empty`，多批為重排後同一代碼）。
 - **崩潰＝整個 job 重跑**：批次進度不持久；持久化、可續跑的批次（方案 A）要等 500／600 頁負載測試證明需要才做。
 - **取消**：取消旗標傳給每個批次子程序（各自獨立的 process group），全部被殺後以 `cancelled` 結束。
 - **記憶體**：每個子程序位址空間上限 4 GiB；一個 job 最多 2 個批次子程序，所以 `--concurrency N` 最多 N×2 個子程序（N=2 時最多 16 GiB 虛擬位址）。部署時請以此設定 `--concurrency`。
