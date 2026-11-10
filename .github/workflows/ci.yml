@@ -185,6 +185,13 @@ jobs:
           "$RUNNER_TEMP/e2e-venv/bin/pip" install -r services/api/requirements.lock -r services/parser/requirements.lock -r contracts/requirements.lock -r db/requirements.lock
           "$RUNNER_TEMP/e2e-venv/bin/pip" install "unstructured[pdf]==0.27.36"
           "$RUNNER_TEMP/e2e-venv/bin/pip" freeze > "$RUNNER_TEMP/e2e-freeze.txt"
+      - name: Lost-text guard against the real failure (read-only site-packages, no spaCy model yet)
+        run: |
+          set -euo pipefail
+          site="$("$RUNNER_TEMP/e2e-venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          chmod -R a-w "$site"
+          trap 'chmod -R u+w "$site"' EXIT
+          LAB_E2E_READONLY_SITE=1 "$RUNNER_TEMP/e2e-venv/bin/python" -m unittest -v tests.e2e.test_parse_guard_real
       - name: End-to-end acceptance
         env:
           LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab

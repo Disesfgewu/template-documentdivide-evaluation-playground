@@ -138,6 +138,20 @@ class RunnerTests(Base):
         self.assertAlmostEqual(y0, 60.9 / 742)
         self.assertAlmostEqual(x1, (191.8 - 50) / 562)
 
+    def test_pages_whose_text_unstructured_lost_fail_the_run_instead_of_succeeding_empty(self):
+        for lost in ([0], [1], [0, 1]):
+            source = child_source(elements=()).replace("'attestable_pages'", f"'lost_text_pages': {lost}, 'attestable_pages'")
+            with self.subTest(lost), self.assertRaises(InspectionError) as ctx:
+                self.run_it(source)
+            self.assertEqual(ctx.exception.code, "text_extraction_empty")
+        for junk in ("'x'", "[-1]", "[True]", "{}"):
+            source = child_source().replace("'attestable_pages'", f"'lost_text_pages': {junk}, 'attestable_pages'")
+            with self.subTest(junk), self.assertRaises(InspectionError) as ctx:
+                self.run_it(source)
+            self.assertEqual(ctx.exception.code, "invalid_child_result")
+        ok = child_source().replace("'attestable_pages'", "'lost_text_pages': [], 'attestable_pages'")
+        self.assertIsNone(self.run_it(ok).quarantine_reason)
+
     def test_a_child_that_reports_no_page_boxes_attests_nothing(self):
         el = self.element(1, (612, 792))
         for meta_pages in ("[True, True]",):

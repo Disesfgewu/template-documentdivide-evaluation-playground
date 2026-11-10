@@ -47,6 +47,33 @@ def _page_info(path: str) -> list[dict]:
             for page in reader.pages]
 
 
+MIN_LOST_TEXT_CHARS = 20   # shorter pypdf text (a page number, a stray mark) is not evidence of lost content
+
+
+def _pages_with_lost_text(path: str, elements: list[dict]) -> list[int]:
+    """0-based pages of ``path`` where pypdf finds real text but Unstructured produced no element.
+
+    Unstructured 0.27.36 downloads a spaCy model on first use; when that fails (read-only site-packages,
+    no network) it logs one debug line and returns NO elements, so a document's text can vanish while the
+    run looks successful. The parent turns a non-empty list into ``text_extraction_empty``.
+    """
+    from pypdf import PdfReader
+
+    seen = {e.get("metadata", {}).get("page_number") for e in elements if isinstance(e, dict)}
+    reader = PdfReader(path, strict=True)
+    lost = []
+    for index, page in enumerate(reader.pages):
+        if index + 1 in seen:
+            continue
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            continue  # unreadable by pypdf: it cannot vouch that text exists
+        if len("".join(text.split())) >= MIN_LOST_TEXT_CHARS:
+            lost.append(index)
+    return lost
+
+
 def main() -> int:
     die_with_parent()
     apply_limits(*map(int, sys.argv[1:]))
@@ -77,7 +104,9 @@ def main() -> int:
         payload = json.dumps(elements_to_dicts(elements), allow_nan=False, sort_keys=True,
                              separators=(",", ":")).encode("utf-8")
         info = _page_info(source)
+        lost = _pages_with_lost_text(source, json.loads(payload))
         meta = json.dumps({"unstructured": md.version("unstructured"),
+                           "lost_text_pages": lost,
                            # Text units are intact only for upright (0) and upside-down (180) pages; 90 and
                            # 270 come out letter-scrambled (measured), so they are never attested.
                            "attestable_pages": [i["rotation"] in (0, 180) for i in info],

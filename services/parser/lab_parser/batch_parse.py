@@ -41,7 +41,7 @@ __all__ = ["DEFAULT_LIMITS", "MAX_RETRY_ROUNDS", "PartialParseFailure", "parse_i
 DEFAULT_LIMITS = BatchLimits(max_pages=2000, batch_size=10, overlap_pages=0, parallel_batches=2)
 MAX_RETRY_ROUNDS = 5
 # A child failure with one of these codes can succeed on a later attempt of the whole job.
-TRANSIENT_CODES = frozenset({"timeout", "process_unavailable", "inspection_io_failed"})
+TRANSIENT_CODES = frozenset({"timeout", "process_unavailable", "inspection_io_failed", "text_extraction_empty"})
 # These are about this process or this input, not about one batch: retrying them cannot help.
 SYSTEMIC_CODES = frozenset({"unsupported_platform", "invalid_input", "invalid_limits", "invalid_pdf", "encrypted_pdf",
                             "page_limit_exceeded", "input_size"})

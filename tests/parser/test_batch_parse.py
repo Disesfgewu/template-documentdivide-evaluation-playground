@@ -162,6 +162,23 @@ class BatchParseTests(unittest.TestCase):
                              operation_id="op", run_batch=run, limits=BatchLimits(batch_size=10, overlap_pages=0, parallel_batches=2))
         self.assertLessEqual(len(run.calls), 2 + 1)   # the two running children and at most one more that raced the flag
 
+    def test_lost_text_in_every_batch_is_a_requeueable_job_level_error(self):
+        def behaviour(pages, nth):
+            raise InspectionError("text_extraction_empty")
+        run = Recorder(behaviour)
+        with self.assertRaises(InspectionError) as ctx:
+            self.parse(run)
+        self.assertEqual(ctx.exception.code, "text_extraction_empty")
+        self.assertEqual(len(run.calls), 3)
+
+    def test_lost_text_in_one_batch_is_retried_page_by_page_and_can_recover(self):
+        def behaviour(pages, nth):
+            if pages == tuple(range(10, 20)) and nth == 1:
+                raise InspectionError("text_extraction_empty")
+        run = Recorder(behaviour)
+        merged = self.parse(run)
+        self.assertTrue(all(p.status == "ok" for p in merged.result.pages))
+
     def test_systemic_codes_stop_at_once(self):
         for code in ("unsupported_platform", "invalid_input"):
             with self.subTest(code):

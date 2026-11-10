@@ -112,6 +112,13 @@ def run_unstructured_fast(
         raise InspectionError("invalid_child_result") from None
     if type(meta) is not dict or meta.get("unstructured") != _VERSION or len(raw) > limits.output_bytes:
         raise InspectionError("version_mismatch")
+    lost = meta.get("lost_text_pages", [])
+    if type(lost) is not list or any(type(i) is not int or i < 0 for i in lost):
+        raise InspectionError("invalid_child_result")
+    if lost:
+        # pypdf sees text on these pages but Unstructured returned nothing for them: a silent loss of the
+        # document's text (for example its spaCy model could not be installed). Never a clean success.
+        raise InspectionError("text_extraction_empty")
     attestable = meta.get("attestable_pages")
     if (type(attestable) is not list or len(attestable) != len(page_indices)
             or any(type(v) is not bool for v in attestable)):

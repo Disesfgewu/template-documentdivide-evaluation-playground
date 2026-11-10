@@ -404,6 +404,18 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual(self.job_state(job)[:2], ("failed", 1))
         self.assertEqual(self.persisted_count(), 0)
 
+    def test_lost_text_in_every_batch_is_requeued_not_published_as_an_empty_success(self):
+        from lab_parser.batch_parse import parse_in_batches
+        project, job = self.queue()
+
+        def lost(data, **kw):
+            raise InspectionError("text_extraction_empty")
+
+        outcome = self.process(project, job, lambda data, **kw: parse_in_batches(data, run_batch=lost, **kw))
+        self.assertEqual((outcome.status, outcome.reason), ("queued", "text_extraction_empty"))
+        self.assertEqual(self.persisted_count(), 0)
+        self.assertEqual(self.job_state(job)[:2], ("queued", 1))
+
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
         blobs = [p for p in self.root.rglob("*") if p.is_file()]
