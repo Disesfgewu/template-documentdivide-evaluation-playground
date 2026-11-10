@@ -25,6 +25,38 @@ class _Unparseable(Exception):
     pass
 
 
+def _stream_or_fail(obj):
+    """``obj`` must resolve to a stream object, else the page cannot be analysed."""
+    from pypdf.generic import StreamObject
+
+    obj = obj.get_object()
+    if not isinstance(obj, StreamObject):
+        raise _Unparseable
+    return obj
+
+
+def _checked_contents(page):
+    """The page's content stream, or ``None`` for a page that has none. pypdf quietly returns an empty
+    content for a malformed ``/Contents`` (a self-referencing or nested array, a non-stream entry, a
+    dangling reference), which would read as 'clean': anything but a stream or a flat array of streams
+    is therefore unparseable."""
+    from pypdf.generic import ArrayObject, NullObject
+
+    raw = page.raw_get("/Contents") if "/Contents" in page else None
+    if raw is None or isinstance(raw, NullObject):
+        return None
+    resolved = raw.get_object()
+    if isinstance(resolved, ArrayObject):
+        for item in resolved:
+            _stream_or_fail(item)
+    else:
+        _stream_or_fail(raw)
+    contents = page.get_contents()
+    if contents is None:
+        raise _Unparseable
+    return contents
+
+
 def _operations(stream, reader):
     from pypdf.generic import ContentStream
 
@@ -51,8 +83,11 @@ def _walk(operations, resources, reader, mode, depth, budget, cache) -> bool:
                 raise _Unparseable
             try:
                 mode = int(operands[0])
+                valid = mode == operands[0] and 0 <= mode <= 7
             except (TypeError, ValueError):
                 raise _Unparseable from None
+            if not valid:
+                raise _Unparseable      # PDF defines modes 0..7 only; anything else is not proof of visibility
         elif operator in _SHOW:
             if mode in _HIDING_MODES:
                 return True
@@ -67,6 +102,7 @@ def _walk(operations, resources, reader, mode, depth, budget, cache) -> bool:
             target = target.get_object()
             if target.get("/Subtype") != "/Form":
                 continue   # an image draws no text
+            _stream_or_fail(target)
             if depth >= MAX_DEPTH:
                 raise _Unparseable
             key = id(target)
@@ -82,7 +118,7 @@ def _walk(operations, resources, reader, mode, depth, budget, cache) -> bool:
 def scan_page(page, reader) -> str | None:
     """``None`` for a page with no hidden text, else ``text_not_visible`` or ``content_unparseable``."""
     try:
-        contents = page.get_contents()
+        contents = _checked_contents(page)
         if contents is None:
             return None
         resources = page.get("/Resources")
