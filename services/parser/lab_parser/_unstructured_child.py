@@ -50,6 +50,17 @@ def _page_info(path: str) -> list[dict]:
 MIN_LOST_TEXT_CHARS = 20   # shorter pypdf text (a page number, a stray mark) is not evidence of lost content
 
 
+def _hidden_text_pages(path: str) -> list[list]:
+    """``[[page_index, code], ...]`` for pages with invisible text or unanalysable content (see ``_hidden_text``)."""
+    import importlib.util
+    from pypdf import PdfReader
+
+    spec = importlib.util.spec_from_file_location("_hidden_text", Path(__file__).with_name("_hidden_text.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.scan_document(PdfReader(path, strict=True))
+
+
 def _pages_with_lost_text(path: str, elements: list) -> list[int]:
     """0-based pages with real pypdf text, but only when Unstructured returned NO element at all.
 
@@ -106,8 +117,9 @@ def main() -> int:
                              separators=(",", ":")).encode("utf-8")
         info = _page_info(source)
         lost = _pages_with_lost_text(source, json.loads(payload))
+        unsafe = _hidden_text_pages(source)
         meta = json.dumps({"unstructured": md.version("unstructured"),
-                           "lost_text_pages": lost,
+                           "lost_text_pages": lost, "unsafe_text_pages": unsafe,
                            # Text units are intact only for upright (0) and upside-down (180) pages; 90 and
                            # 270 come out letter-scrambled (measured), so they are never attested.
                            "attestable_pages": [i["rotation"] in (0, 180) for i in info],
