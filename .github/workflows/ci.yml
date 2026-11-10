@@ -19,6 +19,10 @@ on:
         description: "Also build and smoke-test the parse worker container image (Issue #7)"
         type: boolean
         default: false
+      demo:
+        description: "Also run the quickstart demo end to end on a clean runner (docs/QUICKSTART_DEMO.md)"
+        type: boolean
+        default: false
       load:
         description: "Also run the 500/600 page load measurement (Issue #7)"
         type: boolean
@@ -293,6 +297,35 @@ jobs:
           name: llm-smoke
           if-no-files-found: warn
           path: ${{ runner.temp }}/llm-smoke-report.json
+
+  demo:
+    name: demo (quickstart, synthetic, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.demo }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Quickstart demo, exactly as documented (up, run, down)
+        run: |
+          set -euo pipefail
+          scripts/demo.sh up
+          scripts/demo.sh run 2>&1 | tee "$RUNNER_TEMP/demo-output.txt"
+          grep -q '^RESULT: PASS' "$RUNNER_TEMP/demo-output.txt"
+      - name: Container logs (fixed codes and ids only)
+        if: always()
+        run: |
+          docker compose -f deploy/compose.dev.yml --profile demo logs --no-color parse-worker api > "$RUNNER_TEMP/demo-logs.txt" 2>&1
+          tail -n 30 "$RUNNER_TEMP/demo-logs.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demo
+          path: |
+            ${{ runner.temp }}/demo-output.txt
+            ${{ runner.temp }}/demo-logs.txt
+      - name: Clean up
+        if: always()
+        run: scripts/demo.sh down
 
   worker-image:
     name: worker-image (synthetic, manual)

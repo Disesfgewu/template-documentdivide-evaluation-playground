@@ -32,11 +32,45 @@ services:
     depends_on:
       db:
         condition: service_healthy
+  api:
+    # The HTTP API for the quickstart demo (docs/QUICKSTART_DEMO.md). Not started by `up`; start it with
+    #   docker compose -f deploy/compose.dev.yml --profile demo up -d --build --wait api
+    # It shares the artifact volume with parse-worker (the API stores uploads, the worker reads them).
+    # Throwaway dev credentials only; a real deployment injects its own environment and secret.
+    profiles: ["demo"]
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+    environment:
+      LAB_ENV: dev
+      LAB_PROVIDER_MODE: mock
+      LAB_DATABASE_URL: postgresql://lab:lab-dev-only@db:5432/lab
+      LAB_ARTIFACT_ROOT: /var/lib/lab/artifacts
+      LAB_AUTH_SECRET: demo-only-signing-secret-never-use-outside-this-local-demo
+    ports:
+      - "127.0.0.1:${LAB_API_PORT:-8000}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=256m
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    pids_limit: 200
+    volumes:
+      - lab-artifacts:/var/lib/lab/artifacts
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 3s
+      timeout: 4s
+      retries: 20
   parse-worker:
     # The document.parse worker (Refs #7). Not started by `up`; start it after the migration with:
     #   docker compose -f deploy/compose.dev.yml --profile worker up -d --build parse-worker
     # Throwaway dev credentials only (same as the db service); a real deployment injects its own environment.
-    profiles: ["worker"]
+    profiles: ["worker", "demo"]
     build:
       context: ..
       dockerfile: deploy/worker.Dockerfile
