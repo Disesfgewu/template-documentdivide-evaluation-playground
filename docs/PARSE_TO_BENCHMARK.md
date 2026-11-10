@@ -1,0 +1,71 @@
+# 解析結果如何接到出題與凍結：設計備忘（只有文件，沒有程式）
+
+Refs #7、#10、#11、#12。這份文件是 PM-DECISION（Issue #7，00:55Z）清單 (c) 的產出：只寫設計與待決事項。**文中標示「提議」的東西都沒有實作**；標示「已存在」的東西在 main 上並經程式碼確認。真實的出題、獨立驗題與 judge 仍然被 LLM 憑證擋住（見 `docs/LLM_SMOKE.md`），這裡沒有任何一項宣稱完成。
+
+## 1. 已存在（main 上）
+
+| 元件 | 位置 | 狀態 |
+|---|---|---|
+| 上傳與頁面幾何（L0） | `documents`、`document_versions`、`pages`（0002）；`POST /api/v1/documents` | 可用；每個 document version 有 `pages` 列（頁面大小、旋轉） |
+| 解析 job 與消費者 | `parse_jobs`（0011）、`POST /documents/{id}/parse`、`lab_api.parse_worker`、`parse_worker_main`、`lab_parser.batch_parse` | 可用；真實 unstructured fast，已有 500／600 頁量測（#123） |
+| 解析結果 | `parse_results`、`parse_page_results`（0012，append-only）、`GET .../parse-results/{job_id}[/pages/{n}]` | 可用；每頁 status、diagnostics、evidence（契約 `EvidenceUnit`，含 `regions[]`）、observations |
+| 證據表（出題用） | `evidence_units`、`evidence_regions`（0002）：`evidence_key`、`raw_content`、`normalized_content`、`extractor_revision`、`ocr_confidence`；region 有 `page_index`、bbox（`x0<x1`、`y0<y1`、0..1）、`kind`、`quote`，外鍵到 `pages` | 表與約束存在，**解析路徑沒有寫入它**（目前只有測試 fixture 寫入） |
+| 題庫表 | `benchmark_revisions`（狀態機：draft → parsing → planning → generating → validating → ready_to_freeze → frozen；凍結後不可改）、`questions`、`facts`、`evidence_sets`、`evidence_set_members`、`distractors`（0002） | 表、狀態機與凍結不可變存在；`GET /api/v1/benchmarks/{logical_id}/revisions/{revision}[/questions]` 是**唯讀** API，沒有建立題庫的 API |
+| 多模態解析與證據關係表 | `parse_runs`、`visual_objects`、`evidence_relations`、`evidence_verifications`、`derivations`（0005） | 表存在，**解析路徑沒有使用**（見 D2） |
+| 題數與配額規劃 | `lab_contracts.planning`（#52 的確定性草稿規劃器，已合併）、`lab_parser.batch_coverage`（頁面批次與覆蓋計算） | 純函式 |
+| 快取身份契約 | #59 | 草稿、與 main 衝突（DIRTY），未合併 |
+| 凍結閘門 | #79（草稿；migration 0013） | 草稿：目前的 schema 無法驗證獨立驗題、人工審查與配額，所以**任何凍結一律失敗（fail closed）** |
+| LLM 呼叫骨架 | `services/worker/agentflow`（Go，`ChatCall`＋預算帳本）、`smoke_real_test.go` | 沒有真實 provider 呼叫的證據（blocked: no credentials） |
+
+## 2. 缺口（解析結果 → 題庫）
+
+1. **G1 形狀轉換**：`parse_page_results.evidence` 的 JSON 與 `evidence_units`／`evidence_regions` 的欄位大致對得上（`evidence_id` → `evidence_key`；`raw_content`、`normalized_content`、`extractor_revision`＝`raw-normalization-1`、`ocr_confidence`＝null；`regions[]` → region 列，`kind` 的集合相同，bbox 都已驗證在 0..1 且 `x0<x1`），但**沒有把前者寫成後者的程式**，也沒有決定何時寫。
+2. **G2 身份不穩定**：`evidence_id` 由 raw artifact 的雜湊決定，而 `UNIQUE (document_version_id, evidence_key)`。重新解析（不同批次大小、重試、不同 job）會得到不同的 id；同一份文件的多次解析會在 `evidence_units` 累積。需要「這個題庫用哪一次解析」的明確記錄（目前 `evidence_units` 沒有 parse job／result 欄位）。
+3. **G3 兩套解析註冊表**：`parse_runs`（0005：parser 版本、profile、raw／manifest artifact、狀態）與 `parse_results`（0012）功能重疊，沒有人決定誰是正式的那一個。
+4. **G4 覆蓋與缺口**：fast 路徑沒有表格結構（#113）、90／270 度頁沒有幾何（#115）、批次中 `needs_review` 的頁面沒有 evidence。配額規劃器（每個 quota bucket 至少 `ceil(0.1N)` 等）需要讀頁面層級的狀態，並把這些頁面算成「素材不足」而不是靜默略過。
+5. **G5 出題與驗題**：選證據、寫題、獨立驗題、去重、圖表／跨頁必要性 ablation 都需要 LLM（blocked）；人工審查依 owner 範圍略過，而 #79 的凍結閘門要求的就是這些紀錄。
+6. **G6 版本與凍結**：題庫版本要綁定 document version 與所選的解析結果；凍結後不可變，重新解析只能產生新的題庫版本。
+7. **G7 gold 隔離**：解析輸出目前只有 owner／maintainer／reviewer 可讀（participant 與 observer 403，#107）；由解析結果衍生的題目與證據集進入 gold 之後的存取規則由 0008 管，這個備忘沒有改它。
+
+## 3. 提議的流程（尚未實作）
+
+```
+POST parse（已有） ──► parse_results（已有）
+        │
+        ▼  [提議 P-A] promote：把「被選定的」解析結果寫成 evidence_units／evidence_regions（同一個 transaction、以 job 為冪等鍵），
+        │               並記錄 (benchmark revision ↔ parse job) 的連結（新 migration，需要 D1、D3）
+        ▼  [提議 P-B] benchmark: draft → parsing（排隊解析）→ planning（規劃器讀頁面狀態與覆蓋，輸出配額與缺口）
+        ▼  generating / validating（blocked：LLM）  →  ready_to_freeze
+        ▼  [#79] freeze gate：沒有驗題、人工審查與配額紀錄就 fail closed
+```
+
+## 4. 需要 owner 決定的事
+
+| # | 決定 | 選項（我的傾向） |
+|---|---|---|
+| D1 | 題庫版本用哪一次解析結果？ | (a) 在 `parsing → planning` 時釘住一個 parse job id（**傾向**）；(b) 永遠用最新成功的一個（會讓凍結的題庫與可變的解析脫鉤） |
+| D2 | `parse_runs`（0005）與 `parse_results`（0012）的關係 | (a) `parse_runs` 當註冊表指向 `parse_results`（**傾向**，需要 migration）；(b) 停用 `parse_runs`；(c) 兩者並存、各管一半（不建議） |
+| D3 | 何時把證據寫進 `evidence_units`？ | (a) 懶：題庫規劃時 promote（**傾向**，避免為沒有題庫的解析產生資料）；(b) 解析完成就寫 |
+| D4 | 沒有幾何的頁面（`needs_review`、90／270 度）可否出題？ | 提議：不可；算入素材不足缺口，不補座標 |
+| D5 | fast 路徑沒有表格結構時，表格題配額怎麼辦？ | 提議：標示素材不足（compliance 只能 `partial`），或等 hi_res（目前 blocked: 沒有模型／GPU 環境）；不用文字猜儲存格的列關係 |
+| D6 | 人工審查略過（owner 範圍）如何與凍結閘門相容？ | #79 目前把 `partial` 限定 owner 才能凍結；請確認「略過人工審查 ＝ partial」是你要的語意，以及它在報告上的措辭 |
+| D7 | LLM provider、模型、價格、單次與整體預算、獨立驗題用哪個模型 | blocked：需要你提供（見 `docs/LLM_SMOKE.md`） |
+| D8 | 參賽方法（raw track）能看到什麼？ | 現行：解析輸出不給 participant；請確認 raw track 的來源是「參賽方法自己從原 PDF 解析」（SPEC），系統的解析結果與 gold 不外洩 |
+| D9 | 解析輸出的保留與存取 | raw artifact 以 `restricted` 保留；是否需要到期與刪除流程 |
+
+## 5. 被 LLM 憑證擋住的 vs 沒有被擋住的
+
+- **沒有被擋住（可以先做，需要 D1–D4）**：promote 函式與連結表（P-A）、benchmark 的 `parsing → planning` 接線與規劃器對真實頁面狀態的讀取（P-B）、對應的唯讀 API 與測試。
+- **被擋住**：選證據與寫題、獨立驗題與去重、圖表／跨頁必要性 ablation、judge 與評分的語意部分（#10 的生成與驗證、#12 的 judge）；真實 provider 的 smoke（chat、embedding、vision 各一）。
+- **不是憑證問題但仍缺**：hi_res／MinerU（沒有模型／GPU 環境）、人工校準（人力）、500／600 頁含 OCR 的完整流程（只量過解析）。
+
+## 6. 建議的切法（提議，每個一個小 PR）
+
+1. P-A `promote_parse_result`：把指定的解析結果寫成 `evidence_units`／`evidence_regions`＋連結表（migration 0014；需要 D1、D2、D3）。測試：冪等、`pages` 外鍵與 bbox 約束、重新解析不污染已凍結的題庫、不可變。
+2. P-B benchmark 建立與 `parsing → planning`：建立 API（owner／maintainer）、排隊解析並釘住 job、規劃器讀頁面狀態並輸出缺口（需要 D4、D5）。
+3. P-C 把 #79 的凍結閘門改成讀實際的驗題／配額紀錄（等 LLM 之後才有紀錄；之前仍 fail closed）。
+4. P-D 生成與驗題（blocked）。
+
+## 7. 這份備忘沒有做的
+
+沒有實作任何一項、沒有改任何 schema、沒有更新 `traceability.yaml`；沒有驗證 #52 規劃器能吃真實頁面狀態（只確認它是純函式）；SPEC 對題庫快取與斷點恢復（#10）的要求這裡只列為缺口，沒有設計。
