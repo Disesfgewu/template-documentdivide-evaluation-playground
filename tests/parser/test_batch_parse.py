@@ -4,16 +4,18 @@ The fake ``run_batch`` stands in for the parser child: it returns what the runne
 requested pages, so the planning, retry, merge and cancel logic is the real code under test."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import threading
 import time
 import unittest
 
-from lab_contracts.parse import ModelRevision, PageMapEntry, ParseManifest, ParseRequest, RenderSettings
+from lab_contracts.parse import PageStatus, ModelRevision, PageMapEntry, ParseManifest, ParseRequest, RenderSettings
 from lab_parser.batch_coverage import BatchLimits
 from lab_parser.batch_parse import PartialParseFailure, parse_in_batches
 from lab_parser.isolation import InspectionError
+from lab_parser.unstructured_runner import LOST_TEXT_DIAGNOSTIC
 from lab_parser.normalize import ADAPTER_REVISION, DisplayFrame, UnstructuredParser, UnstructuredProfile
 from tests.parser.pdfgen import build_pdf
 
@@ -162,22 +164,56 @@ class BatchParseTests(unittest.TestCase):
                              operation_id="op", run_batch=run, limits=BatchLimits(batch_size=10, overlap_pages=0, parallel_batches=2))
         self.assertLessEqual(len(run.calls), 2 + 1)   # the two running children and at most one more that raced the flag
 
-    def test_lost_text_in_every_batch_is_a_requeueable_job_level_error(self):
+    @staticmethod
+    def suspect(batch, pages):
+        """What the runner does when the child reports pypdf text on these pages but no element."""
+        marked = [PageStatus(page_index=p.page_index, status="needs_review",
+                             diagnostics=[*p.diagnostics, LOST_TEXT_DIAGNOSTIC]) if p.page_index in pages else p
+                  for p in batch.result.pages]
+        return replace(batch, result=batch.result.model_copy(update={"pages": marked}))
+
+    def test_a_document_without_any_element_but_with_text_is_a_requeueable_total_loss(self):
         def behaviour(pages, nth):
-            raise InspectionError("text_extraction_empty")
+            return self.suspect(fake_batch(pages, "doc-batch", f"op{nth}", "b", blank=set(pages)), set(pages))
         run = Recorder(behaviour)
         with self.assertRaises(InspectionError) as ctx:
             self.parse(run)
         self.assertEqual(ctx.exception.code, "text_extraction_empty")
-        self.assertEqual(len(run.calls), 3)
+        self.assertEqual(len(run.calls), 3)      # needs_review is not a failure: no page is retried
 
-    def test_lost_text_in_one_batch_is_retried_page_by_page_and_can_recover(self):
+    def test_a_lost_batch_next_to_healthy_ones_stays_needs_review_with_a_diagnostic(self):
+        lost = tuple(range(10, 20))
+
         def behaviour(pages, nth):
-            if pages == tuple(range(10, 20)) and nth == 1:
-                raise InspectionError("text_extraction_empty")
-        run = Recorder(behaviour)
-        merged = self.parse(run)
-        self.assertTrue(all(p.status == "ok" for p in merged.result.pages))
+            if pages == lost:
+                return self.suspect(fake_batch(pages, "doc-batch", f"op{nth}", "b", blank=set(pages)), set(pages))
+        merged = self.parse(Recorder(behaviour))
+        statuses = {p.page_index: p for p in merged.result.pages}
+        for i in range(PAGES):
+            if i in lost:
+                self.assertEqual(statuses[i].status, "needs_review")
+                self.assertIn(LOST_TEXT_DIAGNOSTIC, statuses[i].diagnostics)
+            else:
+                self.assertEqual(statuses[i].status, "ok")
+
+    def test_a_single_suspect_page_in_the_last_batch_does_not_fail_the_document(self):
+        def behaviour(pages, nth):
+            if pages == (20,):
+                return self.suspect(fake_batch(pages, "doc-batch", f"op{nth}", "b", blank={20}), {20})
+        merged = self.parse(Recorder(behaviour))
+        self.assertEqual(merged.result.pages[20].status, "needs_review")
+        self.assertTrue(all(p.status == "ok" for p in merged.result.pages[:20]))
+
+    def test_the_failure_code_does_not_depend_on_the_document_size(self):
+        for pdf_pages in (1, 5):
+            pdf = build_pdf([{"mediabox": (0, 0, 595, 842)}] * pdf_pages)
+
+            def run(data, *, geometry, page_indices, cancelled, python, document_id, budget_ref, operation_id):
+                return self.suspect(fake_batch(page_indices, document_id, operation_id, budget_ref,
+                                               blank=set(page_indices)), set(page_indices))
+            with self.subTest(pdf_pages), self.assertRaises(InspectionError) as ctx:
+                parse_in_batches(pdf, document_id="doc-batch", budget_ref="b", operation_id="op", run_batch=run)
+            self.assertEqual(ctx.exception.code, "text_extraction_empty")
 
     def test_systemic_codes_stop_at_once(self):
         for code in ("unsupported_platform", "invalid_input"):

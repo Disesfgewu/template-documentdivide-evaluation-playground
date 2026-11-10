@@ -34,14 +34,14 @@ from .batch_coverage import BatchLimits, BatchPageReport, BatchResultInput, eval
 from .batch_retry import RetryTargetPage, derive_retry_plan, execute_and_merge_retry
 from .isolation import InspectionError, inspect_geometry
 from .normalize import Artifact, NormalizedBatch
-from .unstructured_runner import run_unstructured_fast
+from .unstructured_runner import LOST_TEXT_DIAGNOSTIC, run_unstructured_fast
 
 __all__ = ["DEFAULT_LIMITS", "MAX_RETRY_ROUNDS", "PartialParseFailure", "parse_in_batches"]
 
 DEFAULT_LIMITS = BatchLimits(max_pages=2000, batch_size=10, overlap_pages=0, parallel_batches=2)
 MAX_RETRY_ROUNDS = 5
 # A child failure with one of these codes can succeed on a later attempt of the whole job.
-TRANSIENT_CODES = frozenset({"timeout", "process_unavailable", "inspection_io_failed", "text_extraction_empty"})
+TRANSIENT_CODES = frozenset({"timeout", "process_unavailable", "inspection_io_failed"})
 # These are about this process or this input, not about one batch: retrying them cannot help.
 SYSTEMIC_CODES = frozenset({"unsupported_platform", "invalid_input", "invalid_limits", "invalid_pdf", "encrypted_pdf",
                             "page_limit_exceeded", "input_size"})
@@ -195,7 +195,13 @@ def parse_in_batches(
     failed = sorted(set(coverage.failed_pages) | set(coverage.missing_pages))
     if failed:
         raise PartialParseFailure(failed)
-    return _merge(outcome, operation_id, len(geometry.pages))
+    merged = _merge(outcome, operation_id, len(geometry.pages))
+    if not merged.observations and any(LOST_TEXT_DIAGNOSTIC in p.diagnostics for p in merged.result.pages):
+        # The WHOLE document produced no element while pypdf finds text on some page: the parser silently
+        # lost the text (for example its spaCy model could not be installed). Transient: never a clean
+        # empty success. With any element anywhere, a suspect page stays needs_review with a diagnostic.
+        raise InspectionError("text_extraction_empty")
+    return merged
 
 
 def _merge(outcome: dict[int, _Page], operation_id: str, page_count: int) -> NormalizedBatch:

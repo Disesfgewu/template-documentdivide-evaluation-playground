@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from lab_parser import unstructured_runner
 from lab_parser.isolation import InspectionError, ProcessLimits
-from lab_parser.unstructured_runner import run_unstructured_fast
+from lab_parser.unstructured_runner import LOST_TEXT_DIAGNOSTIC, run_unstructured_fast
 from tests.parser.pdfgen import build_pdf
 
 ELEMENT = {"type": "NarrativeText", "element_id": "e1", "text": "Synthetic runner text",
@@ -138,12 +138,19 @@ class RunnerTests(Base):
         self.assertAlmostEqual(y0, 60.9 / 742)
         self.assertAlmostEqual(x1, (191.8 - 50) / 562)
 
-    def test_pages_whose_text_unstructured_lost_fail_the_run_instead_of_succeeding_empty(self):
-        for lost in ([0], [1], [0, 1]):
+    def test_pages_whose_text_unstructured_lost_are_reported_as_suspect_not_failed(self):
+        for lost, suspect in (([0], {0}), ([1], {1}), ([0, 1], {0, 1})):
             source = child_source(elements=()).replace("'attestable_pages'", f"'lost_text_pages': {lost}, 'attestable_pages'")
-            with self.subTest(lost), self.assertRaises(InspectionError) as ctx:
-                self.run_it(source)
-            self.assertEqual(ctx.exception.code, "text_extraction_empty")
+            with self.subTest(lost):
+                batch = self.run_it(source)
+                self.assertIsNone(batch.quarantine_reason)
+                for page in batch.result.pages:
+                    self.assertEqual(page.status, "needs_review")
+                    self.assertEqual(LOST_TEXT_DIAGNOSTIC in page.diagnostics, page.page_index in suspect)
+        source = child_source(elements=()).replace("'attestable_pages'", "'lost_text_pages': [2], 'attestable_pages'")
+        with self.assertRaises(InspectionError) as ctx:       # an index outside the requested pages
+            self.run_it(source)
+        self.assertEqual(ctx.exception.code, "invalid_child_result")
         for junk in ("'x'", "[-1]", "[True]", "{}"):
             source = child_source().replace("'attestable_pages'", f"'lost_text_pages': {junk}, 'attestable_pages'")
             with self.subTest(junk), self.assertRaises(InspectionError) as ctx:
