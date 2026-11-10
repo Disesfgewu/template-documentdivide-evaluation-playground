@@ -3,7 +3,10 @@
 # services/api + services/parser + contracts + db locks, then unstructured[pdf]==0.27.36), with the
 # CUDA stack (nvidia-*, cuda-*, triton) removed. This image runs the `fast` strategy on CPU, so torch and
 # torchvision come from the CPU wheel index (same versions; the "+cpu" local version wins over PyPI's).
-# Regenerate from a new e2e artifact and rebuild; do not edit by hand.
+# unstructured 0.27.36 downloads the spaCy model en_core_web_sm into site-packages the first time it needs it
+# and, when that fails (a read-only root, no network), silently returns NO elements (measured in the worker
+# image smoke). The model is therefore installed here, pinned by hash, so the image never downloads at runtime.
+# Regenerate the rest from a new e2e artifact and rebuild; do not edit by hand.
 --extra-index-url https://download.pytorch.org/whl/cpu
 accelerate==1.15.0
 aiofiles==25.1.0
@@ -144,3 +147,4 @@ wasabi==1.1.3
 weasel==1.0.1
 webencodings==0.6.1
 wrapt==2.5.2
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
