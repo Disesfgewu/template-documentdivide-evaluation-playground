@@ -26,7 +26,7 @@ for _sub in (_REPO_ROOT, _REPO_ROOT / "db", _REPO_ROOT / "services" / "api", _RE
 from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
 from lab_api.main import create_app
-from lab_api.parse_worker_main import Backoff, Worker
+from lab_api.parse_worker_main import Backoff, Worker, check_heartbeat, main as worker_main
 from lab_db.storage import LocalArtifactStore
 from lab_parser.isolation import InspectionError
 from fixtures.generators import synthetic_pdf
@@ -66,6 +66,50 @@ class BackoffTests(unittest.TestCase):
         now[0] += 5000                    # far beyond four times the cap
         self.assertEqual(low.waiting(), set())
         self.assertEqual(low._strikes, {})
+
+
+class HeartbeatProbeTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = str(Path(self.dir.name, "hb"))
+
+    def write(self, text):
+        Path(self.path).write_text(text)
+
+    def test_fresh_stale_missing_malformed_and_future_stamps(self):
+        now = lambda: 1000.0
+        self.assertFalse(check_heartbeat(self.path, 60, now))                  # missing
+        self.write("990.0\n")
+        self.assertTrue(check_heartbeat(self.path, 60, now))                   # 10 s old
+        self.write("940.0\n")
+        self.assertTrue(check_heartbeat(self.path, 60, now))                   # exactly on the limit
+        self.write("939.0\n")
+        self.assertFalse(check_heartbeat(self.path, 60, now))                  # stale
+        for junk in ("", "abc", "nan", "inf", "-inf", "1e999"):
+            self.write(junk)
+            self.assertFalse(check_heartbeat(self.path, 60, now), junk)
+        self.write("2000.0")
+        self.assertFalse(check_heartbeat(self.path, 60, now))                  # from the future: not trusted
+
+    def test_the_probe_command_line_exits_0_or_1_and_never_starts_a_worker(self):
+        self.write(f"{time.time():.3f}\n")
+        self.assertEqual(worker_main(["--check-heartbeat", self.path, "--max-age", "30"]), 0)
+        self.write(f"{time.time() - 600:.3f}\n")
+        self.assertEqual(worker_main(["--check-heartbeat", self.path, "--max-age", "30"]), 1)
+        self.assertEqual(worker_main(["--check-heartbeat", self.path + ".missing"]), 1)
+        with self.assertRaises(SystemExit) as raised:                          # bounded --max-age
+            worker_main(["--check-heartbeat", self.path, "--max-age", "0"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_beat_is_atomic_and_never_raises(self):
+        worker = Worker(lambda: None, None, name="w", heartbeat_file=self.path)
+        worker.beat()
+        self.assertTrue(check_heartbeat(self.path, 5))
+        self.assertFalse(Path(self.path + ".tmp").exists())                    # the temp file was renamed away
+        broken = Worker(lambda: None, None, name="w", heartbeat_file=str(Path(self.dir.name, "no", "such", "dir", "hb")))
+        broken.beat()                                                          # unwritable: logged, not raised
+        Worker(lambda: None, None, name="w").beat()                            # not configured: a no-op
 
 
 def good_run(data, **kw):
@@ -346,6 +390,32 @@ class ParseWorkerMainRealDbTests(FreshDatabase):
 
         worker = Worker(broken, self.store, name="w", run=good_run, interval=1)
         self.assertEqual(worker.run_once(), {})
+
+    def test_the_heartbeat_keeps_beating_while_a_long_job_runs(self):
+        self.drain_foreign_jobs()
+        self.queue()
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory, "hb"))
+            started, release = threading.Event(), threading.Event()
+            seen = []
+
+            def slow(data, **kw):
+                started.set()
+                release.wait(30)
+                return good_run(data, **kw)
+
+            worker = self.worker(slow, interval=1, heartbeat_file=path)
+            thread = threading.Thread(target=worker.run_forever)
+            thread.start()
+            self.assertTrue(started.wait(30))
+            for _ in range(4):                                             # the job is still running the whole time
+                time.sleep(1.1)
+                seen.append(float(Path(path).read_text()))
+                self.assertTrue(check_heartbeat(path, 3))
+            release.set()
+            worker.stop.set()
+            thread.join(30)
+        self.assertGreater(seen[-1], seen[0])                              # it advanced during the job
 
     def test_the_command_line_validates_its_bounds(self):
         env = {**os.environ, **self.env, "PYTHONPATH": os.pathsep.join(

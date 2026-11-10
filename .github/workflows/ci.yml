@@ -15,6 +15,10 @@ on:
         description: "Also run the real end-to-end parse acceptance (Issue #7)"
         type: boolean
         default: false
+      worker_image:
+        description: "Also build and smoke-test the parse worker container image (Issue #7)"
+        type: boolean
+        default: false
       load:
         description: "Also run the 500/600 page load measurement (Issue #7)"
         type: boolean
@@ -272,6 +276,68 @@ jobs:
           name: llm-smoke
           if-no-files-found: warn
           path: ${{ runner.temp }}/llm-smoke-report.json
+
+  worker-image:
+    name: worker-image (synthetic, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start PostgreSQL and apply the schema
+        run: |
+          set -euo pipefail
+          compose="docker compose -f deploy/compose.dev.yml"
+          $compose up -d --wait db
+          $compose --profile tools run --rm -e LAB_MIGRATION_DATABASE_URL=postgresql://lab:lab-dev-only@db:5432/lab migrate -x deployment=ci upgrade head
+      - name: Build and start the worker service (read-only root, non-root, no capabilities)
+        run: |
+          set -euo pipefail
+          docker compose -f deploy/compose.dev.yml --profile worker up -d --build --wait --wait-timeout 300 parse-worker
+          cid="$(docker compose -f deploy/compose.dev.yml ps -q parse-worker)"
+          echo "$cid" > "$RUNNER_TEMP/worker-cid"
+          docker image inspect lab-dev-parse-worker --format 'image size bytes: {{.Size}}' | tee "$RUNNER_TEMP/worker-image.txt"
+          docker inspect "$cid" --format 'user={{.Config.User}} readonly={{.HostConfig.ReadonlyRootfs}} capdrop={{.HostConfig.CapDrop}} secopt={{.HostConfig.SecurityOpt}} memory={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}} health={{.State.Health.Status}}' | tee -a "$RUNNER_TEMP/worker-image.txt"
+          test "$(docker inspect "$cid" --format '{{.State.Health.Status}}')" = healthy
+          test "$(docker inspect "$cid" --format '{{.HostConfig.ReadonlyRootfs}}')" = true
+          test "$(docker inspect "$cid" --format '{{.Config.User}}')" = "10001:10001"
+      - name: The image carries no secrets
+        run: |
+          set -euo pipefail
+          if docker history --no-trunc lab-dev-parse-worker | grep -Ei 'secret|password|token|api[_-]?key'; then
+            echo "::error::a secret-looking string is in the image history"; exit 1
+          fi
+          if docker image inspect lab-dev-parse-worker --format '{{json .Config.Env}}' | grep -Ei 'lab_database_url|lab_auth_secret|password|token'; then
+            echo "::error::a secret-looking value is baked into the image environment"; exit 1
+          fi
+      - name: Real parse inside the running container (synthetic one-page PDF)
+        run: |
+          set -euo pipefail
+          cid="$(cat "$RUNNER_TEMP/worker-cid")"
+          docker exec -i "$cid" python - < deploy/worker_smoke.py | tee "$RUNNER_TEMP/worker-smoke.json"
+      - name: Graceful stop
+        run: |
+          set -euo pipefail
+          cid="$(cat "$RUNNER_TEMP/worker-cid")"
+          began=$(date +%s)
+          docker stop -t 90 "$cid"
+          echo "stop seconds: $(( $(date +%s) - began )); exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}')" | tee -a "$RUNNER_TEMP/worker-image.txt"
+      - name: Container log (fixed codes and ids only)
+        if: always()
+        run: |
+          docker compose -f deploy/compose.dev.yml --profile worker logs --no-color parse-worker > "$RUNNER_TEMP/worker-log.txt" 2>&1
+          tail -n 40 "$RUNNER_TEMP/worker-log.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: worker-image
+          path: |
+            ${{ runner.temp }}/worker-image.txt
+            ${{ runner.temp }}/worker-smoke.json
+            ${{ runner.temp }}/worker-log.txt
+      - name: Clean up
+        if: always()
+        run: docker compose -f deploy/compose.dev.yml --profile worker --profile tools down -v
 
   load-parse:
     name: load-parse (synthetic, manual)

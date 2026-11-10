@@ -5,11 +5,13 @@
 # Allow Dockerfiles
 !deploy/api.Dockerfile
 !deploy/parser.Dockerfile
+!deploy/worker.Dockerfile
 
 # Allow exact locked dependencies needed by COPY
 !services/api/requirements.lock
 !services/parser/requirements.lock
 !contracts/requirements.lock
+!deploy/worker.requirements.lock
 
 # Allow exact runtime source directories needed by COPY
 !db/lab_db

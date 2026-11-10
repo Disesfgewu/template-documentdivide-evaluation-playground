@@ -81,3 +81,15 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 - **沒有「合成／真實」標記**：資料庫與 API 不知道一份結果是來自合成文件或真實文件，只有 manifest 的 parser 版本與 profile；誠實標示要靠證據（CI run、fixture 名稱）而不是結果欄位。
 - **被隔離（quarantine）的批次不會被記錄**：normalizer 回傳 quarantine 的批次，其頁面在合併時視為失敗並重試；重試預算用完則整個 job 失敗且不存任何結果，所以資料庫裡沒有「失敗批次」的紀錄，只有 job 的轉換原因 `pages_failed:<頁數>`。
 - 摘要的 `effective_profile`／`strategy` 在 manifest 缺欄位時回 `null` 而不是 500（防禦用；寫入路徑一定帶有該欄位）。
+
+## 容器部署（Refs #7）
+
+`deploy/worker.Dockerfile`：與 API／parser 映像相同的 digest 固定 Python 3.12 slim 基底，非 root（UID/GID 10001），只複製執行期需要的原始碼（`db/lab_db`、`contracts/lab_contracts`、`services/parser/lab_parser`、`services/api/lab_api`；沒有測試、私有 agentKit、開發工具或機密），`ENTRYPOINT python -m lab_api.parse_worker_main`。依賴全部釘在 `deploy/worker.requirements.lock`（CI e2e venv 的 `pip freeze`，Python 3.12.16，移除 CUDA 套件，torch／torchvision 走 CPU wheel 索引；`unstructured==0.27.36`）。映像約 2.5 GB（量測值）。
+
+- **設定只用環境變數**（`LAB_DATABASE_URL`、`LAB_ARTIFACT_ROOT`、`LAB_AUTH_SECRET`…），映像裡沒有任何機密（CI 檢查映像歷史與內建環境）。`deploy/compose.dev.yml` 的 `parse-worker`（profile `worker`）只用與 `db` 服務相同的拋棄式開發憑證；真實部署要自己注入環境。
+- **執行限制**：唯讀根檔案系統、`/tmp` 為 tmpfs、`cap_drop: ALL`、`no-new-privileges`、記憶體 6 GB、pids 200、2 CPU（每個 parser 子程序量到約 1.3 GB RSS，見 #123；併發 1 時最多 2 個子程序）。
+- **健康檢查**：worker 每一輪（至少每個 `--interval` 秒，長時間解析中也一樣）改寫 `LAB_WORKER_HEARTBEAT_FILE`（預設 `/tmp/worker.heartbeat`）；探針 `python -m lab_api.parse_worker_main --check-heartbeat PATH --max-age 120` 不連資料庫，檔案缺失、壞掉、過期或來自未來都回 1。
+- **重要發現（已修）**：unstructured 0.27.36 第一次用到時會把 spaCy 模型 `en_core_web_sm` 從網路下載並安裝進 site-packages；在唯讀根或沒有網路時下載失敗，它只記一行 debug log（"PDF text extraction failed, skip text extraction"）然後**回傳零個元素**，job 仍然 `succeeded`、頁面是 `needs_review`（`requested_page_missing_or_blank_unconfirmed`）。映像因此在鎖檔中以雜湊釘住該模型，執行期不下載。這也是先前一次無法解釋的 e2e 偶發失敗（run 42702878315，第 1 頁沒有文字）的**合理假設**（每個 CI venv 第一次使用都會下載；暫時性的下載失敗會得到同樣的症狀），但沒有直接證據。
+- **未涵蓋**：映像只在 x86_64 的 GitHub runner 上建置與測試；沒有多 worker、沒有 `--concurrency` 大於 1 的容器測試、沒有 orchestrator（systemd／Kubernetes）設定；映像沒有掃描漏洞；鎖檔以 pip freeze 產生而不是 `--require-hashes`（只有 spaCy 模型有雜湊）；無法保證 `packages.unstructured.io`／PyPI 之外的其他執行期下載不存在（目前只觀察到這一個）。
+
+CI：手動 `workflow_dispatch` 的 `worker_image` 輸入執行 `worker-image` job：建置映像、以 compose 啟動、檢查非 root／唯讀／capability／健康狀態／映像沒有機密，並用 `deploy/worker_smoke.py` 在**執行中的容器內**以合成單頁 PDF 走完整條路徑（建立專案、上傳、排隊、由容器自己的 worker 以真實 unstructured 解析、讀回結果），最後優雅停止。
