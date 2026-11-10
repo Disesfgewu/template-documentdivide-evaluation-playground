@@ -6,3 +6,8 @@ web/node_modules/
 web/dist/
 services/worker/agentkitsmoke/log/
 services/worker/agentflow/log/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
