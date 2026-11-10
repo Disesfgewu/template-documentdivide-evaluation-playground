@@ -57,6 +57,36 @@ def scan(content: str, forms=None):
 SHOW = "(hello hidden) Tj"
 
 
+def raw_pdf(page_contents: str, extra_objects: dict[int, bytes]) -> bytes:
+    """A one-page PDF whose /Contents value is ``page_contents`` verbatim; object 5 is the font and
+    ``extra_objects`` supplies any objects that value points at (numbers 4 and 6 upward)."""
+    objs = {1: b"<< /Type /Catalog /Pages 2 0 R >>", 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            3: (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {page_contents} "
+                f"/Resources << /Font << /F1 5 0 R >> >> >>").encode(),
+            5: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", **extra_objects}
+    out, offsets = bytearray(b"%PDF-1.4\n"), {}
+    for n in sorted(objs):
+        offsets[n] = len(out)
+        out += b"%d 0 obj\n" % n + objs[n] + b"\nendobj\n"
+    size = max(objs) + 1
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+    for n in range(size):
+        if n:
+            out += (b"%010d 00000 n \n" % offsets[n]) if n in offsets else b"0000000000 00000 f \n"
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, xref)
+    return bytes(out)
+
+
+def stream(text: str) -> bytes:
+    data = text.encode("ascii")
+    return b"<< /Length %d >>\nstream\n" % len(data) + data + b"\nendstream"
+
+
+def scan_raw(page_contents: str, extra_objects: dict[int, bytes]):
+    return hidden.scan_document(PdfReader(io.BytesIO(raw_pdf(page_contents, extra_objects)), strict=True))
+
+
 class HiddenTextTests(unittest.TestCase):
     def test_a_normal_page_is_clean(self):
         self.assertEqual(scan(f"BT /F1 12 Tf 72 700 Td {SHOW} ET"), [])
@@ -121,6 +151,36 @@ class HiddenTextTests(unittest.TestCase):
         started = time.monotonic()
         self.assertEqual(scan(content), [[0, "content_unparseable"]])
         self.assertLess(time.monotonic() - started, 30)
+
+    def test_a_malformed_contents_entry_is_unparseable_not_clean(self):
+        hide = stream(f"BT /F1 12 Tf 3 Tr {SHOW} ET")
+        cases = {
+            "self-referencing array": ("4 0 R", {4: b"[4 0 R]"}),
+            "nested array": ("4 0 R", {4: b"[6 0 R]", 6: b"[7 0 R]", 7: hide}),
+            "array with a number": ("[4 0 R 5]", {4: hide}),
+            "array with a dictionary": ("[<< /A 1 >>]", {}),
+            "array pointing at a font dictionary": ("[5 0 R]", {}),
+            "dangling reference": ("99 0 R", {}),
+            "contents is a number": ("42", {}),
+            "contents is a dictionary": ("<< /A 1 >>", {}),
+        }
+        for name, (value, extra) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(scan_raw(value, extra), [[0, "content_unparseable"]])
+
+    def test_a_flat_array_of_streams_is_walked_as_one_stream_and_a_null_contents_is_clean(self):
+        self.assertEqual(scan_raw("[4 0 R 6 0 R]", {4: stream("BT /F1 12 Tf 3"), 6: stream(f"Tr {SHOW} ET")}),
+                         [[0, "text_not_visible"]])           # an operator split across two streams still counts
+        self.assertEqual(scan_raw("[4 0 R 6 0 R]", {4: stream("BT /F1 12 Tf"), 6: stream(f"{SHOW} ET")}), [])
+        self.assertEqual(scan_raw("[]", {}), [])
+        self.assertEqual(scan_raw("null", {}), [])
+
+    def test_a_rendering_mode_outside_0_to_7_is_not_proof_of_visibility(self):
+        for bad in ("8", "-1", "2.5", "99"):
+            with self.subTest(bad):
+                self.assertEqual(scan(f"BT /F1 12 Tf {bad} Tr 72 700 Td {SHOW} ET"), [[0, "content_unparseable"]])
+        self.assertEqual(scan(f"BT /F1 12 Tf 3.0 Tr 72 700 Td {SHOW} ET"), [[0, "text_not_visible"]])
+        self.assertEqual(scan("BT Tr ET"), [[0, "content_unparseable"]])       # missing operand
 
     def test_the_child_entry_point_loads_the_detector_by_path_and_reports_pages(self):
         import tempfile
