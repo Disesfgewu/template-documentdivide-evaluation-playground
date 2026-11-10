@@ -201,6 +201,14 @@ jobs:
           export LAB_E2E_REPORT="$RUNNER_TEMP/e2e-report.json"
           "$RUNNER_TEMP/e2e-venv/bin/python" -m unittest -v tests.e2e.test_parse_e2e_real 2>&1 | tee "$RUNNER_TEMP/e2e-log.txt"
           cat "$RUNNER_TEMP/e2e-report.json"
+      - name: Measure real fast output where pypdf and pdfminer may disagree
+        env:
+          LAB_E2E_REAL_UNSTRUCTURED: "1"
+        run: |
+          set -o pipefail
+          export LAB_E2E_DISAGREEMENT_REPORT="$RUNNER_TEMP/fast-disagreement.json"
+          "$RUNNER_TEMP/e2e-venv/bin/python" -m unittest -v tests.e2e.test_fast_disagreement_real 2>&1 | tee "$RUNNER_TEMP/disagreement-log.txt"
+          cat "$RUNNER_TEMP/fast-disagreement.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -209,6 +217,8 @@ jobs:
             ${{ runner.temp }}/e2e-report.json
             ${{ runner.temp }}/e2e-freeze.txt
             ${{ runner.temp }}/e2e-log.txt
+            ${{ runner.temp }}/fast-disagreement.json
+            ${{ runner.temp }}/disagreement-log.txt
       - name: Stop PostgreSQL
         if: always()
         run: docker compose -f deploy/compose.dev.yml down -v
