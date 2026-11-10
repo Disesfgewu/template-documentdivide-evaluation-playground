@@ -26,6 +26,9 @@ class ParseJobActive(Exception):
 
 # A job in one of these states still owns the document version's parse; succeeded, failed
 # and cancelled ones do not (a failed one is retried through its own job, not a second job).
+# 5 rather than 3: a worker shutdown that releases a running job still consumes an attempt (the jobs guard only
+# allows attempt unchanged or +1), so a few deployments during one long parse must not exhaust the job.
+DEFAULT_PARSE_MAX_ATTEMPTS = 5
 ACTIVE_JOB_STATUSES = ("queued", "running", "paused_budget", "waiting_review", "cancel_requested")
 
 
@@ -159,6 +162,32 @@ def finish(
             """,
             (status, project_id, lease.job_id),
         )
+
+
+def release_for_shutdown(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease) -> str:
+    """Give a running job back when its worker shuts down. Returns the job's new status: ``queued`` or ``failed``.
+
+    * ``attempt < max_attempts``: running -> queued, reason ``released: worker shutdown``; the next worker claims
+      it at once (it still counts as an attempt: the next acquire is attempt + 1).
+    * ``attempt >= max_attempts`` (the LAST attempt was interrupted): running -> failed, reason ``lease_exhausted``,
+      the same terminal outcome ``fail_exhausted`` gives when a lease expires with no attempts left. Requeueing it
+      would strand a ``queued`` job that ``acquire`` refuses (attempt + 1 > max_attempts) and ``fail_exhausted``
+      never finalizes, blocking the document version until a user cancels.
+
+    Only the CURRENT lease holder can do this: the job is locked ``FOR UPDATE`` and ``finish`` repeats the fenced
+    check (status ``running``, matching token, lease not expired), so a stale holder, an expired lease, or a job the
+    user already moved to ``cancel_requested``/``cancelled`` (the cancel wins) raises ``LeaseLost`` and changes
+    nothing. The lease fields are cleared by the existing guarded transition."""
+    with conn.transaction():
+        row = conn.execute("SELECT attempt, max_attempts FROM jobs WHERE project_id = %s AND id = %s FOR UPDATE",
+                           (project_id, lease.job_id)).fetchone()
+        if row is None:
+            raise LeaseLost(f"job {lease.job_id} not found")
+        if row[0] >= row[1]:
+            finish(conn, project_id, lease, "failed", "lease_exhausted")
+            return "failed"
+        finish(conn, project_id, lease, "queued", "released: worker shutdown")
+        return "queued"
 
 
 class JobNotCancellable(Exception):
@@ -372,7 +401,7 @@ def enqueue_parse_job(
     profile: str,
     page_selection: Optional[list[int]] = None,
     budget_ref: Optional[str] = None,
-    max_attempts: int = 3,
+    max_attempts: int = DEFAULT_PARSE_MAX_ATTEMPTS,
 ) -> uuid.UUID:
     """Create a queued ``document.parse`` job bound to its input, in the caller's transaction.
 

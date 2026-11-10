@@ -274,7 +274,9 @@ class ParseWorkerMainRealDbTests(FreshDatabase):
                 thread.join(30)
                 self.assertFalse(thread.is_alive(), "the worker must exit although the parser never finishes by itself")
                 self.assertLess(time.monotonic() - began, 15)
-                self.assertEqual(self.status(job)[0], "running")  # left to lease expiry, never marked finished
+                # PM-DECISION A: after the parsers are cancelled and reaped the job is RELEASED (queued, attempt kept),
+                # never marked finished and no longer left running until its lease expires.
+                self.assertEqual(self.status(job)[0], "queued")
 
     def test_the_forced_exit_branch_when_a_parser_ignores_cancellation(self):
         from lab_api import parse_worker_main as module
