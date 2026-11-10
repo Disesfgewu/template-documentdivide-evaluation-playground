@@ -115,9 +115,11 @@ class RssSampler:
 class ParseLoadMeasurement(FreshDatabase):
     @classmethod
     def tearDownClass(cls):
+        text = json.dumps(REPORT, indent=2, sort_keys=True, default=float)   # SQL sums arrive as Decimal
+        print(text)
         path = os.environ.get("LAB_LOAD_REPORT")
         if path:
-            Path(path).write_text(json.dumps(REPORT, indent=2, sort_keys=True))
+            Path(path).write_text(text)
         super().tearDownClass()
 
     def setUp(self):
