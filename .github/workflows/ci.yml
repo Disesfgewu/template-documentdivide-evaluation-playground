@@ -360,6 +360,7 @@ jobs:
           began=$(date +%s)
           $compose stop parse-worker
           echo "compose stop seconds: $(( $(date +%s) - began )); exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}')" | tee -a "$report"
+          stop_exit="$(docker inspect "$cid" --format '{{.State.ExitCode}}')"
           echo "status right after stop: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
           sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results after stop: /' | tee -a "$report"
           $compose start parse-worker
@@ -371,6 +372,10 @@ jobs:
           echo "final status after restart: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
           sql "select reason from job_transitions where job_id = '$job' order by id" | sed 's/^/transition: /' | tee -a "$report"
           sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results at the end: /' | tee -a "$report"
+          # Pinned safety properties (the rest of the report is informational): the stop exit code was 0 (not 137), exactly one stored result, the job finished.
+          test "$stop_exit" = "0"
+          test "$(sql "select count(*) from parse_results where job_id = '$job'")" = "1"
+          test "$(sql "select status::text from jobs where id = '$job'")" = "succeeded"
       - name: Stop in the middle of a job that outlasts the grace period (400-page synthetic parse, report only)
         run: |
           set -euo pipefail
@@ -389,6 +394,7 @@ jobs:
           began=$(date +%s)
           $compose stop parse-worker
           echo "compose stop seconds (job longer than --grace 60): $(( $(date +%s) - began )); exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}')" | tee -a "$report"
+          stop_exit="$(docker inspect "$cid" --format '{{.State.ExitCode}}')"
           echo "status right after stop: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
           sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results after stop: /' | tee -a "$report"
           $compose start parse-worker
@@ -400,6 +406,10 @@ jobs:
           echo "final status after restart: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
           sql "select reason from job_transitions where job_id = '$job' order by id" | sed 's/^/transition: /' | tee -a "$report"
           sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results at the end: /' | tee -a "$report"
+          # Pinned safety properties (the rest of the report is informational): the stop exit code was 0 (not 137), exactly one stored result, the job finished.
+          test "$stop_exit" = "0"
+          test "$(sql "select count(*) from parse_results where job_id = '$job'")" = "1"
+          test "$(sql "select status::text from jobs where id = '$job'")" = "succeeded"
       - name: Container log (fixed codes and ids only)
         if: always()
         run: |
