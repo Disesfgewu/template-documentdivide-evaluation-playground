@@ -147,10 +147,13 @@ class ParseWorkerRealDbTests(FreshDatabase):
 
         self.assertEqual(self.process(project, job, boom).status, "queued")
         self.assertEqual(self.job_state(job)[:2], ("queued", 1))
-        self.assertEqual(self.process(project, job, boom).status, "queued")
-        last = self.process(project, job, boom)  # attempt 3 of 3
+        with self.connect() as c:
+            limit = c.execute("SELECT max_attempts FROM jobs WHERE id = %s", (job,)).fetchone()[0]   # 5 since the shutdown release
+        for _ in range(limit - 2):
+            self.assertEqual(self.process(project, job, boom).status, "queued")
+        last = self.process(project, job, boom)  # the last attempt
         self.assertEqual((last.status, last.reason), ("failed", "timeout"))
-        self.assertEqual(self.job_state(job)[:2], ("failed", 3))
+        self.assertEqual(self.job_state(job)[:2], ("failed", limit))
 
     def test_deterministic_error_fails_immediately(self):
         project, job = self.queue()
@@ -237,15 +240,17 @@ class ParseWorkerRealDbTests(FreshDatabase):
 
     def test_a_job_whose_attempts_are_used_up_by_crashes_is_finalized_not_stuck(self):
         project, job = self.queue()
-        for n in range(3):
+        with self.connect() as c:
+            limit = c.execute("SELECT max_attempts FROM jobs WHERE id = %s", (job,)).fetchone()[0]   # 5 since the shutdown release
+        for n in range(limit):
             with self.connect() as c:
                 jobs.acquire(c, project, job, f"crashed-{n}", ttl_seconds=1)
             time.sleep(1.3)
-        self.assertEqual(self.job_state(job)[:2], ("running", 3))
+        self.assertEqual(self.job_state(job)[:2], ("running", limit))
         with self.assertRaises(jobs.LeaseUnavailable):
             self.process(project, job, self.ok_run())
         status, attempt, reasons = self.job_state(job)
-        self.assertEqual((status, attempt, reasons[-1]), ("failed", 3, "lease_exhausted"))
+        self.assertEqual((status, attempt, reasons[-1]), ("failed", limit, "lease_exhausted"))
 
     def test_a_failed_heartbeat_connection_is_retried(self):
         project, job = self.queue()
