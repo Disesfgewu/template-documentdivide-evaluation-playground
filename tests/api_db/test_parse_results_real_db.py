@@ -251,6 +251,42 @@ class ParseResultsRealDbTests(FreshDatabase):
         self.assertEqual([e["raw_content"] for e in third["evidence"]], ["Gamma"])
         self.assertEqual(self.client.get(f"{base}/pages/0", headers=self.headers(s.reviewer)).status_code, 200)
 
+    def test_a_suspect_page_is_stored_with_its_diagnostic_and_returned_by_get(self):
+        """A healthy page next to a page with pypdf text but no element (Refs #7): the job succeeds, the
+        suspect page is needs_review with text_present_but_no_element in the stored row and in GET /pages/{i}."""
+        from dataclasses import replace
+        from lab_api.parse_results import make_persist
+        from lab_api.parse_worker import process_parse_job
+        from lab_contracts.parse import PageStatus
+        from lab_parser.unstructured_runner import LOST_TEXT_DIAGNOSTIC
+        s = self.seed()
+        batch = make_batch(s.doc, s.op)       # elements on pages 0 and 2; page 1 has none
+        pages = [PageStatus(page_index=p.page_index, status="needs_review",
+                            diagnostics=[*p.diagnostics, LOST_TEXT_DIAGNOSTIC]) if p.page_index == 1 else p
+                 for p in batch.result.pages]
+        batch = replace(batch, result=batch.result.model_copy(update={"pages": pages}))
+        with self.connect() as c:
+            outcome = process_parse_job(c, s.project, s.job, store=self.store, persist=make_persist(self.store),
+                                        worker="w", max_pdf_bytes=64 * 1024 * 1024, connect=self.connect,
+                                        run=lambda data, **kw: batch)
+        self.assertEqual((outcome.status, outcome.reason), ("succeeded", "parsed"))
+        with self.connect() as c:
+            rows = {i: (st, d) for i, st, d in c.execute(
+                "SELECT page_index, status::text, diagnostics FROM parse_page_results WHERE job_id = %s", (s.job,))}
+        self.assertEqual(rows[1][0], "needs_review")
+        self.assertIn(LOST_TEXT_DIAGNOSTIC, rows[1][1])
+        self.assertNotIn(LOST_TEXT_DIAGNOSTIC, rows[0][1] + rows[2][1])
+        base = f"/api/v1/documents/{s.doc}/parse-results/{s.job}"
+        got = self.client.get(f"{base}/pages/1", headers=self.headers(s.owner))
+        self.assertEqual(got.status_code, 200, got.text)
+        self.assertEqual(got.json()["status"], "needs_review")
+        self.assertIn(LOST_TEXT_DIAGNOSTIC, got.json()["diagnostics"])
+        self.assertEqual(got.json()["evidence"], [])
+        healthy = self.client.get(f"{base}/pages/0", headers=self.headers(s.owner)).json()
+        self.assertNotIn(LOST_TEXT_DIAGNOSTIC, healthy["diagnostics"])
+        summary = self.client.get(base, headers=self.headers(s.owner)).json()
+        self.assertEqual({p["page_index"]: p["status"] for p in summary["pages"]}[1], "needs_review")
+
     def test_access_and_missing_results(self):
         s = self.seed()
         self.finish_with_result(s)
