@@ -52,4 +52,5 @@ API 的互動文件在 `http://127.0.0.1:8000/docs`（需要 `run` 印出的 Bea
 
 - `up` 卡在 worker：看 `docker compose -f deploy/compose.dev.yml --profile demo logs parse-worker`。第一次啟動要下載 spaCy 模型（已在映像內，不需網路）。
 - port 8000 被佔用：`LAB_API_PORT=8010 scripts/demo.sh up`（`run` 在容器內執行，不受影響）。
-- 清乾淨重來：`scripts/demo.sh down`。
+- 清乾淨重來：`scripts/demo.sh down`。**注意**：它做 `down -v`，會連 `deploy/compose.dev.yml` 共用的開發資料庫卷（`lab-db`）一起刪掉；如果你同一台機器上有別的開發資料，先備份。
+- 資料庫 port 被佔用：`LAB_DB_PORT=55433 scripts/demo.sh up`（預設 55432）。

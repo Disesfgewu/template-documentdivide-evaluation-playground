@@ -7,7 +7,8 @@
 # Optional: DEMO_PDF=/path/to/your.pdf scripts/demo.sh run   (streamed into the container; your own file, parsed locally, never uploaded anywhere else)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-compose=(docker compose -f deploy/compose.dev.yml)
+# --env-file /dev/null: never read a developer's .env (the stack uses fixed throwaway dev credentials)
+compose=(docker compose --env-file /dev/null -f deploy/compose.dev.yml)
 
 up() {
   "${compose[@]}" up -d --wait db

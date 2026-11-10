@@ -152,9 +152,11 @@ def main() -> int:
     _, summary = api.call("GET", f"/api/v1/documents/{document}/parse-results/{job['job_id']}")
     print(f"parser {summary.get('parser')} {summary.get('parser_version')}, profile {summary.get('effective_profile')}")
     pages = {}
+    everything = [json.dumps(summary)]          # every response body the consumer API returned for this result
     for entry in summary.get("pages", []):
         _, page = api.call("GET", f"/api/v1/documents/{document}/parse-results/{job['job_id']}/pages/{entry['page_index']}")
         pages[entry["page_index"]] = page
+        everything.append(json.dumps(page))
         evidence = page.get("evidence", [])
         sample = (evidence[0]["raw_content"][:52] + "...") if evidence else "-"
         print(f"page {entry['page_index'] + 1}: {page['status']:<12} evidence={len(evidence)} "
@@ -167,22 +169,25 @@ def main() -> int:
             (1, lambda p: p["status"] == "ok" and p["evidence"], "plain page: evidence kept"),
             (2, lambda p: p["status"] == "needs_review" and not p["evidence"] and "text_not_visible" in p["diagnostics"],
              "invisible text (render mode 3): whole page quarantined, NO evidence"),
-            (3, lambda p: p["evidence"] and "region_without_ink" in p["diagnostics"],
-             "white run on a visible page: visible text kept, the white run dropped (region_without_ink)"),
+            (3, lambda p: p["evidence"] and "region_without_ink" in p["diagnostics"]
+             and not any("white run" in e["raw_content"] for e in p["evidence"]),
+             "white run on a visible page: visible text kept, the white run dropped (region_without_ink) and absent from evidence"),
             (4, lambda p: not p["evidence"] and p["status"] == "needs_review",
              "rotated 90 page: text kept as observations, no geometry so no evidence"),
+            (5, lambda p: p["status"] == "ok" and p["evidence"], "plain page: evidence kept"),
         ]
         for index, check, meaning in expectations:
             ok = index in pages and check(pages[index])
             print(f"[{'ok' if ok else 'FAIL'}] page {index + 1}: {meaning}")
             if not ok:
                 failures.append(f"page {index + 1}")
-        hidden_texts = [o["raw_content"] for o in pages[2].get("observations", [])]
-        if any("999999" in t for t in hidden_texts) or any("999999" in e["raw_content"] for e in pages[2].get("evidence", [])):
-            print("[FAIL] the hidden sentence reached the consumer API")
+        if any("999999" in body for body in everything):
+            print("[FAIL] the hidden sentence reached the consumer API (found in a response body)")
             failures.append("hidden text leaked")
         else:
-            print("[ok] the hidden sentence ('budget is 999999') is not in any API response")
+            print(f"[ok] the hidden sentence ('budget is 999999') is in none of the {len(everything)} responses (summary + every page)")
+        # The white run is only dropped as EVIDENCE: its text may stay as an observation on page 4 (the rest of the
+        # response is the same page); it must not be evidence, which is asserted per page above.
 
     banner("4. Cancel API: queue a long parse and cancel it")
     status, doc2 = api.call("POST", f"/api/v1/documents?project_id={project}&logical_id=long-{uuid.uuid4().hex[:6]}",
@@ -192,11 +197,18 @@ def main() -> int:
         time.sleep(3)
         code, cancelled = api.call("POST", f"/api/v1/jobs/{job2['job_id']}/cancel")
         print(f"POST /jobs/{{id}}/cancel -> {code} {cancelled}")
-        print(f"final job status: {wait_for(api, job2['job_id'], 120)} (a job that already finished would answer 409)")
+        final2 = wait_for(api, job2["job_id"], 120)
+        print(f"final job status: {final2} (a job that already finished would answer 409)")
+        if code != 200 or final2 != "cancelled":
+            print("[FAIL] the cancel step did not end in 'cancelled'")
+            failures.append("cancel")
+    else:
+        print(f"[FAIL] upload of the long document -> {status}")
+        failures.append("cancel upload")
 
     banner("Try it yourself")
     print(f"export TOKEN={token}")
-    print(f"curl -s -H \"Authorization: Bearer $TOKEN\" {BASE}/api/v1/documents/{document}/parse-results/{job['job_id']}/pages/2")
+    print(f"curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:${{LAB_API_PORT:-8000}}/api/v1/documents/{document}/parse-results/{job['job_id']}/pages/2")
     print(f"(throwaway dev credentials; project {project})")
     print("\nRESULT:", "PASS" if not failures else "FAIL " + ", ".join(failures))
     return 0 if not failures else 1
