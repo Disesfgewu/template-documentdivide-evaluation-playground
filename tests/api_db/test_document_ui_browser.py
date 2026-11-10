@@ -226,7 +226,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
             input=json.dumps(payload),
             capture_output=True,
             text=True,
-            timeout=150,   # up to 3 browser launches of 20 s each plus the flow itself
+            timeout=240,   # up to 3 browser launches of 20 s each plus the flow itself
         )
         self.assertEqual(
             res.returncode,
@@ -275,6 +275,11 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
             end = out.find("JSON_EVIDENCE_END")
             evidence = json.loads(out[start:end].strip())
 
+        # A browser launch that had to be retried must be visible, not silently absorbed (Issue #145).
+        launch = (evidence.get("launch") if isinstance(evidence, dict) else None) or {}
+        if launch.get("attempts", 1) > 1:
+            print("BROWSER LAUNCH RETRIED (Issue #145): " + json.dumps(launch), file=sys.stderr, flush=True)
+
         # Assert no metric was unobserved or missing before marking passed
         actual = evidence.get("actual", {})
         first_attempt = actual.get("first_attempt", {})
@@ -300,6 +305,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
         self.assertTrue(cross_project.get("ui_error_displayed"))
         self.assertFalse(cross_project.get("ui_success_displayed"))
 
+        evidence["actual"]["browser_launch"] = launch
         evidence["actual"]["database"] = {
             "document_versions_count": len(versions),
             "pages_count": page_cnt,

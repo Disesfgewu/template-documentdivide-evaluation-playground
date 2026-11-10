@@ -69,104 +69,40 @@ if (!browserPath || !fs.existsSync(browserPath)) {
   process.exit(3);
 }
 
-// Browser launch (flake fix, Refs #7). The old code waited ONCE, 15 s, for the "DevTools listening" line and
-// matched it against a single stderr chunk. In CI that sometimes ended in "Browser startup timeout" with no
-// information about the browser (it started in 70-900 ms on an idle machine and about 200 ms under a 12-way CPU
-// load when measured locally, so slowness alone does not explain it). Now: the stderr text is accumulated (a
-// line split across chunks still matches), a launch that does not report within STARTUP_MS is killed and retried
-// with a FRESH profile directory (up to ATTEMPTS times), and a final failure says how long each attempt waited,
-// whether the process exited (code/signal) and the tail of the browser's own stderr.
-const STARTUP_MS = 20000;
-const ATTEMPTS = 3;
-let browserProc = null;
-let userDataDir = null;
+// Browser launch: see browser_launcher.mjs (retry with a fresh profile, every failed attempt recorded).
+import { launchBrowser } from "./browser_launcher.mjs";
+
+let currentAttempt = null;
 let killed = false;
-function removeProfile() {
-  if (userDataDir) {
-    // The browser may still be writing into its profile while it dies: retry the removal briefly.
-    for (let i = 0; i < 5; i += 1) {
-      try { fs.rmSync(userDataDir, { recursive: true, force: true }); break; } catch {}
-    }
-  }
-}
 function cleanup() {
   if (killed) return;
   killed = true;
-  try { browserProc && browserProc.kill(); } catch {}
-  removeProfile();
+  if (currentAttempt) {
+    try { process.kill(-currentAttempt.proc.pid, "SIGKILL"); } catch {}
+    try { currentAttempt.proc.kill("SIGKILL"); } catch {}
+    try { fs.rmSync(currentAttempt.userDataDir, { recursive: true, force: true }); } catch {}
+  }
 }
 process.on("exit", cleanup);
 process.on("SIGINT", () => { cleanup(); process.exit(1); });
 process.on("SIGTERM", () => { cleanup(); process.exit(1); });
 
-function launchBrowserOnce() {
-  userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "chrome-ui-accept-"));
-  const proc = spawn(browserPath, [
-    "--headless=new",
-    "--remote-debugging-port=0",
-    "--remote-debugging-address=127.0.0.1",
-    "--disable-gpu",
-    "--no-sandbox",
-    `--user-data-dir=${userDataDir}`,
-  ]);
-  browserProc = proc;
-  const started = Date.now();
-  let stderrText = "";
-  let exited = null;
-  const port = new Promise((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
-      reject(new Error(`no DevTools line after ${Date.now() - started} ms (exited: ${JSON.stringify(exited)}); browser stderr tail: ${JSON.stringify(stderrText.slice(-1500))}`));
-    }, STARTUP_MS);
-    proc.stderr.on("data", (data) => {
-      stderrText += data.toString();
-      const m = stderrText.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//);
-      if (m && !settled) {
-        settled = true;
-        clearTimeout(timer);
-        resolve({ port: m[1], startupMs: Date.now() - started });
-      }
-    });
-    proc.on("exit", (code, signal) => {
-      exited = { code, signal, afterMs: Date.now() - started };
-      if (!settled) {   // died before reporting: no point waiting out the timer
-        settled = true;
-        clearTimeout(timer);
-        reject(new Error(`browser exited before reporting DevTools (exited: ${JSON.stringify(exited)}); stderr tail: ${JSON.stringify(stderrText.slice(-1500))}`));
-      }
-    });
-    proc.on("error", (err) => {
-      settled = true;
-      clearTimeout(timer);
-      reject(err);
-    });
-  });
-  return port;
-}
-
-async function launchBrowser() {
-  const failures = [];
-  for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
-    try {
-      const launched = await launchBrowserOnce();
-      launched.attempt = attempt;
-      return launched;
-    } catch (err) {
-      failures.push(`attempt ${attempt}: ${err.message}`);
-      try { browserProc && browserProc.kill("SIGKILL"); } catch {}
-      removeProfile();
-    }
-  }
-  throw new Error("Browser startup failed: " + failures.join(" | "));
-}
-
-const portPromise = launchBrowser();
+const redactSecrets = (text) => {
+  let out = text;
+  if (token) out = out.split(token).join("[REDACTED_TOKEN]");
+  if (otherToken) out = out.split(otherToken).join("[REDACTED_OTHER_TOKEN]");
+  return out;
+};
+const portPromise = launchBrowser({ browserPath, startupMs: 20000, attempts: 3, redact: redactSecrets }).then((launched) => {
+  currentAttempt = launched.attempt;
+  return launched;
+});
 
 async function run() {
   const launched = await portPromise;
   const port = launched.port;
-  console.log(`browser started on attempt ${launched.attempt} after ${launched.startupMs} ms`);
+  const launchRecord = { attempts: launched.attempts, startup_ms: launched.startupMs, failed_attempts: launched.failedAttempts };
+  console.log(`browser started on attempt ${launched.attempts} after ${launched.startupMs} ms`);
 
   // Fetch page target
   const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
@@ -473,6 +409,7 @@ async function run() {
     schema: "document-ui-browser-acceptance-v1",
     profile: "synthetic-f01-21-pages",
     status: "provisional",
+    launch: launchRecord,
     timestamp: new Date().toISOString(),
     browser: {
       product: browserVersion.product || "Chrome",
