@@ -1,6 +1,6 @@
 """Runs INSIDE the worker container (``docker exec -i <container> python - < deploy/worker_stop_smoke.py``), Refs #7.
 
-Queues a SYNTHETIC multi-page parse and returns as soon as the running worker has leased it (status
+Queues a SYNTHETIC multi-page parse (default 80 pages, or the first argument) and returns as soon as the running worker has leased it (status
 ``running``), printing one JSON line with the job id. The CI step then runs ``docker compose stop`` while the
 job is in flight and watches what happens to it (see the ``worker-image`` job). Nothing here parses anything.
 """
@@ -18,7 +18,7 @@ from lab_api.auth import get_signing_secret, issue_actor_token
 from lab_api.config import load_settings
 from lab_api.main import create_app
 
-PAGES = 80
+PAGES = int(sys.argv[1]) if len(sys.argv) > 1 else 80   # a bigger value makes the job outlast the worker grace period
 LINE = "Synthetic mid-job stop page %d. The quick brown fox jumps over the lazy dog."
 
 

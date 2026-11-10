@@ -371,6 +371,35 @@ jobs:
           echo "final status after restart: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
           sql "select reason from job_transitions where job_id = '$job' order by id" | sed 's/^/transition: /' | tee -a "$report"
           sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results at the end: /' | tee -a "$report"
+      - name: Stop in the middle of a job that outlasts the grace period (400-page synthetic parse, report only)
+        run: |
+          set -euo pipefail
+          compose="docker compose -f deploy/compose.dev.yml --profile worker"
+          sql() { docker compose -f deploy/compose.dev.yml exec -T db psql -U lab -d lab -At -c "$1"; }
+          $compose start parse-worker
+          cid="$($compose ps -q parse-worker)"
+          for _ in $(seq 1 60); do
+            test "$(docker inspect "$cid" --format '{{.State.Health.Status}}')" = healthy && break
+            sleep 2
+          done
+          report="$RUNNER_TEMP/worker-stop-long.txt"
+          docker exec -i "$cid" python - 400 < deploy/worker_stop_smoke.py | tee "$report"
+          job="$(tail -n 1 "$report" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["job"])')"
+          echo "status just before stop: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          began=$(date +%s)
+          $compose stop parse-worker
+          echo "compose stop seconds (job longer than --grace 60): $(( $(date +%s) - began )); exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}')" | tee -a "$report"
+          echo "status right after stop: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results after stop: /' | tee -a "$report"
+          $compose start parse-worker
+          for _ in $(seq 1 240); do
+            st="$(sql "select status::text from jobs where id = '$job'")"
+            case "$st" in succeeded|failed|cancelled) break ;; esac
+            sleep 2
+          done
+          echo "final status after restart: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          sql "select reason from job_transitions where job_id = '$job' order by id" | sed 's/^/transition: /' | tee -a "$report"
+          sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results at the end: /' | tee -a "$report"
       - name: Container log (fixed codes and ids only)
         if: always()
         run: |
@@ -384,6 +413,7 @@ jobs:
             ${{ runner.temp }}/worker-image.txt
             ${{ runner.temp }}/worker-smoke.json
             ${{ runner.temp }}/worker-stop.txt
+            ${{ runner.temp }}/worker-stop-long.txt
             ${{ runner.temp }}/worker-log.txt
       - name: Clean up
         if: always()
