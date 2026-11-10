@@ -7,6 +7,7 @@ supported here (blocked: no model/GPU environment).
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -18,13 +19,15 @@ import tempfile
 import time
 from typing import Callable, Sequence
 
-from lab_contracts.parse import ModelRevision, PageMapEntry, ParseManifest, ParseRequest, RenderSettings
+from lab_contracts.parse import ModelRevision, PageMapEntry, PageStatus, ParseManifest, ParseRequest, RenderSettings
 
 from .frame_transform import display_transform
 from .isolation import Inspection, InspectionError, ProcessLimits, _run_child, inspect_geometry
 from .normalize import ADAPTER_REVISION, DisplayFrame, NormalizedBatch, UnstructuredParser, UnstructuredProfile
 
-__all__ = ["RUNNER_LIMITS", "run_unstructured_fast"]
+__all__ = ["LOST_TEXT_DIAGNOSTIC", "RUNNER_LIMITS", "run_unstructured_fast"]
+
+LOST_TEXT_DIAGNOSTIC = "text_present_but_no_element"
 
 _CHILD = Path(__file__).with_name("_unstructured_child.py")
 _VERSION = "0.27.36"
@@ -112,6 +115,11 @@ def run_unstructured_fast(
         raise InspectionError("invalid_child_result") from None
     if type(meta) is not dict or meta.get("unstructured") != _VERSION or len(raw) > limits.output_bytes:
         raise InspectionError("version_mismatch")
+    lost = meta.get("lost_text_pages", [])
+    if type(lost) is not list or any(type(i) is not int or i < 0 for i in lost):
+        raise InspectionError("invalid_child_result")
+    if any(i >= len(page_indices) for i in lost):
+        raise InspectionError("invalid_child_result")
     attestable = meta.get("attestable_pages")
     if (type(attestable) is not list or len(attestable) != len(page_indices)
             or any(type(v) is not bool for v in attestable)):
@@ -154,7 +162,17 @@ def run_unstructured_fast(
         render_settings=RenderSettings(dpi=150, max_megapixels=16.0), postprocess_flags=[],
         endpoint_deployment_id=None, started_at=started, finished_at=datetime.now(timezone.utc),
         cost_usd=0.0, warnings=[], reproducible=True)
-    return UnstructuredParser().normalize(
+    batch = UnstructuredParser().normalize(
         raw, request, manifest, UnstructuredProfile(strategy="fast"),
         document_id=document_id, document_sha256=sha, frames=frames,
         document_page_count=total_pages)
+    if lost and batch.quarantine_reason is None:
+        # pypdf sees text on these pages but this run produced no element at all. Reported as information
+        # only: whether it is a total loss (e.g. the spaCy model could not be installed) is decided over the
+        # whole document by the batch layer, because a single page can legitimately disagree with pdfminer.
+        suspect = {page_indices[i] for i in lost}
+        pages = [PageStatus(page_index=p.page_index, status="needs_review",
+                            diagnostics=list(dict.fromkeys([*p.diagnostics, LOST_TEXT_DIAGNOSTIC])))
+                 if p.page_index in suspect else p for p in batch.result.pages]
+        batch = replace(batch, result=batch.result.model_copy(update={"pages": pages}))
+    return batch

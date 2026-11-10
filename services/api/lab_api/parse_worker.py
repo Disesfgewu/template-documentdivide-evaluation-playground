@@ -41,7 +41,7 @@ from lab_parser.batch_parse import PartialParseFailure, parse_in_batches
 __all__ = ["ParseOutcome", "SUPPORTED_PROFILE", "process_parse_job"]
 
 SUPPORTED_PROFILE = "unstructured-oss-fast"
-_TRANSIENT = {"timeout", "process_unavailable", "inspection_io_failed"}
+_TRANSIENT = {"timeout", "process_unavailable", "inspection_io_failed", "text_extraction_empty"}
 _MAX_BEAT_INTERVAL = 2.0   # also the worst-case cancel latency, whatever the lease ttl
 _BEAT_RETRIES = 3
 

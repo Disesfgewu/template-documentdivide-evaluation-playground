@@ -47,6 +47,34 @@ def _page_info(path: str) -> list[dict]:
             for page in reader.pages]
 
 
+MIN_LOST_TEXT_CHARS = 20   # shorter pypdf text (a page number, a stray mark) is not evidence of lost content
+
+
+def _pages_with_lost_text(path: str, elements: list) -> list[int]:
+    """0-based pages with real pypdf text, but only when Unstructured returned NO element at all.
+
+    Unstructured 0.27.36 downloads a spaCy model on first use; when that fails (read-only site-packages,
+    no network) it logs one debug line and returns NO elements, so a document's text can vanish while the
+    run looks successful. Only that total loss is flagged: when any element exists, a page without one
+    stays an honest ``needs_review`` page (pypdf and pdfminer may legitimately disagree on a single page).
+    The parent turns a non-empty list into ``text_extraction_empty``.
+    """
+    from pypdf import PdfReader
+
+    if any(isinstance(e, dict) for e in elements):
+        return []
+    reader = PdfReader(path, strict=True)
+    lost = []
+    for index, page in enumerate(reader.pages):
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            continue  # unreadable by pypdf: it cannot vouch that text exists
+        if len("".join(text.split())) >= MIN_LOST_TEXT_CHARS:
+            lost.append(index)
+    return lost
+
+
 def main() -> int:
     die_with_parent()
     apply_limits(*map(int, sys.argv[1:]))
@@ -77,7 +105,9 @@ def main() -> int:
         payload = json.dumps(elements_to_dicts(elements), allow_nan=False, sort_keys=True,
                              separators=(",", ":")).encode("utf-8")
         info = _page_info(source)
+        lost = _pages_with_lost_text(source, json.loads(payload))
         meta = json.dumps({"unstructured": md.version("unstructured"),
+                           "lost_text_pages": lost,
                            # Text units are intact only for upright (0) and upside-down (180) pages; 90 and
                            # 270 come out letter-scrambled (measured), so they are never attested.
                            "attestable_pages": [i["rotation"] in (0, 180) for i in info],
