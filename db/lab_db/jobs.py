@@ -161,59 +161,6 @@ def finish(
         )
 
 
-class JobNotCancellable(Exception):
-    """The job already finished (succeeded or failed); it cannot be cancelled."""
-
-    def __init__(self, status: str) -> None:
-        self.status = status
-        super().__init__(f"job is {status}")
-
-
-def request_cancel(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID,
-                   actor_id: uuid.UUID) -> tuple[str, bool]:
-    """A user's cancel request. Returns ``(status after, changed)``; raises ``LookupError`` if unknown.
-
-    * ``queued``, ``paused_budget``, ``waiting_review`` -> ``cancelled`` at once (nobody is running it);
-    * ``running`` -> ``cancel_requested``; the table allows a lease only on ``running``, so the lease is
-      dropped here and the worker's heartbeat (<= 2 s) sees the job leave ``running``, stops its
-      parser and acknowledges with ``acknowledge_cancel``;
-    * ``cancel_requested`` / ``cancelled`` -> unchanged (idempotent, nothing is written);
-    * ``succeeded`` / ``failed`` -> ``JobNotCancellable``.
-
-    The state change, the operation and its audit event commit together.
-    """
-    with conn.transaction():
-        row = conn.execute("SELECT status::text FROM jobs WHERE project_id = %s AND id = %s FOR UPDATE",
-                           (project_id, job_id)).fetchone()
-        if row is None:
-            raise LookupError(str(job_id))
-        status = row[0]
-        if status in ("cancelled", "cancel_requested"):
-            return status, False
-        if status in ("succeeded", "failed"):
-            raise JobNotCancellable(status)
-        target = "cancel_requested" if status == "running" else "cancelled"
-        operation_id = uuid.uuid4()
-        conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status) "
-                     "VALUES (%s, %s, 'job.cancel', %s, 'intent')", (operation_id, project_id, actor_id))
-        _reason(conn, "cancel requested by user")
-        conn.execute(
-            """
-            UPDATE jobs SET status = %s, lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
-                            row_version = row_version + 1
-            WHERE project_id = %s AND id = %s
-            """,
-            (target, project_id, job_id),
-        )
-        conn.execute("UPDATE operations SET status = 'succeeded', finished_at = now() WHERE id = %s", (operation_id,))
-        conn.execute(
-            "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, "
-            "outcome, operation_id) VALUES (%s, %s, %s, 'job.cancel_requested', 'job', %s, 'succeeded', %s)",
-            (uuid.uuid4(), project_id, actor_id, job_id, operation_id),
-        )
-    return target, True
-
-
 def fail_exhausted(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID) -> bool:
     """Finalize a job stuck 'running' whose lease expired and whose attempts are used up.
 

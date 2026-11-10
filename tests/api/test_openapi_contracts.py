@@ -98,7 +98,6 @@ class OpenApiSchemaStructureTests(unittest.TestCase):
             "/api/v1/runs/{run_id}",
             "/api/v1/runs/{run_id}/results",
             "/api/v1/jobs/{job_id}",
-            "/api/v1/jobs/{job_id}/cancel",
             "/api/v1/resources/{resource_id}/lineage",
             "/resources/{resource_id}/lineage",
             "/api/v1/comparisons",
