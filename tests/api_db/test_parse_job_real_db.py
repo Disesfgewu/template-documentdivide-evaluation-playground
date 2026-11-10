@@ -81,7 +81,7 @@ class ParseJobRealDbTests(FreshDatabase):
             row = c.execute("SELECT j.status::text AS status, j.kind, j.max_attempts, j.retryable, p.* "
                             "FROM jobs j JOIN parse_jobs p ON p.job_id = j.id WHERE j.id = %s", (job,)).fetchone()
             self.assertEqual((row["status"], row["kind"], row["retryable"], row["max_attempts"]),
-                             ("queued", "document.parse", True, 3))
+                             ("queued", "document.parse", True, 5))
             self.assertEqual((row["document_version_id"], row["project_id"], row["profile"], row["page_selection"],
                               row["budget_ref"], row["requested_by"]),
                              (doc, project, "mineru-standard", [0, 5, 20], "budget-1", owner))

@@ -7,9 +7,11 @@ until SIGTERM or SIGINT.
 * Polling interval is bounded (``--interval`` 1..60 s); an idle pass sleeps one interval.
 * Concurrency is bounded (``--concurrency`` 1..4 jobs at once, each with its own connection).
 * Stop is graceful: no new job is claimed; running jobs get ``--grace`` seconds (default 60). After
-  that the remaining parsers are cancelled (their children are killed), the job is left to lease
-  expiry (it is retaken, burning one attempt) and the process exits. A second SIGTERM/SIGINT
-  skips the grace period.
+  that the remaining parsers are cancelled (their children are killed and reaped) and each such job
+  is RELEASED at once (running -> queued, ``released: worker shutdown``, only by the current lease
+  holder) so the next worker takes it immediately; it still burns one attempt. If the release fails
+  the job is left to lease expiry as before. Then the process exits. A second SIGTERM/SIGINT skips
+  the grace period.
 * Every non-terminal outcome (a transient ``queued`` failure, a job that could not be claimed,
   ``abandoned`` for any reason) backs that job off in memory: exponential from ``--backoff``
   seconds, doubling per consecutive hit, capped at 5 min, with +-50% jitter so workers do not
@@ -152,7 +154,8 @@ class Worker:
                 outcome = process_parse_job(
                     conn, project_id, job_id, store=self.store, persist=make_persist(self.store),
                     worker=self.name, max_pdf_bytes=MAX_PDF_BYTES, connect=self.connect,
-                    ttl_seconds=self.ttl, python=self.python, run=self._run_with_abort())
+                    ttl_seconds=self.ttl, python=self.python, run=self._run_with_abort(),
+                    shutdown=self.abort.is_set)
         except jobs.LeaseUnavailable:
             LOG.info("job %s not claimable", job_id)  # someone else took it first
         except Exception as exc:

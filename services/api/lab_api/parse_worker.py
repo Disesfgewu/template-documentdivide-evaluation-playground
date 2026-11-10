@@ -158,6 +158,7 @@ def process_parse_job(
     ttl_seconds: int = 60,
     python: str | None = None,
     run: Callable[..., NormalizedBatch] = parse_in_batches,
+    shutdown: Callable[[], bool] | None = None,
 ) -> ParseOutcome:
     """Claim and execute one parse job. Raises ``jobs.LeaseUnavailable`` if it is not claimable.
 
@@ -180,7 +181,7 @@ def process_parse_job(
         raise
     try:
         return _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect,
-                        ttl_seconds, python, run)
+                        ttl_seconds, python, run, shutdown)
     except jobs.LeaseLost:
         return _stopped(conn, project_id, job_id)
     except Exception as exc:
@@ -196,7 +197,8 @@ def process_parse_job(
             raise
 
 
-def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, ttl_seconds, python, run):
+def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, ttl_seconds, python, run,
+             shutdown=None):
     job_id = lease.job_id
     with conn.transaction():  # no implicit transaction may stay open across the parse
         row = conn.execute(
@@ -241,6 +243,19 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
             # goes into the job's transition reason (never page content).
             batch, error = None, f"{exc.code}:{len(exc.failed_pages)}"
     if beat.lost.is_set() or error == "cancelled":
+        if shutdown is not None and shutdown() and not beat.lost.is_set():
+            # The worker is shutting down and its parser children are already cancelled and reaped (the run
+            # returned): give the job back at once instead of leaving it to the lease expiry. Only the current
+            # holder can (fenced); a user cancel wins (LeaseLost -> _stopped acknowledges it); any other failure
+            # falls back to the old behaviour, lease expiry.
+            try:
+                jobs.release_for_shutdown(conn, project_id, lease)
+                return ParseOutcome(job_id, "queued", "released: worker shutdown")
+            except jobs.LeaseLost:
+                pass
+            except Exception as exc:
+                if not is_infrastructure(exc):
+                    raise
         return _stopped(conn, project_id, job_id)
     if error is not None:
         if error in _TRANSIENT and attempt < max_attempts:

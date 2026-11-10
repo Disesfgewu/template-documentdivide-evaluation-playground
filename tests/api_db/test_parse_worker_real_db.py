@@ -87,11 +87,11 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual(res.status_code, 202, res.text)
         return project, uuid.UUID(res.json()["job_id"])
 
-    def process(self, project, job, run, ttl=60, persist=None, connect=None):
+    def process(self, project, job, run, ttl=60, persist=None, connect=None, shutdown=None):
         with self.connect() as c:
             return process_parse_job(c, project, job, store=self.store, persist=persist or self.persist,
                                      worker="test-worker", max_pdf_bytes=64 * 1024 * 1024,
-                                     connect=connect or self.connect, ttl_seconds=ttl, run=run)
+                                     connect=connect or self.connect, ttl_seconds=ttl, run=run, shutdown=shutdown)
 
     def job_state(self, job):
         with self.connect() as c:
@@ -415,6 +415,89 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual((outcome.status, outcome.reason), ("queued", "text_extraction_empty"))
         self.assertEqual(self.persisted_count(), 0)
         self.assertEqual(self.job_state(job)[:2], ("queued", 1))
+
+    # --- release on shutdown (PM-DECISION A, Refs #7) -------------------------------------------------------
+
+    @staticmethod
+    def aborted(data, **kw):
+        """What the batch runner does when the worker aborts its parsers (children already reaped)."""
+        raise InspectionError("cancelled")
+
+    def test_a_shutdown_abort_releases_the_job_and_another_worker_takes_it_at_once(self):
+        project, job = self.queue()
+        outcome = self.process(project, job, self.aborted, shutdown=lambda: True)
+        self.assertEqual((outcome.status, outcome.reason), ("queued", "released: worker shutdown"))
+        status, attempt, reasons = self.job_state(job)
+        self.assertEqual((status, attempt, reasons[-1]), ("queued", 1, "released: worker shutdown"))
+        self.assertEqual(self.persisted_count(), 0)                       # nothing was stored for the aborted run
+        with self.connect() as c:                                         # lease fields cleared by the guarded transition
+            self.assertEqual(c.execute("SELECT lease_owner, lease_token, lease_expires_at FROM jobs WHERE id = %s",
+                                       (job,)).fetchone(), (None, None, None))
+        outcome = self.process(project, job, self.ok_run())               # no lease expiry to wait for
+        self.assertEqual((outcome.status, outcome.reason), ("succeeded", "parsed"))
+        self.assertEqual(self.job_state(job)[:2], ("succeeded", 2))       # the release still counted as an attempt
+        self.assertEqual(self.persisted_count(), 1)
+
+    def test_without_a_shutdown_an_aborted_run_is_still_left_to_the_lease_expiry(self):
+        project, job = self.queue()
+        for flag in (None, lambda: False):
+            with self.subTest(flag):
+                outcome = self.process(project, job, self.aborted, shutdown=flag)
+                self.assertEqual((outcome.status, outcome.reason), ("abandoned", "lease_lost"))
+                self.assertEqual(self.job_state(job)[0], "running")
+                with self.connect() as c:                                 # let the lease expire for the next round
+                    c.execute("UPDATE jobs SET lease_expires_at = clock_timestamp() - interval '1 second', "
+                              "row_version = row_version + 1 WHERE id = %s", (job,))
+                    c.commit()
+
+    def test_only_the_current_lease_holder_can_release(self):
+        project, job = self.queue()
+        with self.connect() as c:
+            old = jobs.acquire(c, project, job, "old", ttl_seconds=1)
+        time.sleep(1.3)                                                   # expired: a release must not pretend it is live
+        with self.connect() as c, self.assertRaises(jobs.LeaseLost):
+            jobs.release_for_shutdown(c, project, old)
+        with self.connect() as c:
+            new = jobs.acquire(c, project, job, "new")                    # take-over by a new holder
+        with self.connect() as c, self.assertRaises(jobs.LeaseLost):
+            jobs.release_for_shutdown(c, project, old)                    # the stale holder is fenced out
+        self.assertEqual(self.job_state(job)[:2], ("running", 2))
+        with self.connect() as c:
+            jobs.release_for_shutdown(c, project, new)                    # the current holder can
+        self.assertEqual(self.job_state(job)[0], "queued")
+
+    def test_a_user_cancel_wins_over_the_shutdown_release(self):
+        project, job = self.queue()
+
+        def cancelling(data, **kw):
+            with self.connect() as c, c.transaction():
+                c.execute("SELECT set_config('lab.transition_reason', 'user cancel', true)")
+                c.execute("UPDATE jobs SET status = 'cancel_requested', lease_owner = NULL, lease_token = NULL, "
+                          "lease_expires_at = NULL, row_version = row_version + 1 WHERE id = %s", (job,))
+            raise InspectionError("cancelled")
+
+        outcome = self.process(project, job, cancelling, shutdown=lambda: True)
+        self.assertEqual((outcome.status, outcome.reason), ("cancelled", "cancel_acknowledged"))
+        self.assertEqual(self.job_state(job)[0], "cancelled")             # never requeued
+        self.assertNotIn("released: worker shutdown", self.job_state(job)[2])
+        self.assertEqual(self.persisted_count(), 0)
+
+    def test_a_failing_release_falls_back_to_the_lease_expiry(self):
+        import psycopg
+        project, job = self.queue()
+        with patch.object(jobs, "release_for_shutdown", side_effect=psycopg.OperationalError("connection lost")):
+            outcome = self.process(project, job, self.aborted, shutdown=lambda: True)
+        self.assertEqual((outcome.status, outcome.reason), ("abandoned", "lease_lost"))
+        self.assertEqual(self.job_state(job)[0], "running")               # exactly today's behaviour
+
+    def test_parse_jobs_are_enqueued_with_five_attempts(self):
+        project, job = self.queue()
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT max_attempts FROM jobs WHERE id = %s", (job,)).fetchone()[0], 5)
+        for _ in range(4):                                                # four shutdown releases still leave a fifth try
+            self.process(project, job, self.aborted, shutdown=lambda: True)
+        self.assertEqual(self.process(project, job, self.ok_run()).status, "succeeded")
+        self.assertEqual(self.job_state(job)[:2], ("succeeded", 5))
 
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()

@@ -396,9 +396,18 @@ jobs:
           $compose stop parse-worker
           echo "compose stop seconds (job longer than --grace 60): $(( $(date +%s) - began )); exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}')" | tee -a "$report"
           stop_exit="$(docker inspect "$cid" --format '{{.State.ExitCode}}')"
-          echo "status right after stop: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          after_stop="$(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")"
+          echo "status right after stop: $after_stop" | tee -a "$report"
           sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results after stop: /' | tee -a "$report"
           $compose start parse-worker
+          # Release on shutdown (PM-DECISION A): the new worker must claim the job at once, with no lease-expiry wait (ttl 60 s).
+          claimed=""
+          for _ in $(seq 1 20); do
+            claimed="$(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")"
+            case "$claimed" in "running attempt=2"|succeeded*) break ;; esac
+            sleep 2
+          done
+          echo "40 s after restart: $claimed" | tee -a "$report"
           for _ in $(seq 1 240); do
             st="$(sql "select status::text from jobs where id = '$job'")"
             case "$st" in succeeded|failed|cancelled) break ;; esac
@@ -409,6 +418,10 @@ jobs:
           sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results at the end: /' | tee -a "$report"
           # Pinned safety properties (the rest of the report is informational): the stop exit code was 0 (not 137), exactly one stored result, the job finished.
           test "$stop_exit" = "0"
+          test "$after_stop" = "queued attempt=1"
+          case "$claimed" in "running attempt=2"|succeeded*) ;; *) echo "::error::the job was not claimed within 40 s of the restart: $claimed"; exit 1 ;; esac
+          test "$(sql "select count(*) from job_transitions where job_id = '$job' and reason = 'released: worker shutdown'")" = "1"
+          test "$(sql "select attempt from jobs where id = '$job'")" = "2"
           test "$(sql "select count(*) from parse_results where job_id = '$job'")" = "1"
           test "$(sql "select status::text from jobs where id = '$job'")" = "succeeded"
       - name: Container log (fixed codes and ids only)

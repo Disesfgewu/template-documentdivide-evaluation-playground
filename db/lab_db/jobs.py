@@ -26,6 +26,9 @@ class ParseJobActive(Exception):
 
 # A job in one of these states still owns the document version's parse; succeeded, failed
 # and cancelled ones do not (a failed one is retried through its own job, not a second job).
+# 5 rather than 3: a worker shutdown that releases a running job still consumes an attempt (the jobs guard only
+# allows attempt unchanged or +1), so a few deployments during one long parse must not exhaust the job.
+DEFAULT_PARSE_MAX_ATTEMPTS = 5
 ACTIVE_JOB_STATUSES = ("queued", "running", "paused_budget", "waiting_review", "cancel_requested")
 
 
@@ -159,6 +162,17 @@ def finish(
             """,
             (status, project_id, lease.job_id),
         )
+
+
+def release_for_shutdown(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease) -> None:
+    """running -> queued with the reason ``released: worker shutdown``, so the next worker can claim the job at once.
+
+    Only the CURRENT lease holder can do this: it is the same fenced check as ``finish`` (job locked ``FOR UPDATE``,
+    status ``running``, matching token, lease not expired), so a stale holder, a job the user already moved to
+    ``cancel_requested``/``cancelled`` (the cancel wins: it is never requeued), or an expired lease raises
+    ``LeaseLost`` and changes nothing. The lease fields are cleared by the existing guarded transition. It does not
+    undo the attempt: the next acquire counts as attempt + 1 (docs/PARSE_WORKER.md)."""
+    finish(conn, project_id, lease, "queued", "released: worker shutdown")
 
 
 class JobNotCancellable(Exception):
@@ -372,7 +386,7 @@ def enqueue_parse_job(
     profile: str,
     page_selection: Optional[list[int]] = None,
     budget_ref: Optional[str] = None,
-    max_attempts: int = 3,
+    max_attempts: int = DEFAULT_PARSE_MAX_ATTEMPTS,
 ) -> uuid.UUID:
     """Create a queued ``document.parse`` job bound to its input, in the caller's transaction.
 
