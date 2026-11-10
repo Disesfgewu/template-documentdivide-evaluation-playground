@@ -239,7 +239,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Require credentials (a missing one is BLOCKED, never a pass)
         env:
-          AGENTKIT_READ_TOKEN: ${{ secrets.AGENTKIT_READ_TOKEN }}
           LAB_LLM_SMOKE_API_KEY: ${{ secrets.LAB_LLM_SMOKE_API_KEY }}
           LAB_LLM_SMOKE_BASE_URL: ${{ vars.LAB_LLM_SMOKE_BASE_URL }}
           LAB_LLM_SMOKE_ALLOWED_HOST: ${{ vars.LAB_LLM_SMOKE_ALLOWED_HOST }}
@@ -248,7 +247,7 @@ jobs:
           LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK }}
         run: |
           missing=""
-          for name in AGENTKIT_READ_TOKEN LAB_LLM_SMOKE_API_KEY LAB_LLM_SMOKE_BASE_URL LAB_LLM_SMOKE_ALLOWED_HOST LAB_LLM_SMOKE_MODEL \
+          for name in LAB_LLM_SMOKE_API_KEY LAB_LLM_SMOKE_BASE_URL LAB_LLM_SMOKE_ALLOWED_HOST LAB_LLM_SMOKE_MODEL \
                       LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK; do
             [ -n "${!name}" ] || missing="$missing $name"
           done
@@ -257,14 +256,11 @@ jobs:
             echo "::error::BLOCKED: no credentials or configuration:$missing"
             exit 1
           fi
-      - name: Check out the private agentKit pin (token scoped to this one command)
-        env:
-          AGENTKIT_READ_TOKEN: ${{ secrets.AGENTKIT_READ_TOKEN }}
+      - name: Check out the agentKit pin (the repository is public; no credential is involved)
         run: |
           set -euo pipefail
-          auth="$(printf 'x-access-token:%s' "$AGENTKIT_READ_TOKEN" | base64 -w0)"
-          echo "::add-mask::$auth"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" submodule update --init --checkout -- third_party/agentkit
+          export GIT_TERMINAL_PROMPT=0
+          git submodule update --init --checkout -- third_party/agentkit
           test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)"
       - uses: actions/setup-go@v5
         with:

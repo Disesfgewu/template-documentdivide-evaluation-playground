@@ -7,7 +7,7 @@ Refs #7、SPEC A42／T81–T84。**目前沒有任何真實 provider 呼叫的�
 | 項目 | 用途 | 放哪裡 |
 |---|---|---|
 | provider API key | 真實呼叫 | GitHub Actions secret `LAB_LLM_SMOKE_API_KEY` |
-| agentKit 唯讀 token | public repo 的 CI 取不到 private `Disesfgewu/agentkit`（見 `docs/AGENTKIT_SUBMODULE.md`） | secret `AGENTKIT_READ_TOKEN`（fine-grained、只讀、只對 agentkit） |
+| ~~agentKit 唯讀 token~~ | **不再需要**：`Disesfgewu/agentkit` 已公開（2026-11-10），CI 直接檢出 pin，不使用任何 token | （無） |
 | 端點與模型 | 呼叫目標 | repository／environment variables `LAB_LLM_SMOKE_BASE_URL`（必須是 https）、`LAB_LLM_SMOKE_ALLOWED_HOST`（key 唯一可以送達的主機，必須等於 URL 的主機）、`LAB_LLM_SMOKE_MODEL`（可選 `LAB_LLM_SMOKE_PROTOCOL`，預設 `openai_chat`） |
 | 價格 | 計算費用（不得假設為 0） | variables `LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK`、`LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK`（每百萬 token 的 micro-USD） |
 
@@ -15,7 +15,7 @@ SPEC 另外要求 embedding 與 vision 各一個真 smoke（可共用 provider�
 
 ## 程式在哪裡、做什麼
 
-`services/worker/agentflow/smoke_real_test.go`（agentKit 隔離模組，需要私有 checkout，見 `scripts/check.sh --scope worker-agentkit`）。`TestRealProviderSmoke` 用 worker 圖實際使用的路徑 `ChatCall` → `NodeRunner` → `Ledger` 發出**一次**固定模型（pin）的 chat 呼叫（prompt 固定、`max_output_tokens=16`、`max_retries=1`、逾時 60 秒），並寫出報告：
+`services/worker/agentflow/smoke_real_test.go`（agentKit 隔離模組，需要初始化 submodule，見 `scripts/check.sh --scope worker-agentkit`）。`TestRealProviderSmoke` 用 worker 圖實際使用的路徑 `ChatCall` → `NodeRunner` → `Ledger` 發出**一次**固定模型（pin）的 chat 呼叫（prompt 固定、`max_output_tokens=16`、`max_retries=1`、逾時 60 秒），並寫出報告：
 
 - 狀態 `passed`／`failed`／`blocked`、provider 主機名（只有 host）、模型、協定；
 - `usage_known`、輸入／輸出 token、`charged_micros`（用量未知時是 `-1`，**不是 0**）、transport 嘗試次數、耗時；
@@ -29,9 +29,9 @@ SPEC 另外要求 embedding 與 vision 各一個真 smoke（可共用 provider�
 
 ## 在 CI 執行
 
-`workflow_dispatch` 勾選 `llm_smoke`（job `llm-smoke`），**只在 `main` 上執行**並使用受保護的 environment `llm-smoke`（請在該 environment 設定 required reviewers，並把 secrets 放在那裡）；在其他 ref 上 dispatch 會跳過這個 job，secrets 不會交給分支上的程式碼。缺少任何一個 secret／variable 時該 job **失敗**並標示 `BLOCKED: no credentials or configuration`（報告 `status: blocked`），所以紅燈就是「還沒證明」。全部齊備時：以只限單一指令的 token 取出 agentKit pin，先跑私有模組套件的全部測試（`go vet`、`go test ./...`，包含對本機假端點的 harness 測試；**這是這些測試唯一的 CI 路徑**，一般 PR 的 CI 不編譯私有模組，所以它們平常只在有 agentKit 存取權的本機跑），再單獨跑 `TestRealProviderSmoke` 恰好一次（前一步以 `-skip` 排除它，避免第二次真實呼叫使花費加倍並覆蓋報告），並用報告確認 `status == passed` 且 `real == true` 才算通過；報告以 artifact `llm-smoke` 保存。
+`workflow_dispatch` 勾選 `llm_smoke`（job `llm-smoke`），**只在 `main` 上執行**並使用受保護的 environment `llm-smoke`（請在該 environment 設定 required reviewers，並把 secrets 放在那裡）；在其他 ref 上 dispatch 會跳過這個 job，secrets 不會交給分支上的程式碼。缺少任何一個 secret／variable 時該 job **失敗**並標示 `BLOCKED: no credentials or configuration`（報告 `status: blocked`），所以紅燈就是「還沒證明」。全部齊備時：直接檢出 agentKit pin（repo 已公開，不需要 token），先跑私有模組套件的全部測試（`go vet`、`go test ./...`，包含對本機假端點的 harness 測試；**這是這些測試唯一的 CI 路徑**，一般 PR 的 CI 不編譯私有模組，所以它們平常只在有 agentKit 存取權的本機跑），再單獨跑 `TestRealProviderSmoke` 恰好一次（前一步以 `-skip` 排除它，避免第二次真實呼叫使花費加倍並覆蓋報告），並用報告確認 `status == passed` 且 `real == true` 才算通過；報告以 artifact `llm-smoke` 保存。
 
-安全：這個 job 只能手動 dispatch，且 token 只會交給 dispatch 時選定的 ref；不要對未審查的分支或 fork 啟動它（`docs/AGENTKIT_SUBMODULE.md`：不得把私有 checkout 憑證交給不受信任的 PR 程式）。
+安全：這個 job 只能手動 dispatch，且 API key 只會交給 dispatch 時選定的 ref；不要對未審查的分支或 fork 啟動它。
 
 ## 還沒做（記錄，不宣稱）
 
