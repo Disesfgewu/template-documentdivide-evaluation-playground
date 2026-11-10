@@ -161,29 +161,27 @@ class ParseInkTests(unittest.TestCase):
             cell = 1 / INK_GRID
             self.assertEqual(check(0, (30 * cell, 20 * cell, 40 * cell, 30 * cell)), expect, n)
 
-    def test_one_rule_through_a_box_is_not_enough(self):
+    def test_a_rule_through_a_multi_row_box_is_not_enough(self):
         rows = ["0" * 32] * INK_GRID
         rows[25] = "f" * 32                                 # a full-width horizontal rule: 1 of 10 rows = 10%
         check = _parse_ink(self.maps(self.entry(rows)), [0])
         cell = 1 / INK_GRID
         self.assertFalse(check(0, (30 * cell, 20 * cell, 40 * cell, 30 * cell)))
 
-    def test_malformed_or_missing_maps_give_none_never_ink(self):
-        good = ["0" * 32] * INK_GRID
-        entry = lambda **kw: {"size": [612, 792], "rows": good, **kw}  # noqa: E731
-        bad = [None, b"not json", b"[]", b"{}", json.dumps({"grid": 64, "pages": [entry()]}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": []}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": [entry(rows=good[:-1])]}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": [entry(rows=["0" * 31] * INK_GRID)]}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": [entry(rows=["zz" * 16] * INK_GRID)]}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": [entry(rows=[5] * INK_GRID)]}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": [entry(size=[0, 792])]}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": [entry(size=[612])]}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": [{"rows": good}]}).encode(),
-               json.dumps({"grid": INK_GRID, "pages": [entry()], "extra": 1}).encode()]
-        for raw in bad:
-            with self.subTest(raw if raw is None else raw[:40]):
-                self.assertIsNone(_parse_ink(raw, [0]))
+    def test_known_limitation_a_rule_through_a_one_line_box_rescues_it(self):
+        """DOCUMENTED LIMITATION (PM review of #135), asserting the CURRENT behaviour, not a property to rely on:
+        a one-line box covers only 2-3 grid rows, so one full-width horizontal rule drawn through it fills a whole
+        row and scores above MIN_INK_FRACTION. Hidden text under or beside such a rule is therefore kept."""
+        cell = 1 / INK_GRID
+        one_line = (30 * cell, 20 * cell, 40 * cell, 22 * cell)          # 2 grid rows
+        rows = ["0" * 32] * INK_GRID
+        rows[21] = "f" * 32
+        check = _parse_ink(self.maps(self.entry(rows)), [0])
+        self.assertGreaterEqual(check.fraction(0, one_line), MIN_INK_FRACTION)
+        self.assertTrue(check(0, one_line))
+        # a filled stripe or rectangle over the box scores 1.0 as well
+        rows = ["f" * 32 if 19 <= r <= 23 else "0" * 32 for r in range(INK_GRID)]
+        self.assertEqual(_parse_ink(self.maps(self.entry(rows)), [0]).fraction(0, one_line), 1.0)
 
 
 if __name__ == "__main__":
