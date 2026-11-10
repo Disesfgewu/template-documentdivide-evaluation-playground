@@ -19,6 +19,12 @@ until SIGTERM or SIGINT.
 * Unreachable database: the loop logs a fixed code and retries after a bounded sleep, it never
   crashes on a dead connection.
 
+* Liveness for a container healthcheck: with ``--heartbeat-file PATH`` (or ``LAB_WORKER_HEARTBEAT_FILE``)
+  the loop rewrites that file with the current time at least once per pass, i.e. at least every
+  ``--interval`` seconds, even while a long parse runs. ``--check-heartbeat PATH --max-age SECONDS``
+  exits 0 when the file is fresh and 1 otherwise (missing, unreadable, malformed or stale); it opens
+  no database connection and starts no worker.
+
 Logs carry fixed codes and ids only, never document or parser text.
 """
 from __future__ import annotations
@@ -101,7 +107,7 @@ class Worker:
                  name: str, concurrency: int = 1, interval: float = 5.0, grace: float = 60.0,
                  backoff: float = 5.0, ttl_seconds: int = 60, python: str | None = None,
                  run=None, stop: threading.Event | None = None, once_timeout: float = 3600.0,
-                 jitter: Callable[[], float] | None = None):
+                 jitter: Callable[[], float] | None = None, heartbeat_file: str | None = None):
         if not 1 <= concurrency <= 4 or not 1 <= interval <= 60 or not 0 < backoff <= 60 or grace < 0:
             raise ValueError("concurrency 1..4, interval 1..60 s, backoff 0..60 s, grace >= 0")
         self.connect, self.store, self.name = connect, store, name
@@ -110,11 +116,24 @@ class Worker:
         self.stop = stop or threading.Event()
         self.abort = threading.Event()   # set to kill running parsers (grace expired or second signal)
         self.once_timeout = once_timeout
+        self.heartbeat_file = heartbeat_file
         self._last_pass = 0.0
         self.backoff = Backoff(backoff, jitter=jitter)
         self.counts: dict[str, int] = {}
         self._lock = threading.Lock()
         self._inflight: set[uuid.UUID] = set()
+
+    def beat(self) -> None:
+        """Record that the loop is alive (a container healthcheck reads this). Never raises."""
+        if not self.heartbeat_file:
+            return
+        try:
+            tmp = f"{self.heartbeat_file}.tmp"
+            with open(tmp, "w", encoding="ascii") as stream:
+                stream.write(f"{time.time():.3f}\n")
+            os.replace(tmp, self.heartbeat_file)
+        except OSError:
+            LOG.warning("heartbeat file not writable")
 
     def _run_with_abort(self):
         base = self.run
@@ -165,6 +184,7 @@ class Worker:
 
     def pass_once(self, pool: ThreadPoolExecutor, futures: set[Future]) -> int:
         """Submit up to the free capacity; returns how many jobs were submitted."""
+        self.beat()
         free = self.concurrency - len(futures)
         if free <= 0:
             return 0
@@ -239,6 +259,17 @@ class Worker:
     forced = False
 
 
+def check_heartbeat(path: str, max_age: float, now: Callable[[], float] = time.time) -> bool:
+    """True when ``path`` holds a timestamp no older than ``max_age`` seconds (and not from the future)."""
+    try:
+        with open(path, "r", encoding="ascii") as stream:
+            stamp = float(stream.read(64).strip())
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    age = now() - stamp
+    return -5.0 <= age <= max_age
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m lab_api.parse_worker_main", description=__doc__.split("\n")[0])
     parser.add_argument("--once", action="store_true", help="process what is claimable now, then exit")
@@ -247,8 +278,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--grace", type=float, default=60.0)
     parser.add_argument("--backoff", type=float, default=5.0)
     parser.add_argument("--once-timeout", type=float, default=3600.0, help="--once gives up after this many seconds")
+    parser.add_argument("--heartbeat-file", default=os.environ.get("LAB_WORKER_HEARTBEAT_FILE"),
+                        help="rewritten with the current time every pass (for a container healthcheck)")
+    parser.add_argument("--check-heartbeat", metavar="PATH", default=None,
+                        help="probe: exit 0 if PATH was refreshed within --max-age seconds, else 1; starts no worker")
+    parser.add_argument("--max-age", type=float, default=120.0)
     parser.add_argument("--python", default=None, help="interpreter that has the pinned parser library")
     args = parser.parse_args(argv)
+    if args.check_heartbeat is not None:
+        if not 1 <= args.max_age <= 3600:
+            parser.error("--max-age must be between 1 and 3600 seconds")
+        return 0 if check_heartbeat(args.check_heartbeat, args.max_age) else 1
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = load_settings()
     url = settings.database_url.get_secret_value()
@@ -267,7 +307,8 @@ def main(argv: list[str] | None = None) -> int:
         worker = Worker(lambda: psycopg.connect(url, connect_timeout=5), store,
                         name=f"parse-worker-{uuid.uuid4().hex[:8]}", concurrency=args.concurrency,
                         interval=args.interval, grace=args.grace, backoff=args.backoff,
-                        python=args.python, stop=stop, once_timeout=args.once_timeout)
+                        python=args.python, stop=stop, once_timeout=args.once_timeout,
+                        heartbeat_file=args.heartbeat_file)
     except ValueError as exc:
         parser.error(str(exc))
     holder["worker"] = worker
