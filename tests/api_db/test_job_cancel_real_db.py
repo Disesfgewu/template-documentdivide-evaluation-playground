@@ -106,6 +106,49 @@ class JobCancelRealDbTests(FreshDatabase):
         self.assertEqual(self.state(job)[0], "queued")                                # none of that changed anything
         self.assertEqual(self.cancel(members["maintainer"], job).status_code, 200)    # maintainers may, like queuing
 
+    def test_a_job_whose_worker_died_is_cancelled_straight_away(self):
+        project, owner, _, _, job = self.seed()
+        with self.connect() as c:
+            jobs.acquire(c, project, job, "dead-worker", ttl_seconds=1)   # never heartbeats again
+        time.sleep(1.4)                                                    # the lease has expired, status is still running
+        res = self.cancel(owner, job)
+        self.assertEqual((res.status_code, res.json()["status"], res.json()["changed"]), (200, "cancelled", True))
+        status, audits, reasons = self.state(job)
+        self.assertEqual((status, len(audits)), ("cancelled", 1))
+        self.assertEqual(reasons[-2], "cancel requested by user")
+        self.assertIn("lease had expired", reasons[-1])
+        with self.connect() as c:  # the document version is free again: a new parse can be queued
+            row = c.execute("SELECT document_version_id FROM parse_jobs WHERE job_id = %s", (job,)).fetchone()
+        again = self.client.post(f"/api/v1/documents/{row[0]}/parse", headers=self.headers(owner), json={})
+        self.assertEqual(again.status_code, 202, again.text)
+
+    def test_a_job_stuck_in_cancel_requested_can_be_recovered_by_repeating_the_request(self):
+        project, owner, _, _, job = self.seed()
+        with self.connect() as c:
+            jobs.acquire(c, project, job, "worker")                        # live lease: a real worker could be running it
+        first = self.cancel(owner, job)
+        self.assertEqual((first.json()["status"], first.json()["changed"]), ("cancel_requested", True))
+        again = self.cancel(owner, job)                                    # recent: still waiting for the worker
+        self.assertEqual((again.json()["status"], again.json()["changed"]), ("cancel_requested", False))
+        with patch.object(jobs, "CANCEL_ACK_GRACE_SECONDS", 0.0):          # the worker never acknowledged
+            recovered = self.cancel(owner, job)
+        self.assertEqual((recovered.status_code, recovered.json()["status"], recovered.json()["changed"]),
+                         (200, "cancelled", True))
+        self.assertEqual(len(self.state(job)[1]), 2)                       # two effective requests, two audit events
+
+    def test_authorization_is_repeated_inside_the_write_transaction(self):
+        from lab_db.repo import NotFound, PermissionDenied
+        project, owner, members, outsider, job = self.seed()
+        with self.connect() as c:
+            with self.assertRaises(NotFound):                              # non-member: no way around the check
+                jobs.request_cancel(c, project, job, outsider)
+            c.execute("UPDATE project_members SET role = 'participant' WHERE project_id = %s AND actor_id = %s",
+                      (project, members["maintainer"]))
+            c.commit()
+            with self.assertRaises(PermissionDenied):                      # demoted after the earlier check
+                jobs.request_cancel(c, project, job, members["maintainer"])
+        self.assertEqual(self.state(job)[0], "queued")
+
     def test_a_finished_job_cannot_be_cancelled(self):
         project, owner, _, _, job = self.seed()
         with self.connect() as c:

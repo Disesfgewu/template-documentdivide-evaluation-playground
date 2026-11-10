@@ -145,9 +145,14 @@ def _cancel_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID
     except PermissionDenied as exc:
         raise ApiError(403, "permission_denied", str(exc)) from None
     try:
-        status, changed = request_cancel(conn, project_id, job_id, actor_id)
+        # Authorized again inside the write transaction (a role may have changed since the check above).
+        status, changed = request_cancel(conn, project_id, job_id, actor_id, action=CANCEL_ACTION)
     except LookupError:
         raise missing from None
+    except NotFound:
+        raise missing from None
+    except PermissionDenied as exc:
+        raise ApiError(403, "permission_denied", str(exc)) from None
     except JobNotCancellable as exc:
         raise ApiError(409, "conflict", f"the job already finished ({exc.status}) and cannot be cancelled") from None
     return {"job_id": str(job_id), "status": status, "changed": changed}
