@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -37,6 +38,67 @@ _VERSION = "0.27.36"
 # Library imports are large; the geometry child's 512 MiB cannot hold them.
 RUNNER_LIMITS = ProcessLimits(memory_bytes=4 * 1024 * 1024 * 1024, cpu_seconds=60,
                               wall_seconds=120, output_bytes=16 * 1024 * 1024)
+
+
+INK_GRID = 128
+MIN_INK_FRACTION = 0.2   # share of the cells under an evidence region that must be inked (gap G8 (b))
+
+
+class _Ink:
+    """The child's per-page occupancy maps: ``fraction`` of inked cells under a box, and ``__call__`` as the
+    keep/drop decision used by the normalizer."""
+
+    def __init__(self, rows_by_page: dict, size_by_page: dict):
+        self._rows, self.sizes = rows_by_page, size_by_page
+
+    def fraction(self, page_index: int, bbox) -> float:
+        rows = self._rows.get(page_index)
+        if rows is None:
+            return 0.0
+        x0, y0, x1, y1 = bbox
+        # Round outward so that antialiasing at a box edge cannot hide the ink of a real glyph.
+        c0, c1 = max(0, math.floor(x0 * INK_GRID)), min(INK_GRID, math.ceil(x1 * INK_GRID))
+        r0, r1 = max(0, math.floor(y0 * INK_GRID)), min(INK_GRID, math.ceil(y1 * INK_GRID))
+        if c1 <= c0 or r1 <= r0:
+            return 0.0
+        mask = ((1 << (c1 - c0)) - 1) << c0
+        inked = sum(bin(rows[r] & mask).count("1") for r in range(r0, r1))
+        return inked / ((c1 - c0) * (r1 - r0))
+
+    def __call__(self, page_index: int, bbox) -> bool:
+        return self.fraction(page_index, bbox) >= MIN_INK_FRACTION
+
+
+def _parse_ink(raw: bytes | None, page_indices: Sequence[int]):
+    """Validate the child's ``ink.json`` and return an ``_Ink``; ``None`` for anything missing or malformed, which
+    the caller turns into a page quarantine (never 'assume ink'). A page whose map is ``null`` has no entry."""
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+        if type(data) is not dict or set(data) != {"grid", "pages"} or data["grid"] != INK_GRID:
+            raise ValueError
+        maps = data["pages"]
+        if type(maps) is not list or len(maps) != len(page_indices):
+            raise ValueError
+        rows_by_page, size_by_page = {}, {}
+        for page_index, entry in zip(page_indices, maps):
+            if entry is None:
+                continue
+            if type(entry) is not dict or set(entry) != {"size", "rows"}:
+                raise ValueError
+            rows, size = entry["rows"], entry["size"]
+            if (type(rows) is not list or len(rows) != INK_GRID
+                    or any(type(r) is not str or len(r) != INK_GRID // 4 for r in rows)):
+                raise ValueError
+            if (type(size) is not list or len(size) != 2
+                    or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0 for v in size)):
+                raise ValueError
+            rows_by_page[page_index] = [int(r, 16) for r in rows]
+            size_by_page[page_index] = (float(size[0]), float(size[1]))
+        return _Ink(rows_by_page, size_by_page)
+    except (ValueError, TypeError, KeyError):
+        return None
 
 
 def _read_regular(directory: str, name: str, limit: int) -> bytes:
@@ -106,6 +168,12 @@ def run_unstructured_fast(
                        env={"LANG": "C.UTF-8", "HOME": directory, "TMPDIR": directory})
             raw = _read_regular(directory, "elements.json", limits.output_bytes)
             meta_raw = _read_regular(directory, "meta.json", 4096)
+            try:
+                ink_raw = _read_regular(directory, "ink.json", limits.output_bytes)
+            except InspectionError as exc:
+                if exc.code == "cancelled":
+                    raise
+                ink_raw = None   # missing or oversized: every page of this run is quarantined below
     except InspectionError:
         raise
     except OSError:
@@ -129,6 +197,10 @@ def run_unstructured_fast(
                    or e[1] not in UNSAFE_CODES for e in unsafe_raw)):
         raise InspectionError("invalid_child_result")
     unsafe = {page_indices[e[0]]: e[1] for e in unsafe_raw}   # original page index -> diagnostic
+    ink = _parse_ink(ink_raw, page_indices)
+    if ink is None:
+        # No usable render evidence: nothing in this run may become evidence (fail closed, never assume ink).
+        unsafe = {p: UNPARSEABLE_CONTENT_DIAGNOSTIC for p in page_indices}
     attestable = meta.get("attestable_pages")
     if (type(attestable) is not list or len(attestable) != len(page_indices)
             or any(type(v) is not bool for v in attestable)):
@@ -154,6 +226,11 @@ def run_unstructured_fast(
             continue
         if abs(ft.width - page.width_pt) > 0.01 or abs(ft.height - page.height_pt) > 0.01:
             continue  # the child's boxes do not describe the page the inspector measured
+        rendered = ink.sizes.get(page_index)
+        if rendered is None or abs(rendered[0] - page.width_pt) > 0.01 or abs(rendered[1] - page.height_pt) > 0.01:
+            # The render does not show the frame the evidence would be placed in: not comparable, so no evidence.
+            unsafe[page_index] = UNPARSEABLE_CONTENT_DIAGNOSTIC
+            continue
         frames[page_index] = DisplayFrame(
             coordinate_frame="rotated_cropbox_top_left", width=page.width_pt, height=page.height_pt,
             transform_ref=transform_ref + ":t", layout_width=ft.layout_width, layout_height=ft.layout_height,
@@ -174,7 +251,7 @@ def run_unstructured_fast(
     batch = UnstructuredParser().normalize(
         raw, request, manifest, UnstructuredProfile(strategy="fast"),
         document_id=document_id, document_sha256=sha, frames=frames,
-        document_page_count=total_pages)
+        document_page_count=total_pages, ink=ink)
     if unsafe and batch.quarantine_reason is None:
         # The whole page is quarantined (PM-DECISION, gap G8): needs_review with a specific diagnostic, no
         # evidence (no frame above) and no observation, so no hidden run can reach a consumer. The raw
