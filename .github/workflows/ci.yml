@@ -321,7 +321,7 @@ jobs:
       - name: Container log (fixed codes and ids only)
         if: always()
         run: |
-          docker compose -f deploy/compose.dev.yml --profile worker logs --no-color parse-worker > "$RUNNER_TEMP/worker-log.txt" 2>&1 || true
+          docker compose -f deploy/compose.dev.yml --profile worker logs --no-color parse-worker > "$RUNNER_TEMP/worker-log.txt" 2>&1
           tail -n 40 "$RUNNER_TEMP/worker-log.txt"
       - uses: actions/upload-artifact@v4
         if: always()

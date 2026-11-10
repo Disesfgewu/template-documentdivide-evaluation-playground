@@ -43,6 +43,20 @@ def synthetic_pdf() -> bytes:
     return bytes(out)
 
 
+def _partition_directly() -> dict:
+    """Diagnostic only (runs when the stored page had no text): partition the same PDF in this process."""
+    import tempfile
+    try:
+        from unstructured.partition.pdf import partition_pdf
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+            handle.write(synthetic_pdf())
+            handle.flush()
+            elements = partition_pdf(filename=handle.name, strategy="fast")
+        return {"elements": [[type(e).__name__, e.text] for e in elements]}
+    except BaseException as exc:  # noqa: BLE001 - a diagnostic must report, not raise
+        return {"error": type(exc).__name__, "message": str(exc)[:300]}
+
+
 def main() -> int:
     settings = load_settings()
     report = {"synthetic": True, "uid": os.getuid()}
@@ -77,8 +91,11 @@ def main() -> int:
         return 1
     page = client.get(f"/api/v1/documents/{document}/parse-results/{job}/pages/0", headers=headers).json()
     text = "".join("".join(o["raw_content"].split()) for o in page.get("observations", []))
-    report.update(page_status=page.get("status"), evidence_units=len(page.get("evidence", [])),
+    report.update(page_status=page.get("status"), page_diagnostics=page.get("diagnostics"),
+                  observations=len(page.get("observations", [])), evidence_units=len(page.get("evidence", [])),
                   text_found="Syntheticworkerimagesmokepage" in text)
+    if not report["text_found"]:
+        report["in_process_partition"] = _partition_directly()
     print(json.dumps(report))
     return 0 if report["text_found"] and report["evidence_units"] > 0 else 1
 
