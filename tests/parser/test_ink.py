@@ -183,6 +183,23 @@ class ParseInkTests(unittest.TestCase):
         rows = ["f" * 32 if 19 <= r <= 23 else "0" * 32 for r in range(INK_GRID)]
         self.assertEqual(_parse_ink(self.maps(self.entry(rows)), [0]).fraction(0, one_line), 1.0)
 
+    def test_malformed_or_missing_maps_give_none_never_ink(self):
+        good = ["0" * 32] * INK_GRID
+        entry = lambda **kw: {"size": [612, 792], "rows": good, **kw}  # noqa: E731
+        bad = [None, b"not json", b"[]", b"{}", json.dumps({"grid": 64, "pages": [entry()]}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": []}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": [entry(rows=good[:-1])]}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": [entry(rows=["0" * 31] * INK_GRID)]}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": [entry(rows=["zz" * 16] * INK_GRID)]}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": [entry(rows=[5] * INK_GRID)]}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": [entry(size=[0, 792])]}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": [entry(size=[612])]}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": [{"rows": good}]}).encode(),
+               json.dumps({"grid": INK_GRID, "pages": [entry()], "extra": 1}).encode()]
+        for raw in bad:
+            with self.subTest(raw if raw is None else raw[:40]):
+                self.assertIsNone(_parse_ink(raw, [0]))
+
 
 if __name__ == "__main__":
     unittest.main()
