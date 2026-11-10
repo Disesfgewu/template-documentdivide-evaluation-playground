@@ -74,3 +74,10 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 - **PDFium 驗證**：5 個案例（一般、CropBox 偏移、較小 CropBox、180、180＋CropBox）的 evidence 聯集與 PDFium 實際渲染的墨跡框，左右差距約 1 pt、上下約 1–2 pt（容許 3／6 pt，因為 pdfminer 的行框含字型的上下緣）。
 - **沒有幾何（保留文字）**：`/Rotate` 為 90 或 270。pdfminer 對側向文字逐字母拆開並打亂（量測：`"e","ilrahc","ovarbahpA"`），座標雖然正確，但框住的是亂序碎片，所以不認定。
 - 限制：只測了單頁、一種字型與合成文字；多欄、表格、頁面內容超出 CropBox、混合旋轉的實際文件沒有量測。
+
+## 已存結果的已知限制（#107 審查的 P3，Refs #7）
+
+- **大小上限在記錄已在記憶體之後才檢查**：`persist_parse_result` 對整筆紀錄（canonical JSON）的 64 MiB 上限，是在 normalizer 已經把整個結果建在記憶體之後才計算與檢查；它阻止的是寫入資料庫與 artifact 儲存，不是記憶體使用。真正的記憶體界線來自 normalizer 的輸入上限（16 MiB raw、200,000 元素、20,000 artifacts）與每批 10 頁。超過上限的結果在 worker 端以 `failed(persist_failed)` 結束（確定性，不重排，有測試）。
+- **沒有「合成／真實」標記**：資料庫與 API 不知道一份結果是來自合成文件或真實文件，只有 manifest 的 parser 版本與 profile；誠實標示要靠證據（CI run、fixture 名稱）而不是結果欄位。
+- **被隔離（quarantine）的批次不會被記錄**：normalizer 回傳 quarantine 的批次，其頁面在合併時視為失敗並重試；重試預算用完則整個 job 失敗且不存任何結果，所以資料庫裡沒有「失敗批次」的紀錄，只有 job 的轉換原因 `pages_failed:<頁數>`。
+- 摘要的 `effective_profile`／`strategy` 在 manifest 缺欄位時回 `null` 而不是 500（防禦用；寫入路徑一定帶有該欄位）。
