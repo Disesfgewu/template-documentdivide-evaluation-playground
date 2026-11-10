@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 # .documents puts db/ and contracts/ on sys.path, so it is imported before lab_db.
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db
+from lab_db.jobs import JobNotCancellable, request_cancel  # noqa: E402
 from lab_db.logs import redact  # noqa: E402
 from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
 
@@ -126,3 +127,40 @@ async def get_job_handler(job_id: uuid.UUID, request: Request,
 
 router.add_api_route("/api/v1/jobs/{job_id}", get_job_handler, methods=["GET"], name="get_job_v1",
                      summary="Get job status and recent transitions")
+
+
+CANCEL_ACTION = "import_and_configure_parse"   # the same roles that may queue work (owner, maintainer)
+
+
+def _cancel_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -> dict:
+    missing = ApiError(404, "not_found", "job not found")
+    row = conn.execute("SELECT project_id FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    if row is None:
+        raise missing
+    project_id = row[0]
+    try:
+        authorize(conn, project_id, actor_id, CANCEL_ACTION)
+    except NotFound:
+        raise missing from None
+    except PermissionDenied as exc:
+        raise ApiError(403, "permission_denied", str(exc)) from None
+    try:
+        status, changed = request_cancel(conn, project_id, job_id, actor_id)
+    except LookupError:
+        raise missing from None
+    except JobNotCancellable as exc:
+        raise ApiError(409, "conflict", f"the job already finished ({exc.status}) and cannot be cancelled") from None
+    return {"job_id": str(job_id), "status": status, "changed": changed}
+
+
+async def cancel_job_handler(job_id: uuid.UUID, request: Request,
+                             conn: psycopg.Connection = Depends(get_db),
+                             actor_id: uuid.UUID = Depends(get_authenticated_actor)) -> JSONResponse:
+    """Cancel a job: queued, paused or waiting jobs become ``cancelled`` at once; a running one becomes
+    ``cancel_requested`` and its worker stops within about 2 seconds and acknowledges it. Repeating the
+    request is harmless (``changed`` false); a finished job is a 409. Owner and maintainer only."""
+    return JSONResponse(status_code=200, content=await _run_blocking(request, "meta", _cancel_job, conn, actor_id, job_id))
+
+
+router.add_api_route("/api/v1/jobs/{job_id}/cancel", cancel_job_handler, methods=["POST"], name="cancel_job_v1",
+                     summary="Cancel a job")
