@@ -89,9 +89,11 @@ def _summary(conn, actor_id, document_id, job_id) -> dict:
     pages = conn.execute("SELECT page_index, status FROM parse_page_results WHERE job_id = %s ORDER BY page_index",
                          (job_id,)).fetchall()
     profile = row[3]
+    # A manifest always carries its effective profile; a row that lacks one must not turn a read into a 500.
+    strategy = profile.rsplit("-", 1)[-1] if isinstance(profile, str) and profile else None
     return {
         "job_id": str(job_id), "document_id": str(document_id), "parser": row[1], "parser_version": row[2],
-        "effective_profile": profile, "strategy": profile.rsplit("-", 1)[-1], "operation_id": str(row[0]),
+        "effective_profile": profile, "strategy": strategy, "operation_id": str(row[0]),
         "pages": [{"page_index": p, "status": s} for p, s in pages],
     }
 
@@ -118,8 +120,8 @@ class ParseResultSummaryModel(BaseModel):
     document_id: str
     parser: str
     parser_version: str
-    effective_profile: str
-    strategy: str
+    effective_profile: str | None = None
+    strategy: str | None = None
     operation_id: str
     pages: list[PageStatusModel]
 

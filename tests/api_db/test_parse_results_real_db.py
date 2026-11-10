@@ -270,6 +270,32 @@ class ParseResultsRealDbTests(FreshDatabase):
         self.assertEqual(get(f"{base}/pages/-1", s.owner).status_code, 400)
         self.assertEqual(get(f"{base}/pages/0", s.outsider).status_code, 404)
 
+    def test_a_manifest_without_an_effective_profile_does_not_turn_a_read_into_a_500(self):
+        """The table is append-only, so the damaged read model is simulated with a fake connection."""
+        from lab_api.parse_results import _summary
+        s = self.seed()
+        self.finish_with_result(s)
+        ok = self.client.get(f"/api/v1/documents/{s.doc}/parse-results/{s.job}", headers=self.headers(s.owner))
+        self.assertEqual((ok.status_code, ok.json()["strategy"]), (200, "fast"))
+
+        class FakeConn:
+            def execute(self, sql, params=()):
+                class Cursor:
+                    def fetchone(self_inner):
+                        if "FROM document_versions" in sql:
+                            return (s.project,)
+                        if "FROM parse_results" in sql:
+                            return (s.op, "unstructured", "0.27.36", None)
+
+                    def fetchall(self_inner):
+                        return []
+                return Cursor()
+
+        with patch("lab_api.parse_results.authorize", lambda *a, **k: None):
+            out = _summary(FakeConn(), s.owner, s.doc, s.job)
+        self.assertIsNone(out["strategy"])
+        self.assertIsNone(out["effective_profile"])
+
     def test_a_queued_job_has_no_result_to_read(self):
         s = self.seed()
         res = self.client.get(f"/api/v1/documents/{s.doc}/parse-results/{s.job}", headers=self.headers(s.owner))

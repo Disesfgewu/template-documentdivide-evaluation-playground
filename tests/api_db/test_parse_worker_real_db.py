@@ -392,6 +392,18 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual(self.job_state(job)[:2], ("queued", 1))
         self.assertEqual(len(calls), 3)   # 21 pages: three batches, no page-by-page retry
 
+    def test_a_result_over_the_size_cap_fails_the_job_and_stores_nothing(self):
+        from lab_db.parse_results import ParseResultTooLarge
+        project, job = self.queue()
+
+        def too_large(conn, project, lease, batch):
+            raise ParseResultTooLarge(str(lease.job_id))
+
+        outcome = self.process(project, job, self.ok_run(), persist=too_large)
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "persist_failed"))   # deterministic, not requeued
+        self.assertEqual(self.job_state(job)[:2], ("failed", 1))
+        self.assertEqual(self.persisted_count(), 0)
+
     def test_a_tampered_original_is_never_parsed(self):
         project, job = self.queue()
         blobs = [p for p in self.root.rglob("*") if p.is_file()]
