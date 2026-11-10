@@ -1,4 +1,7 @@
-# Private agentKit checkout
+# agentKit checkout（`Disesfgewu/agentkit` 已於 2026-11-10 公開）
+
+> 更新：agentKit 已公開，下面「需要唯讀憑證」的說法已過時：任何人都能直接 `git submodule update --init`，CI 的 `llm-smoke` job 也不再使用 token。標準 clone 與公開 CI 仍預設不初始化 submodule（為了速度與一致性），不是因為權限。
+
 
 The playground's standard clone and public CI use the worker scaffold without
 initializing submodules. Keep the checkout non-recursive for contributors and
