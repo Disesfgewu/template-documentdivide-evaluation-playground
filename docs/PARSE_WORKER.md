@@ -89,6 +89,8 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 - **設定只用環境變數**（`LAB_DATABASE_URL`、`LAB_ARTIFACT_ROOT`、`LAB_AUTH_SECRET`…），映像裡沒有任何機密（CI 檢查映像歷史與內建環境）。`deploy/compose.dev.yml` 的 `parse-worker`（profile `worker`）只用與 `db` 服務相同的拋棄式開發憑證；真實部署要自己注入環境。
 - **執行限制**：唯讀根檔案系統、`/tmp` 為 tmpfs、`cap_drop: ALL`、`no-new-privileges`、記憶體 6 GB、pids 200、2 CPU（每個 parser 子程序量到約 1.3 GB RSS，見 #123；併發 1 時最多 2 個子程序）。
 - **健康檢查**：worker 每一輪（至少每個 `--interval` 秒，長時間解析中也一樣）改寫 `LAB_WORKER_HEARTBEAT_FILE`（預設 `/tmp/worker.heartbeat`）；探針 `python -m lab_api.parse_worker_main --check-heartbeat PATH --max-age 120` 不連資料庫，檔案缺失、壞掉、過期或來自未來都回 1。
+- **探針只代表存活（liveness）**：它只檢查 worker 迴圈還在轉，不檢查資料庫連得上、也不檢查解析能力。資料庫斷線時 worker 仍會每一輪更新心跳（它只記錄固定代碼並重試），所以容器仍然是 healthy；要偵測資料庫或解析失敗，要看 job 狀態（`/api/v1/jobs/{id}`）與 log，而不是這個探針。
+- **停止寬限**：compose 預設的 10 秒小於 worker 的 `--grace 60`（外加最多 10 秒取消並收掉子程序），`compose stop/down` 會在 job 中途被 SIGKILL 而沒有收尾（lease 到期後 job 會被重跑）；因此 `parse-worker` 設 `stop_grace_period: 90s`，CI 的停止步驟改用 compose 預設值並檢查這個設定。注意：CI 只停了閒置的 worker，**沒有**在 job 進行中停止的測試。
 - **重要發現（已修）**：unstructured 0.27.36 第一次用到時會把 spaCy 模型 `en_core_web_sm` 從網路下載並安裝進 site-packages；在唯讀根或沒有網路時下載失敗，它只記一行 debug log（"PDF text extraction failed, skip text extraction"）然後**回傳零個元素**，job 仍然 `succeeded`、頁面是 `needs_review`（`requested_page_missing_or_blank_unconfirmed`）。映像因此在鎖檔中以雜湊釘住該模型，執行期不下載。這也是先前一次無法解釋的 e2e 偶發失敗（run 42702878315，第 1 頁沒有文字）的**合理假設**（每個 CI venv 第一次使用都會下載；暫時性的下載失敗會得到同樣的症狀），但沒有直接證據。
 - **未涵蓋**：映像只在 x86_64 的 GitHub runner 上建置與測試；沒有多 worker、沒有 `--concurrency` 大於 1 的容器測試、沒有 orchestrator（systemd／Kubernetes）設定；映像沒有掃描漏洞；鎖檔以 pip freeze 產生而不是 `--require-hashes`（只有 spaCy 模型有雜湊）；無法保證 `packages.unstructured.io`／PyPI 之外的其他執行期下載不存在（目前只觀察到這一個）。
 

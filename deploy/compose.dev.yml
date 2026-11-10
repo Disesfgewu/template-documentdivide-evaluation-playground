@@ -60,6 +60,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # `compose stop/down` sends SIGTERM and waits this long before SIGKILL. The worker's own grace is 60 s
+    # (--grace) plus up to 10 s to cancel and reap its parser children, so the default 10 s would kill a
+    # worker in the middle of a job and skip the drain.
+    stop_grace_period: 90s
     restart: unless-stopped
 volumes:
   lab-db:
