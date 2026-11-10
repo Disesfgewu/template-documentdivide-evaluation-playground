@@ -161,6 +161,89 @@ def finish(
         )
 
 
+class JobNotCancellable(Exception):
+    """The job already finished (succeeded or failed); it cannot be cancelled."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(f"job is {status}")
+
+
+CANCEL_ACK_GRACE_SECONDS = 30.0   # a live worker acknowledges a cancel within ~2 s plus the time to kill its child
+
+
+def request_cancel(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID,
+                   actor_id: uuid.UUID, *, action: str = "import_and_configure_parse") -> tuple[str, bool]:
+    """A user's cancel request. Returns ``(status after, changed)``; raises ``LookupError`` if unknown.
+
+    The actor is authorized for ``action`` INSIDE the locked transaction (``repo.NotFound`` for a
+    non-member, ``repo.PermissionDenied`` for a role without it), so a role changed since any earlier
+    check cannot be used and no caller can skip the check.
+
+    * ``queued``, ``paused_budget``, ``waiting_review`` -> ``cancelled`` at once (nobody is running it);
+    * ``running`` with a live lease -> ``cancel_requested``; the table allows a lease only on ``running``,
+      so the lease is dropped here and the worker's heartbeat (<= 2 s) sees the job leave ``running``,
+      stops its parser and acknowledges with ``acknowledge_cancel``;
+    * ``running`` whose lease already expired (a dead worker) -> ``cancel_requested`` and straight on to
+      ``cancelled`` in the same transaction (two guarded transitions, two reasons): nobody is left to
+      acknowledge it;
+    * ``cancel_requested`` -> unchanged while it is recent (idempotent, nothing written); if it has been
+      waiting longer than ``CANCEL_ACK_GRACE_SECONDS`` the worker is gone, so a repeated request moves it
+      to ``cancelled`` (this is the way out of a job stuck in ``cancel_requested``);
+    * ``cancelled`` -> unchanged; ``succeeded`` / ``failed`` -> ``JobNotCancellable``.
+
+    Every effective change, its operation and its audit event commit together.
+    """
+    from .repo import authorize  # local import: repo is a sibling module that must not depend on jobs
+
+    with conn.transaction():
+        row = conn.execute(
+            "SELECT status::text, (lease_expires_at IS NULL OR lease_expires_at < clock_timestamp()) "
+            "FROM jobs WHERE project_id = %s AND id = %s FOR UPDATE", (project_id, job_id)).fetchone()
+        if row is None:
+            raise LookupError(str(job_id))
+        authorize(conn, project_id, actor_id, action)
+        status, lease_gone = row
+        steps: list[tuple[str, str]]
+        if status == "cancelled":
+            return status, False
+        if status in ("succeeded", "failed"):
+            raise JobNotCancellable(status)
+        if status == "cancel_requested":
+            age = conn.execute(
+                "SELECT extract(epoch FROM clock_timestamp() - max(occurred_at)) FROM job_transitions "
+                "WHERE job_id = %s AND to_status = 'cancel_requested'", (job_id,)).fetchone()[0]
+            if age is None or float(age) <= CANCEL_ACK_GRACE_SECONDS:
+                return status, False
+            steps = [("cancelled", "cancel_acknowledged_by_request: no worker acknowledged within the grace period")]
+        elif status == "running":
+            steps = [("cancel_requested", "cancel requested by user")]
+            if lease_gone:
+                steps.append(("cancelled", "cancel_acknowledged_by_request: the worker lease had expired"))
+        else:
+            steps = [("cancelled", "cancel requested by user")]
+        operation_id = uuid.uuid4()
+        conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status) "
+                     "VALUES (%s, %s, 'job.cancel', %s, 'intent')", (operation_id, project_id, actor_id))
+        for target, reason in steps:
+            _reason(conn, reason)
+            conn.execute(
+                """
+                UPDATE jobs SET status = %s, lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+                                row_version = row_version + 1
+                WHERE project_id = %s AND id = %s
+                """,
+                (target, project_id, job_id),
+            )
+        conn.execute("UPDATE operations SET status = 'succeeded', finished_at = now() WHERE id = %s", (operation_id,))
+        conn.execute(
+            "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, "
+            "outcome, operation_id) VALUES (%s, %s, %s, 'job.cancel_requested', 'job', %s, 'succeeded', %s)",
+            (uuid.uuid4(), project_id, actor_id, job_id, operation_id),
+        )
+    return steps[-1][0], True
+
+
 def fail_exhausted(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID) -> bool:
     """Finalize a job stuck 'running' whose lease expired and whose attempts are used up.
 
