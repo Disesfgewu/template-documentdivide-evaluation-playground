@@ -158,6 +158,80 @@ class JobCancelRealDbTests(FreshDatabase):
         self.assertEqual(res.status_code, 409)
         self.assertEqual(self.state(job)[0], "succeeded")
 
+    def test_paused_budget_and_waiting_review_jobs_are_cancelled_at_once(self):
+        for parked in ("paused_budget", "waiting_review"):
+            with self.subTest(parked):
+                project, owner, _, _, job = self.seed()
+                with self.connect() as c:
+                    lease = jobs.acquire(c, project, job, "w")
+                    jobs.finish(c, project, lease, parked, "parked for the test")
+                self.assertEqual(self.state(job)[0], parked)
+                res = self.cancel(owner, job)
+                self.assertEqual((res.status_code, res.json()["status"], res.json()["changed"]), (200, "cancelled", True))
+                status, audits, reasons = self.state(job)
+                self.assertEqual((status, len(audits), reasons[-1]), ("cancelled", 1, "cancel requested by user"))
+                with self.connect() as c, self.assertRaises(jobs.LeaseUnavailable):   # not claimable any more
+                    jobs.acquire(c, project, job, "late-worker")
+                again = self.cancel(owner, job)                                       # and idempotent
+                self.assertEqual((again.json()["status"], again.json()["changed"]), ("cancelled", False))
+
+    def test_a_cancel_that_arrives_while_the_worker_is_finishing_waits_and_then_sees_the_finished_job(self):
+        """Worker first: it holds the job row inside finish(); the cancel blocks, then finds a succeeded job
+        (409), and the result written by the finish hook is committed with it."""
+        project, owner, _, _, job = self.seed()
+        with self.connect() as c, c.transaction():
+            c.execute("CREATE TABLE IF NOT EXISTS race_marker (job_id uuid NOT NULL)")
+        inside, release, answer = threading.Event(), threading.Event(), {}
+
+        def hook(conn):
+            conn.execute("INSERT INTO race_marker VALUES (%s)", (job,))
+            inside.set()
+            release.wait(10)
+
+        def worker():
+            with self.connect() as c:
+                lease = jobs.acquire(c, project, job, "w")
+                jobs.finish(c, project, lease, "succeeded", "parsed", hook=hook)
+
+        def canceller():
+            answer["res"] = self.cancel(owner, job)
+
+        t1 = threading.Thread(target=worker)
+        t1.start()
+        self.assertTrue(inside.wait(10))
+        t2 = threading.Thread(target=canceller)
+        t2.start()
+        t2.join(0.8)
+        self.assertTrue(t2.is_alive(), "the cancel must wait for the row lock held by the finishing worker")
+        release.set()
+        t1.join(10)
+        t2.join(10)
+        self.assertEqual(answer["res"].status_code, 409)
+        status, audits, _ = self.state(job)
+        self.assertEqual((status, audits), ("succeeded", []))               # no cancel audit for a refused request
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM race_marker WHERE job_id = %s", (job,)).fetchone()[0], 1)
+
+    def test_a_worker_that_finishes_after_the_cancel_loses_the_lease_and_stores_nothing(self):
+        """Cancel first: the lease is dropped, so the late finish is refused and its hook's write rolls back."""
+        project, owner, _, _, job = self.seed()
+        with self.connect() as c, c.transaction():
+            c.execute("CREATE TABLE IF NOT EXISTS race_marker (job_id uuid NOT NULL)")
+            c.execute("TRUNCATE race_marker")
+        with self.connect() as c:
+            lease = jobs.acquire(c, project, job, "w")
+        self.assertEqual(self.cancel(owner, job).json()["status"], "cancel_requested")
+
+        def hook(conn):
+            conn.execute("INSERT INTO race_marker VALUES (%s)", (job,))
+
+        with self.connect() as c, self.assertRaises(jobs.LeaseLost):
+            jobs.finish(c, project, lease, "succeeded", "parsed", hook=hook)
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM race_marker").fetchone()[0], 0)
+            self.assertTrue(jobs.acknowledge_cancel(c, project, lease.job_id))   # what the worker's heartbeat does
+        self.assertEqual(self.state(job)[0], "cancelled")
+
     def test_cancelling_a_running_job_is_observed_by_the_worker_within_the_bound(self):
         project, owner, _, _, job = self.seed()
         started = threading.Event()
