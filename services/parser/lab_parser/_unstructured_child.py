@@ -142,7 +142,7 @@ def main() -> int:
         with open("elements.json", "xb") as stream:
             stream.write(payload)
         with open("ink.json", "xb") as stream:
-            stream.write(json.dumps({"grid": 128, "pages": ink}, separators=(",", ":")).encode("ascii"))
+            stream.write(json.dumps({"grid": 128, "pages": ink}, separators=(",", ":"), allow_nan=False).encode("ascii"))
         with open("meta.json", "xb") as stream:
             stream.write(meta)
         return 0
