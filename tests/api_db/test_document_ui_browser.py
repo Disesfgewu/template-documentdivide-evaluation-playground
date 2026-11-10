@@ -226,7 +226,7 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
             input=json.dumps(payload),
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=150,   # up to 3 browser launches of 20 s each plus the flow itself
         )
         self.assertEqual(
             res.returncode,
