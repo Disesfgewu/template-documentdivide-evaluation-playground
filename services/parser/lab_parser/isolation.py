@@ -92,8 +92,10 @@ def _run_child(command: list[str], cwd: str, deadline: float,
             raise InspectionError("cancelled")
         if time.monotonic() >= deadline:
             raise InspectionError("timeout")
+        # The child checks that this is still its parent before and after PR_SET_PDEATHSIG.
+        child_env = dict({"LANG": "C.UTF-8"} if env is None else env, LAB_PARENT_PID=str(os.getpid()))
         process = subprocess.Popen(
-            command, cwd=cwd, env={"LANG": "C.UTF-8"} if env is None else env, stdin=subprocess.DEVNULL,
+            command, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, start_new_session=True,
         )

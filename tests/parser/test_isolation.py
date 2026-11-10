@@ -236,6 +236,8 @@ class IsolatedGeometryTests(unittest.TestCase):
         package.mkdir()
         child = package / "_isolation_child.py"
         child.write_bytes(isolation._CHILD.read_bytes())
+        # The bootstrap loads the shared die-with-parent helper from beside itself and fails closed without it.
+        (package / "_pdeathsig.py").write_bytes(isolation._CHILD.with_name("_pdeathsig.py").read_bytes())
         (package / "__init__.py").write_text("")
         (root / "pypdf.py").write_text(
             "class PdfReader:\n"
