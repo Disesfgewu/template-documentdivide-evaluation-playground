@@ -44,17 +44,27 @@ def synthetic_pdf() -> bytes:
 
 
 def _partition_directly() -> dict:
-    """Diagnostic only (runs when the stored page had no text): partition the same PDF in this process."""
+    """Diagnostic only (runs when the stored page had no text): run the REAL child bootstrap by hand, with the
+    same environment the worker gives it, and keep its stderr (the worker discards it on purpose)."""
+    import subprocess
     import tempfile
+    from pathlib import Path
+    out = {}
     try:
-        from unstructured.partition.pdf import partition_pdf
-        with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
-            handle.write(synthetic_pdf())
-            handle.flush()
-            elements = partition_pdf(filename=handle.name, strategy="fast")
-        return {"elements": [[type(e).__name__, e.text] for e in elements]}
+        import lab_parser
+        child = Path(lab_parser.__file__).with_name("_unstructured_child.py")
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "source.pdf").write_bytes(synthetic_pdf())
+            run = subprocess.run([sys.executable, "-I", str(child), str(4 * 1024 ** 3), "60", str(16 * 1024 ** 2)],
+                                 cwd=directory, env={"LANG": "C.UTF-8", "HOME": directory, "TMPDIR": directory},
+                                 capture_output=True, timeout=180)
+            out["child_exit"] = run.returncode
+            out["child_stderr_tail"] = run.stderr.decode("utf-8", "replace")[-1500:]
+            elements = Path(directory, "elements.json")
+            out["elements_json"] = elements.read_text()[:600] if elements.exists() else None
     except BaseException as exc:  # noqa: BLE001 - a diagnostic must report, not raise
-        return {"error": type(exc).__name__, "message": str(exc)[:300]}
+        out["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+    return out
 
 
 def main() -> int:
