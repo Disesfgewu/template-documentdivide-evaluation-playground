@@ -73,3 +73,19 @@ POST parse（已有） ──► parse_results（已有）
 ## 7. 這份備忘沒有做的
 
 沒有實作任何一項、沒有改任何 schema、沒有更新 `traceability.yaml`；沒有驗證 #52 規劃器能吃真實頁面狀態（只確認它是純函式）；SPEC 對題庫快取與斷點恢復（#10）的要求這裡只列為缺口，沒有設計。
+
+## 8. 實作狀態（P-A：`promote_parse_result`，Refs #7、#10）
+
+owner 的決定（Issue #7，2026-11-11）：D1、D2、D4、D5、D6、D8、D9 照作者傾向；D3＝題庫建立時才 promote（懶）；D7＝Anthropic、單次輸出 ≤ 500 token（模型代號待確認，見 Issue #7）。
+
+已做（migration `0013_parse_promotion.sql` ＋ Alembic `0013`，`lab_db/promote.py`）：
+- **D1**：`benchmark_parse_sources`（append-only）：一個題庫版本只釘一個 parse job，釘了就不能換；重新解析只能開新題庫版本。觸發器檢查該 job 是這個題庫文件版本的解析，且題庫不在 `frozen`／`cancelled`／`failed`。
+- **D3**：`promote_parse_result(conn, project, benchmark, parse_job, actor)` 在一個交易裡釘住 job，並把**乾淨頁**的 evidence 寫進 `evidence_units`／`evidence_regions`；`evidence_unit_sources`（append-only）記錄每個單元來自哪個 job、哪個解析端 evidence id、哪一頁。同一個單元（同一 job 的同一 evidence id）只寫一次，兩個題庫共用同一個 parse job 時共用單元；同一個 job 對同一題庫重複呼叫是冪等的。
+- **G8 硬規則（程式強制）**：只有狀態 `ok` 且診斷不含 `text_not_visible`／`content_unparseable`／`region_without_ink` 的頁面會被提升；`needs_review`、`partial`、`failed`、沒有幾何、隱形或無法分析的文字、被丟掉區域的頁面**一律不提升**，回報為素材不足並附固定理由（D4）。evidence 若不符合契約、頁碼或文件雜湊對不上，該頁也不提升。
+- **殘餘限制寫進每個釘住的 provenance**（`RESIDUAL_LIMIT`）：藏在其他可見墨跡之間或底下的隱形文字、Type3 glyph procedure、註解外觀串流抓不到，所以被提升的頁面「不保證沒有隱藏文字」。
+- D5（fast 路徑沒有表格結構、表格題配額標示素材不足）與 D6（略過人工審查＝partial，措辭用 skipped）由後續的規劃與凍結步驟處理；**這個 PR 沒有做 D2（`parse_runs` 當註冊表）**：promote 只讀 `parse_results`，`parse_runs` 仍未被解析路徑使用。
+
+尚未做：P-B（建立題庫 API、`parsing → planning`、素材不足報告）、P-D（LLM 出題）、`scripts/demo.sh benchmark` 步驟。
+
+
+- 授權與稽核（PM 審查 #147 後補）：`promote_parse_result` 在鎖住 benchmark 列之後自行授權（`build_edit_freeze`，owner／maintainer；非成員 `NotFound`、其他角色 `PermissionDenied`）；同一交易寫一筆 `benchmark.parse_promoted` 稽核事件（只有計數）；同一 document version 的並行 promote 以交易 advisory lock 序列化；證據單位已存在時，仍為這個 parse job 補一筆 `evidence_unit_sources`。`missing_or_invalid_geometry_or_asset_reference` 也列入 UNSAFE_DIAGNOSTICS。
