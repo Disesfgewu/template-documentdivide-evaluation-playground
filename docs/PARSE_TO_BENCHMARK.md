@@ -87,3 +87,5 @@ owner 的決定（Issue #7，2026-11-11）：D1、D2、D4、D5、D6、D8、D9 �
 
 尚未做：P-B（建立題庫 API、`parsing → planning`、素材不足報告）、P-D（LLM 出題）、`scripts/demo.sh benchmark` 步驟。
 
+
+- 授權與稽核（PM 審查 #147 後補）：`promote_parse_result` 在鎖住 benchmark 列之後自行授權（`build_edit_freeze`，owner／maintainer；非成員 `NotFound`、其他角色 `PermissionDenied`）；同一交易寫一筆 `benchmark.parse_promoted` 稽核事件（只有計數）；同一 document version 的並行 promote 以交易 advisory lock 序列化；證據單位已存在時，仍為這個 parse job 補一筆 `evidence_unit_sources`。`missing_or_invalid_geometry_or_asset_reference` 也列入 UNSAFE_DIAGNOSTICS。

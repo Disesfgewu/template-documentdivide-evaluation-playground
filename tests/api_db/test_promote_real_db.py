@@ -33,7 +33,7 @@ from lab_db import jobs
 from lab_db.parse_results import persist_parse_result
 from lab_db.promote import (PROMOTION_RULE, RESIDUAL_LIMIT, UNSAFE_DIAGNOSTICS, PromoteConflict, PromoteError,
                             promote_parse_result)
-from lab_db.repo import Change, record_change
+from lab_db.repo import Change, NotFound, PermissionDenied, record_change
 from lab_db.storage import LocalArtifactStore
 from lab_parser.normalize import DisplayFrame, UnstructuredParser, UnstructuredProfile
 from fixtures.generators import synthetic_pdf
@@ -209,6 +209,51 @@ class PromoteRealDbTests(FreshDatabase):
         r2 = self.promote(project, b2, job, owner)
         self.assertEqual(r2.promoted_pages, [0, 2])
         self.assertEqual(self.counts(doc), (2, 2, 2))                       # not duplicated
+
+    def test_only_owner_or_maintainer_may_promote_and_a_denied_call_writes_nothing(self):
+        project, owner, doc, sha = self.seed()
+        job = self.parsed(project, owner, doc, sha)
+        bench = self.benchmark(project, owner, doc)
+        with self.connect() as c:
+            participant = self.add_member(c, project, "participant")
+            reviewer = self.add_member(c, project, "reviewer")
+            maintainer = self.add_member(c, project, "maintainer")
+        outsider = uuid.uuid4()
+        with self.connect() as c:
+            c.execute("INSERT INTO actors (id, kind, display) VALUES (%s, 'user', 'outsider')", (outsider,))
+        for who, exc in ((participant, PermissionDenied), (reviewer, PermissionDenied), (outsider, NotFound)):
+            with self.assertRaises(exc):
+                self.promote(project, bench, job, who)
+        self.assertEqual(self.counts(doc), (0, 0, 0))
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM benchmark_parse_sources").fetchone()[0], 0)
+        self.assertEqual(self.promote(project, bench, job, maintainer).promoted_pages, [0, 2])
+
+    def test_a_promotion_writes_one_audit_event_with_counts_only(self):
+        project, owner, doc, sha = self.seed()
+        job = self.parsed(project, owner, doc, sha)
+        bench = self.benchmark(project, owner, doc)
+        self.promote(project, bench, job, owner)
+        self.promote(project, bench, job, owner)                            # idempotent: no second event
+        with self.connect() as c:
+            rows = c.execute("SELECT actor_id, reason FROM audit_events WHERE project_id = %s AND action = 'benchmark.parse_promoted'",
+                             (project,)).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], owner)
+        self.assertIn("units=2", rows[0][1])
+
+    def test_a_second_parse_job_of_the_same_document_records_its_own_source_rows(self):
+        project, owner, doc, sha = self.seed()
+        job_a = self.parsed(project, owner, doc, sha)
+        job_b = self.parsed(project, owner, doc, sha)
+        b1, b2 = self.benchmark(project, owner, doc), self.benchmark(project, owner, doc)
+        self.promote(project, b1, job_a, owner)
+        self.promote(project, b2, job_b, owner)
+        with self.connect() as c:
+            jobs_seen = {r[0] for r in c.execute("SELECT s.parse_job_id FROM evidence_unit_sources s JOIN evidence_units u "
+                                                 "ON u.id = s.evidence_unit_id WHERE u.document_version_id = %s", (doc,)).fetchall()}
+        self.assertEqual(jobs_seen, {job_a, job_b})
+        self.assertEqual(self.counts(doc)[0], 2)                            # the units themselves are shared
 
     def test_refusals_are_fixed_and_write_nothing(self):
         project, owner, doc, sha = self.seed()
