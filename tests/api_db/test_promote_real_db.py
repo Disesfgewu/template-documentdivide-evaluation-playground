@@ -229,13 +229,14 @@ class PromoteRealDbTests(FreshDatabase):
         self.assertEqual(str(ctx.exception), "parse_result_not_found")
         self.assertEqual(self.counts(doc), (0, 0, 0))
         with self.connect() as c:
-            self.assertEqual(c.execute("SELECT count(*) FROM benchmark_parse_sources").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM benchmark_parse_sources WHERE project_id = %s", (project,)).fetchone()[0], 0)
 
     def test_a_cancelled_benchmark_takes_no_pin(self):
         project, owner, doc, sha = self.seed()
         job = self.parsed(project, owner, doc, sha)
         bench = self.benchmark(project, owner, doc)
         with self.connect() as c, c.transaction():
+            c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(owner),))
             c.execute("UPDATE benchmark_revisions SET status = 'cancelled', row_version = row_version + 1 WHERE id = %s", (bench,))
         with self.assertRaises(PromoteError) as ctx:
             self.promote(project, bench, job, owner)

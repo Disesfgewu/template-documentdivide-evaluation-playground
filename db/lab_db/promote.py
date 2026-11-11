@@ -17,6 +17,7 @@ Document text is data here: nothing in this module interprets it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import uuid
 from typing import Optional
 
@@ -121,7 +122,8 @@ def promote_parse_result(conn: psycopg.Connection, project_id: uuid.UUID, benchm
                 report.skipped_pages[page_index] = "too_many_evidence_units"
                 continue
             try:
-                units = [EvidenceUnit.model_validate(e) for e in evidence]
+                # JSON mode: the contract is strict (tuples, enums), and jsonb hands back lists and strings.
+                units = [EvidenceUnit.model_validate_json(json.dumps(e)) for e in evidence]
             except Exception:                                   # a unit that does not satisfy the contract is not promoted
                 report.skipped_pages[page_index] = "invalid_evidence"
                 continue
