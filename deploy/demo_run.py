@@ -189,7 +189,40 @@ def main() -> int:
         # The white run is only dropped as EVIDENCE: its text may stay as an observation on page 4 (the rest of the
         # response is the same page); it must not be evidence, which is asserted per page above.
 
-    banner("4. Cancel API: queue a long parse and cancel it")
+    banner("4. Build a benchmark from this parse (no LLM): create, pin the parse, read the material plan")
+    if not path:
+        bench_name = "demo-" + uuid.uuid4().hex[:6]
+        code, bench = api.call("POST", f"/api/v1/benchmarks?project_id={project}",
+                               json.dumps({"document_version_id": document, "logical_id": bench_name}).encode(), "application/json")
+        print(f"POST /benchmarks -> {code}; status {bench.get('status')}, N={bench.get('n_target')}, Q={bench.get('q_min')}")
+        code, plan = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/plan?project_id={project}", b"{}", "application/json")
+        print(f"POST /benchmarks/{{id}}/revisions/1/plan -> {code}; status {plan.get('status')}, pinned parse job {str(plan.get('parse_job_id'))[:8]}...")
+        if code == 200:
+            print(f"usable pages (promoted as evidence): {[p + 1 for p in plan['pages']['usable']]}")
+            print("pages that cannot host questions (insufficient material):")
+            for index, reason in plan["pages"]["insufficient_material"].items():
+                print(f"  page {int(index) + 1}: {reason}")
+            for name, b in plan["buckets"].items():
+                print(f"bucket {name:<12} {b['status']:<22} required>={b['required_minimum']}  {b['reason'] or ''}")
+            print(f"human review: {plan['human_review']['status']} (compliance projection: {plan['compliance_projection']})")
+            checks = [
+                (code == 200 and plan["status"] == "planning", "benchmark reached planning with the parse pinned"),
+                (plan["pages"]["usable"] == [0, 1, 5], "only the clean pages 1, 2 and 6 are usable"),
+                (sorted(plan["pages"]["insufficient_material"]) == ["2", "3", "4"], "pages 3, 4 and 5 are reported as insufficient material"),
+                (plan["buckets"]["chart_table"]["status"] == "insufficient_material", "chart_table is insufficient (the fast strategy has no table structure)"),
+                (plan["human_review"]["status"] == "skipped" and plan["compliance_projection"] == "partial", "human review is reported as skipped, compliance as partial"),
+            ]
+            for ok, meaning in checks:
+                print(f"[{'ok' if ok else 'FAIL'}] {meaning}")
+                if not ok:
+                    failures.append("benchmark plan")
+        else:
+            print(json.dumps(plan))
+            failures.append("benchmark plan")
+    else:
+        print("(skipped for your own PDF: the plan checks are for the synthetic document)")
+
+    banner("5. Cancel API: queue a long parse and cancel it")
     status, doc2 = api.call("POST", f"/api/v1/documents?project_id={project}&logical_id=long-{uuid.uuid4().hex[:6]}",
                             long_pdf(), "application/pdf")
     if status == 201:

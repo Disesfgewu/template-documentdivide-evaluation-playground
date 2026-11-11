@@ -85,5 +85,13 @@ owner 的決定（Issue #7，2026-11-11）：D1、D2、D4、D5、D6、D8、D9 �
 - **殘餘限制寫進每個釘住的 provenance**（`RESIDUAL_LIMIT`）：藏在其他可見墨跡之間或底下的隱形文字、Type3 glyph procedure、註解外觀串流抓不到，所以被提升的頁面「不保證沒有隱藏文字」。
 - D5（fast 路徑沒有表格結構、表格題配額標示素材不足）與 D6（略過人工審查＝partial，措辭用 skipped）由後續的規劃與凍結步驟處理；**這個 PR 沒有做 D2（`parse_runs` 當註冊表）**：promote 只讀 `parse_results`，`parse_runs` 仍未被解析路徑使用。
 
-尚未做：P-B（建立題庫 API、`parsing → planning`、素材不足報告）、P-D（LLM 出題）、`scripts/demo.sh benchmark` 步驟。
+尚未做：P-D（LLM 出題）。
+
+### P-B：建立題庫並讀素材規劃（Refs #7、#10，沒有新 migration）
+
+- `POST /api/v1/benchmarks`（`build_edit_freeze`＝owner／maintainer；reviewer 只能評論所以 403）：為某個 document version 建立題庫版本（N、Q 由 `target_counts(page_count)` 決定，沒有旋鈕），寫 resource version、`derived_from` lineage、audit，並把狀態 `draft → parsing`；`logical_id` 重複 → 409；不支援 `Idempotency-Key`（冪等性靠 `logical_id` 唯一）。
+- `POST /api/v1/benchmarks/{logical_id}/revisions/{n}/plan`（同權限）：釘住一個**已成功**的 parse job（不指定就用該文件版本最新成功的一個；沒有 → 409 並說明先 `POST /documents/{id}/parse`），經 `promote_parse_result`（G8 硬規則）提升乾淨頁的 evidence，`parsing → planning`，回傳素材規劃；重複呼叫冪等，指定另一個 job → 409（釘不會移動）。
+- `GET .../plan`（`read_gold_and_generation_context`）：同一份規劃（決定性、由 pin 的 provenance 與已提升的 evidence 算出，沒有另外存）；還沒釘 → 409。
+- **素材規劃**（`material_plan.py`，純函式）：可用頁、因 D4 不能出題的頁（附固定理由）、四個配額桶各自「有沒有素材」（**必要條件**，不是「一定寫得出題」）；D5：沒有 table／figure／image evidence 時 `chart_table` 為 `insufficient_material`（不用文字猜儲存格）；D6：`human_review.status = "skipped"`、`compliance_projection = "partial"`，措辭是 skipped，不是 passed，凍結只有 owner；每份規劃都帶 G8 殘餘限制。
+- 路由是「應用程式提供、契約覆蓋層沒有描述」的一類（見 `tests/api/test_openapi_contracts.py` 的 expected 清單，我加了兩個路徑）。
 
