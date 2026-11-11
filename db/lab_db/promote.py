@@ -25,12 +25,14 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from lab_contracts.benchmark import EvidenceUnit
+from lab_db.repo import PermissionDenied, authorize
 
 __all__ = ["PROMOTION_RULE", "PromoteConflict", "PromoteError", "PromoteReport", "RESIDUAL_LIMIT",
            "UNSAFE_DIAGNOSTICS", "promote_parse_result"]
 
 PROMOTION_RULE = "g8-clean-pages-v1"
-UNSAFE_DIAGNOSTICS = frozenset({"text_not_visible", "content_unparseable", "region_without_ink"})
+UNSAFE_DIAGNOSTICS = frozenset({"text_not_visible", "content_unparseable", "region_without_ink",
+                                "missing_or_invalid_geometry_or_asset_reference"})
 RESIDUAL_LIMIT = (
     "Hidden text under or among other visible ink (a rule, stripe, fill, image or shape over or through a one-line "
     "box), Type3 glyph procedures and annotation appearance streams are NOT detected: a promoted page is not proven "
@@ -73,14 +75,19 @@ def promote_parse_result(conn: psycopg.Connection, project_id: uuid.UUID, benchm
     """Pin ``parse_job_id`` to the benchmark revision and promote its clean pages' evidence; idempotent per pin.
 
     Raises ``PromoteError`` (unknown benchmark/job, wrong document, job not succeeded, benchmark not in a state that
-    takes a pin) or ``PromoteConflict`` (a different job is already pinned). Authorization is the caller's job."""
+    takes a pin) or ``PromoteConflict`` (a different job is already pinned). The actor is authorized HERE, after the
+    benchmark row lock, for ``build_edit_freeze`` (owner/maintainer): ``repo.NotFound`` for a non-member,
+    ``repo.PermissionDenied`` for any other role (a reviewer's comments-only right is not enough)."""
     with conn.transaction():
         bench = conn.execute(
-            "SELECT document_version_id, status::text FROM benchmark_revisions WHERE project_id = %s AND id = %s FOR UPDATE",
+            "SELECT document_version_id, status::text, resource_id FROM benchmark_revisions WHERE project_id = %s AND id = %s FOR UPDATE",
             (project_id, benchmark_id)).fetchone()
         if bench is None:
             raise PromoteError("benchmark_not_found")
-        document_version_id, bench_status = bench
+        document_version_id, bench_status, resource_id = bench
+        decision = authorize(conn, project_id, actor_id, "build_edit_freeze")
+        if decision.condition is not None:
+            raise PermissionDenied(f"{decision.role} may not promote a parse result")
         pinned = conn.execute("SELECT parse_job_id, provenance FROM benchmark_parse_sources WHERE benchmark_id = %s",
                               (benchmark_id,)).fetchone()
         report = PromoteReport(benchmark_id, parse_job_id)
@@ -146,11 +153,24 @@ def promote_parse_result(conn: psycopg.Connection, project_id: uuid.UUID, benchm
             "INSERT INTO benchmark_parse_sources (benchmark_id, project_id, parse_job_id, document_version_id, rule, "
             "provenance, promoted_by) VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (benchmark_id, project_id, parse_job_id, document_version_id, PROMOTION_RULE, Jsonb(provenance), actor_id))
+        op_id = uuid.uuid4()
+        conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
+                     "VALUES (%s, %s, 'benchmark.parse_promoted', %s, 'succeeded', now())", (op_id, project_id, actor_id))
+        conn.execute(
+            "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, reason, outcome, "
+            "operation_id) VALUES (%s, %s, %s, 'benchmark.parse_promoted', 'benchmark_revision', %s, %s, 'succeeded', %s)",
+            (uuid.uuid4(), project_id, actor_id, resource_id,
+             f"rule={PROMOTION_RULE} pages={report.pages_total} promoted={len(report.promoted_pages)} "
+             f"skipped={len(report.skipped_pages)} units={report.evidence_units}", op_id))
         return report
 
 
 def _write_unit(conn, project_id, document_version_id, parse_job_id, page_index, unit: EvidenceUnit) -> None:
-    """Insert one evidence unit with its regions and its source row, unless the same unit already exists."""
+    """Insert one evidence unit with its regions and its source row for THIS job, unless the unit already exists.
+
+    Concurrent promotions for different benchmarks of one document version are serialized per version by a
+    transaction advisory lock, so the check-then-insert cannot hit the unique key."""
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("evidence:" + str(document_version_id),))
     existing = conn.execute(
         "SELECT eu.id, eu.raw_content FROM evidence_units eu WHERE eu.document_version_id = %s AND eu.evidence_key = %s",
         (document_version_id, unit.evidence_id)).fetchone()
@@ -158,6 +178,10 @@ def _write_unit(conn, project_id, document_version_id, parse_job_id, page_index,
         # Same id = same raw artifact, page and pointer (the id is a hash of them): it must be the same content.
         if existing[1] != unit.raw_content:
             raise PromoteError("evidence_key_collision_with_different_content")
+        conn.execute(
+            "INSERT INTO evidence_unit_sources (evidence_unit_id, project_id, parse_job_id, source_evidence_id, page_index) "
+            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            (existing[0], project_id, parse_job_id, unit.evidence_id, page_index))   # provenance for this job too
         return
     unit_id = uuid.uuid4()
     conn.execute(

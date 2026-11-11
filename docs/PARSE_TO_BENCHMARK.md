@@ -85,6 +85,9 @@ owner 的決定（Issue #7，2026-11-11）：D1、D2、D4、D5、D6、D8、D9 �
 - **殘餘限制寫進每個釘住的 provenance**（`RESIDUAL_LIMIT`）：藏在其他可見墨跡之間或底下的隱形文字、Type3 glyph procedure、註解外觀串流抓不到，所以被提升的頁面「不保證沒有隱藏文字」。
 - D5（fast 路徑沒有表格結構、表格題配額標示素材不足）與 D6（略過人工審查＝partial，措辭用 skipped）由後續的規劃與凍結步驟處理；**這個 PR 沒有做 D2（`parse_runs` 當註冊表）**：promote 只讀 `parse_results`，`parse_runs` 仍未被解析路徑使用。
 
+
+
+- 授權與稽核（PM 審查 #147 後補）：`promote_parse_result` 在鎖住 benchmark 列之後自行授權（`build_edit_freeze`，owner／maintainer；非成員 `NotFound`、其他角色 `PermissionDenied`）；同一交易寫一筆 `benchmark.parse_promoted` 稽核事件（只有計數）；同一 document version 的並行 promote 以交易 advisory lock 序列化；證據單位已存在時，仍為這個 parse job 補一筆 `evidence_unit_sources`。`missing_or_invalid_geometry_or_asset_reference` 也列入 UNSAFE_DIAGNOSTICS。
 尚未做：P-D（LLM 出題）。
 
 ### P-B：建立題庫並讀素材規劃（Refs #7、#10，沒有新 migration）
