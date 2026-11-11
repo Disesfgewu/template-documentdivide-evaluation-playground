@@ -7,15 +7,16 @@
 -- G8 hard rule: only clean pages are promoted; the pin row records what was promoted and what was skipped and why,
 -- and the residual limit of the hidden-text protection, so it travels with the benchmark's provenance.
 
--- Where a promoted evidence unit came from. One row per unit (a unit is promoted once; a second benchmark over the
--- same parse job reuses it).
+-- Where a promoted evidence unit came from: one row per (unit, parse job) that produced it (a unit is stored once and
+-- reused by later promotions, each of which records its own job).
 CREATE TABLE evidence_unit_sources (
-    evidence_unit_id     uuid PRIMARY KEY REFERENCES evidence_units(id) ON DELETE RESTRICT,
+    evidence_unit_id     uuid NOT NULL REFERENCES evidence_units(id) ON DELETE RESTRICT,
     project_id           uuid NOT NULL,
     parse_job_id         uuid NOT NULL,
     source_evidence_id   text NOT NULL CHECK (length(source_evidence_id) BETWEEN 1 AND 128),
     page_index           integer NOT NULL CHECK (page_index >= 0),
     FOREIGN KEY (project_id, parse_job_id) REFERENCES parse_results(project_id, job_id) ON DELETE RESTRICT,
+    PRIMARY KEY (evidence_unit_id, parse_job_id),
     UNIQUE (parse_job_id, source_evidence_id)
 );
 CREATE TRIGGER evidence_unit_sources_append_only BEFORE UPDATE OR DELETE ON evidence_unit_sources

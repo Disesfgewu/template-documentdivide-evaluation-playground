@@ -226,7 +226,7 @@ class PromoteRealDbTests(FreshDatabase):
                 self.promote(project, bench, job, who)
         self.assertEqual(self.counts(doc), (0, 0, 0))
         with self.connect() as c:
-            self.assertEqual(c.execute("SELECT count(*) FROM benchmark_parse_sources").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM benchmark_parse_sources WHERE project_id = %s", (project,)).fetchone()[0], 0)
         self.assertEqual(self.promote(project, bench, job, maintainer).promoted_pages, [0, 2])
 
     def test_a_promotion_writes_one_audit_event_with_counts_only(self):
