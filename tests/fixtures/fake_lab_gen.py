@@ -1,5 +1,6 @@
 """A stand-in for the lab-gen binary (tests only, Refs #7). Mode comes from FAKE_LAB_GEN_MODE:
-ok | unknown_usage | partial | garbage | crash | sleep | refused | wrong_hash | overspend.
+ok | unknown_usage | partial | garbage | crash | sleep | refused | wrong_hash | overspend | replies.
+replies: call i answers FAKE_LAB_GEN_REPLIES[i % n] (a JSON list of reply strings) verbatim.
 It computes costs and hashes exactly the way lab-gen does and never touches the network."""
 import hashlib
 import json
@@ -33,6 +34,9 @@ for i, c in enumerate(inp["calls"]):
     r = {"id": c["id"], "status": "ok", "usage_known": True, "input_tokens": 5, "output_tokens": 20, "charged_micros": cost(5, 20),
          "held_micros": 0, "transport_attempts": 1, "request_sha256": req}
     text = f"reply {i}"
+    if mode == "replies":
+        canned = json.loads(os.environ["FAKE_LAB_GEN_REPLIES"])
+        text = canned[i % len(canned)]
     r["text"], r["text_sha256"] = text, hashlib.sha256(text.encode()).hexdigest()
     if mode == "unknown_usage":
         r.update(usage_known=False, input_tokens=0, output_tokens=0, charged_micros=-1, held_micros=worst)

@@ -88,7 +88,7 @@ owner 的決定（Issue #7，2026-11-11）：D1、D2、D4、D5、D6、D8、D9 �
 
 
 - 授權與稽核（PM 審查 #147 後補）：`promote_parse_result` 在鎖住 benchmark 列之後自行授權（`build_edit_freeze`，owner／maintainer；非成員 `NotFound`、其他角色 `PermissionDenied`）；同一交易寫一筆 `benchmark.parse_promoted` 稽核事件（只有計數）；同一 document version 的並行 promote 以交易 advisory lock 序列化；證據單位已存在時，仍為這個 parse job 補一筆 `evidence_unit_sources`。`missing_or_invalid_geometry_or_asset_reference` 也列入 UNSAFE_DIAGNOSTICS。
-尚未做：P-D（LLM 出題）。
+P-D（LLM 出題）：slice 1–3 已做（lab-gen、`llm_calls` 帳本、general 桶出題與 `gold_answers`），見 `docs/LAB_GEN.md`；其他三個桶、人工審查與凍結尚未做。
 
 ### P-B：建立題庫並讀素材規劃（Refs #7、#10，沒有新 migration）
 
@@ -98,3 +98,9 @@ owner 的決定（Issue #7，2026-11-11）：D1、D2、D4、D5、D6、D8、D9 �
 - **素材規劃**（`material_plan.py`，純函式）：可用頁、因 D4 不能出題的頁（附固定理由）、四個配額桶各自「有沒有素材」（**必要條件**，不是「一定寫得出題」）；D5：沒有 table／figure／image evidence 時 `chart_table` 為 `insufficient_material`（不用文字猜儲存格）；D6：`human_review.status = "skipped"`、`compliance_projection = "partial"`，措辭是 skipped，不是 passed，凍結只有 owner；每份規劃都帶 G8 殘餘限制。
 - 路由是「應用程式提供、契約覆蓋層沒有描述」的一類（見 `tests/api/test_openapi_contracts.py` 的 expected 清單，我加了兩個路徑）。
 
+
+### P-D slice 3：general 桶出題（Refs #7、#10）
+
+`document.generate` job 只用已提升的乾淨 evidence（G8），每頁一個呼叫，只出 general 桶；題目、facts、evidence sets、`gold_answers`
+（migration 0015，RLS 隔離）與 `llm_calls` 在同一交易寫入；benchmark `generating → validating`，不足 `q_min` 時在轉換理由記錄 shortfall，
+不補題、不凍結、人工審查 skipped。詳細規則與限制（無人工審查、品質未量測、模型可能出不需看頁面的題）見 `docs/LAB_GEN.md`。

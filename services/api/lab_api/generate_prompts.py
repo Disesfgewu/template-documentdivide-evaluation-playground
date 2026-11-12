@@ -9,16 +9,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import re
 from typing import Optional, Sequence
 
 from lab_api.generate_worker import CallSpec
 
-__all__ = ["MAX_FACTS", "ParsedReply", "build_page_call", "detect_language", "parse_model_reply", "select_pages"]
+__all__ = ["MAX_FACTS", "PROMPT_VERSION", "ParsedReply", "build_page_call", "detect_language", "parse_model_reply", "select_pages"]
 
 MAX_FACTS = 3
 MAX_QUESTION_CHARS, MAX_ANSWER_CHARS, MAX_FACT_CHARS = 500, 600, 400
 DEFAULT_PAGE_CHARS = 6000
+MAX_FACT_WEIGHT = 10.0
+PROMPT_VERSION = "gen-general-2"     # bump whenever SYSTEM or the user framing changes
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S)
 
 SYSTEM = (
@@ -29,9 +32,9 @@ SYSTEM = (
     "- The question must be answerable from the evidence alone, in the same language as the evidence, and must not "
     "mention 'the evidence', 'the text' or 'the page'.\n"
     "- Give a short reference answer and 1 to 3 facts that a correct answer must contain (each fact one short "
-    "statement taken from the evidence).\n"
+    "statement taken from the evidence, with a weight from 0.1 to 10 for how much it matters).\n"
     "- Reply with ONE JSON object and nothing else: "
-    '{"question": "...", "reference_answer": "...", "facts": [{"statement": "..."}]}'
+    '{"question": "...", "reference_answer": "...", "facts": [{"statement": "...", "weight": 1}]}'
 )
 
 
@@ -40,6 +43,7 @@ class ParsedReply:
     question: str
     reference_answer: str
     facts: tuple[str, ...]
+    weights: tuple[float, ...] = ()
 
 
 def select_pages(usable_text_pages: Sequence[int], needed: int) -> list[int]:
@@ -54,9 +58,11 @@ def select_pages(usable_text_pages: Sequence[int], needed: int) -> list[int]:
 def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, str]],
                     page_chars: int = DEFAULT_PAGE_CHARS) -> CallSpec:
     """One call for one clean page. ``units`` = (evidence_id, normalized text) in reading order; the page text is cut at
-    ``page_chars`` characters (whole units only; a unit that alone exceeds the cap is cut)."""
+    ``page_chars`` characters (whole units only; a unit that alone exceeds the cap is cut). Only the TEXT is sent: no
+    evidence id, file name, document id or diagnostic (PM-DECISION Issue #7, 2026-11-12 (c)); the page number in the
+    fence is the only label."""
     lines, used = [], 0
-    for evidence_id, text in units:
+    for _evidence_id, text in units:
         text = text.strip()
         if not text:
             continue
@@ -64,9 +70,9 @@ def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, st
         if room <= 0:
             break
         piece = text[:room]
-        lines.append(f"[{evidence_id}] {piece}")
+        lines.append(piece)
         used += len(piece)
-    body = "\n".join(lines)
+    body = "\n\n".join(lines)
     return CallSpec(id=call_id, system=SYSTEM, user=f"<evidence page=\"{page_index}\">\n{body}\n</evidence>")
 
 
@@ -98,14 +104,18 @@ def parse_model_reply(text: str) -> Optional[ParsedReply]:
     q, a = q.strip(), a.strip()
     if not q or not a or len(q) > MAX_QUESTION_CHARS or len(a) > MAX_ANSWER_CHARS or not 1 <= len(facts) <= MAX_FACTS:
         return None
-    out = []
+    out, weights = [], []
     for f in facts:
-        if not isinstance(f, dict) or set(f) != {"statement"} or not isinstance(f["statement"], str):
+        if not isinstance(f, dict) or set(f) - {"statement", "weight"} or not isinstance(f.get("statement"), str):
             return None
         s = f["statement"].strip()
         if not s or len(s) > MAX_FACT_CHARS:
             return None
+        w = f.get("weight", 1.0)          # weight is optional; when given it must be a sane positive number
+        if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) or not 0 < w <= MAX_FACT_WEIGHT:
+            return None
         out.append(s)
+        weights.append(float(w))
     if len(set(out)) != len(out):
         return None
-    return ParsedReply(q, a, tuple(out))
+    return ParsedReply(q, a, tuple(out), tuple(weights))
