@@ -179,7 +179,8 @@ def process_generate_job(conn: psycopg.Connection, project_id: uuid.UUID, job_id
                          lab_gen_cmd: Sequence[str], cfg: GenModelConfig, build_calls: GenBuilder,
                          connect: Callable[[], psycopg.Connection], api_key: Optional[str],
                          on_results: Optional[OnResults] = None, ttl_seconds: int = 60, child_timeout: float = 300.0,
-                         extra_env: Optional[dict] = None) -> ParseOutcome:
+                         extra_env: Optional[dict] = None,
+                         shutdown: Optional[Callable[[], bool]] = None) -> ParseOutcome:
     """Claim and run one generation job. Raises ``jobs.LeaseUnavailable`` if it is not claimable."""
     try:
         lease = jobs.acquire(conn, project_id, job_id, worker, ttl_seconds)
@@ -196,7 +197,7 @@ def process_generate_job(conn: psycopg.Connection, project_id: uuid.UUID, job_id
         raise
     try:
         return _execute(conn, project_id, lease, worker, lab_gen_cmd, cfg, build_calls, connect, api_key, on_results,
-                        ttl_seconds, child_timeout, extra_env)
+                        ttl_seconds, child_timeout, extra_env, shutdown)
     except jobs.LeaseLost:
         return _stopped(conn, project_id, job_id)
     except Exception as exc:
@@ -218,7 +219,7 @@ def _fail(conn, project_id, lease, code) -> ParseOutcome:
 
 
 def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, api_key, on_results, ttl, child_timeout,
-             extra_env):
+             extra_env, shutdown=None):
     job_id = lease.job_id
     with conn.transaction():
         row = conn.execute(
@@ -245,7 +246,7 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
         "budget": {"limit_micros": state.remaining},
         "calls": [{"id": c.id, "system": c.system, "user": c.user} for c in calls]}
     with _Heartbeat(connect, project_id, lease, ttl) as beat:
-        stdout, why = run_lab_gen(cmd, payload, key=api_key, timeout=child_timeout, cancelled=beat.lost.is_set,
+        stdout, why = run_lab_gen(cmd, payload, key=api_key, timeout=child_timeout, cancelled=lambda: beat.lost.is_set() or (shutdown is not None and shutdown()),
                                   extra_env=extra_env)
     parsed = None
     if stdout is not None:
@@ -263,6 +264,12 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
             record(conn, rows)
         if beat.lost.is_set():
             raise jobs.LeaseLost()
+        if why == "cancelled" and shutdown is not None and shutdown():
+            # The worker is stopping: the child was killed and the batch is held. Give the job back for the next worker
+            # (fenced); a user cancel wins (LeaseLost -> acknowledged by the caller).
+            if jobs.release_for_shutdown(conn, project_id, lease) == "failed":
+                return ParseOutcome(job_id, "failed", "lease_exhausted")
+            return ParseOutcome(job_id, "queued", "released: worker shutdown")
         return _fail(conn, project_id, lease, "lab_gen_failed")
     rows = parsed["calls"]
     ok = parsed["status"] == "ok"

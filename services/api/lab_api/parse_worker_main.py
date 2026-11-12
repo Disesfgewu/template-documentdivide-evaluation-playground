@@ -59,18 +59,19 @@ CANCEL_WAIT_SECONDS = 10.0
 MAX_PDF_BYTES = 512 * 1024 * 1024
 
 
-def claimable(conn: psycopg.Connection, limit: int, skip: set[uuid.UUID]) -> list[tuple[uuid.UUID, uuid.UUID]]:
-    """(project_id, job_id) of queued parse jobs and of running ones whose lease expired, oldest first."""
+def claimable(conn: psycopg.Connection, limit: int, skip: set[uuid.UUID],
+              kind: str = "document.parse") -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """(project_id, job_id) of queued jobs of ``kind`` and of running ones whose lease expired, oldest first."""
     with conn.transaction():
         rows = conn.execute(
             """
             SELECT project_id, id FROM jobs
-            WHERE kind = 'document.parse'
+            WHERE kind = %s
               AND (status = 'queued' OR (status = 'running' AND lease_expires_at < clock_timestamp()))
             ORDER BY id
             LIMIT %s
             """,
-            (limit + len(skip),),
+            (kind, limit + len(skip)),
         ).fetchall()
     return [(p, j) for p, j in rows if j not in skip][:limit]
 
@@ -105,6 +106,8 @@ class Backoff:
 
 
 class Worker:
+    KIND = "document.parse"      # subclasses (generation) change the job kind and ``_process``
+
     def __init__(self, connect: Callable[[], psycopg.Connection], store: LocalArtifactStore, *,
                  name: str, concurrency: int = 1, interval: float = 5.0, grace: float = 60.0,
                  backoff: float = 5.0, ttl_seconds: int = 60, python: str | None = None,
@@ -147,15 +150,18 @@ class Worker:
             return base(data, cancelled=lambda: inner() or self.abort.is_set(), **kw)
         return run
 
+    def _process(self, conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome:
+        return process_parse_job(
+            conn, project_id, job_id, store=self.store, persist=make_persist(self.store),
+            worker=self.name, max_pdf_bytes=MAX_PDF_BYTES, connect=self.connect,
+            ttl_seconds=self.ttl, python=self.python, run=self._run_with_abort(),
+            shutdown=self.abort.is_set)
+
     def _handle(self, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome | None:
         outcome = None
         try:
             with self.connect() as conn:
-                outcome = process_parse_job(
-                    conn, project_id, job_id, store=self.store, persist=make_persist(self.store),
-                    worker=self.name, max_pdf_bytes=MAX_PDF_BYTES, connect=self.connect,
-                    ttl_seconds=self.ttl, python=self.python, run=self._run_with_abort(),
-                    shutdown=self.abort.is_set)
+                outcome = self._process(conn, project_id, job_id)
         except jobs.LeaseUnavailable:
             LOG.info("job %s not claimable", job_id)  # someone else took it first
         except Exception as exc:
@@ -183,7 +189,7 @@ class Worker:
     def _pick(self, conn, free: int) -> list[tuple[uuid.UUID, uuid.UUID]]:
         with self._lock:
             skip = self.backoff.waiting() | self._inflight
-        return claimable(conn, free, skip)
+        return claimable(conn, free, skip, self.KIND)
 
     def pass_once(self, pool: ThreadPoolExecutor, futures: set[Future]) -> int:
         """Submit up to the free capacity; returns how many jobs were submitted."""
