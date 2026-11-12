@@ -42,7 +42,7 @@ def _start(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
            body: GenerateRequest) -> dict:
     missing = ApiError(404, "not_found", "benchmark revision not found")
     _authorize(conn, project_id, actor_id, BUILD_ACTION, missing)
-    benchmark_id, _, status, page_count = _find(conn, project_id, logical_id, revision)
+    benchmark_id, _, _, page_count = _find(conn, project_id, logical_id, revision)
     try:
         job_id = enqueue_generate_job(
             conn, project_id=project_id, actor_id=actor_id, benchmark_id=benchmark_id, model=body.model,
@@ -101,6 +101,9 @@ def _progress(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UU
 async def start_handler(logical_id: str, revision: int, request: Request, conn: psycopg.Connection = Depends(get_db),
                         actor_id: uuid.UUID = Depends(get_authenticated_actor)) -> JSONResponse:
     project_id = resolve_project_id(request)
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:      # refuse before reading the body
+        raise ApiError(413, "payload_too_large", "request body is too large")
     raw = await request.body()
     if len(raw) > MAX_BODY_BYTES:
         raise ApiError(413, "payload_too_large", "request body is too large")
