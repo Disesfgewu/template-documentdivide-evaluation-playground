@@ -105,6 +105,22 @@ class RunChildTests(unittest.TestCase):
         self.assertEqual(run("sleep", cancelled=lambda: True), (None, "cancelled"))
         self.assertEqual(run_lab_gen(["/nonexistent/lab-gen"], payload(), key=None, timeout=1), (None, "spawn_failed"))
 
+    def test_oversized_output_is_cut_off_and_never_buffered_whole(self):
+        script = "import sys\nsys.stdout.write('x' * (5 * 1024 * 1024))"
+        out, why = run_lab_gen([sys.executable, "-c", script], payload(), key=None, timeout=20, max_stdout=64 * 1024)
+        self.assertEqual((out, why), (None, "output_too_large"))
+
+    def test_a_timeout_kills_the_whole_process_group_not_only_the_child(self):
+        import tempfile, time
+        marker = Path(tempfile.mkdtemp()) / "grandchild-survived"
+        script = ("import subprocess, sys, time\n"
+                  f"subprocess.Popen([sys.executable, '-c', \"import time, pathlib; time.sleep(2); pathlib.Path(r'{marker}').write_text('x')\"])\n"
+                  "time.sleep(60)")
+        out, why = run_lab_gen([sys.executable, "-c", script], payload(), key=None, timeout=0.6)
+        self.assertEqual((out, why), (None, "timeout"))
+        time.sleep(3)
+        self.assertFalse(marker.exists(), "a grandchild outlived the killed child")
+
     def test_the_child_gets_only_a_minimal_environment(self):
         os.environ["SOME_OTHER_SECRET"] = "leak-me"
         try:

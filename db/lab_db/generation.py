@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import uuid
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import psycopg
 
@@ -19,7 +19,7 @@ from lab_db.jobs import ACTIVE_JOB_STATUSES
 from lab_db.repo import NotFound, PermissionDenied, authorize, transition_benchmark
 
 __all__ = ["BudgetState", "GenerateJobActive", "GenerationError", "MAX_OUTPUT_TOKENS", "benchmark_budget",
-           "enqueue_generate_job", "record_llm_calls", "request_sha256", "worst_case_micros"]
+           "enqueue_generate_job", "record_llm_calls", "request_sha256", "reserve_batch", "worst_case_micros"]
 
 MAX_OUTPUT_TOKENS = 500          # the owner's hard cap per call (Issue #7, D7); the table checks it too
 DEFAULT_GENERATE_MAX_ATTEMPTS = 3
@@ -111,29 +111,71 @@ def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, act
 
 
 def benchmark_budget(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, cap: int) -> BudgetState:
-    """Spend and held reservations of every LLM call recorded for the benchmark (all its generation jobs)."""
+    """Spend and holds from the CURRENT row (latest seq) of every call of every attempt of the benchmark's jobs."""
     spent, held = conn.execute(
-        "SELECT COALESCE(sum(GREATEST(charged_micros, 0)), 0), COALESCE(sum(held_micros), 0) FROM llm_calls "
-        "WHERE project_id = %s AND benchmark_id = %s", (project_id, benchmark_id)).fetchone()
+        "SELECT COALESCE(sum(GREATEST(charged_micros, 0)), 0), COALESCE(sum(held_micros), 0) FROM ("
+        "SELECT DISTINCT ON (job_id, attempt, call_id) charged_micros, held_micros FROM llm_calls "
+        "WHERE project_id = %s AND benchmark_id = %s ORDER BY job_id, attempt, call_id, seq DESC) s",
+        (project_id, benchmark_id)).fetchone()
     return BudgetState(cap=cap, spent=int(spent), held=int(held))
 
 
-def record_llm_calls(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, job_id: uuid.UUID,
-                     model: str, currency: str, pricing_revision: str, calls: Iterable[dict]) -> int:
-    """Insert one ``llm_calls`` row per call, idempotent on (job, call id). Returns the rows written.
+_COLUMNS = ("id, project_id, benchmark_id, job_id, call_id, attempt, model, status, reason, usage_known, input_tokens, "
+            "output_tokens, charged_micros, held_micros, attempts, currency, pricing_revision, request_sha256, "
+            "response_length, response_sha256")
 
-    Each call dict: call_id, status, reason, usage_known, input_tokens, output_tokens, charged_micros, held_micros,
-    attempts, request_sha256, response_length, response_sha256. The database checks the cost/usage invariants."""
+
+def record_llm_calls(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, job_id: uuid.UUID,
+                     attempt: int, model: str, currency: str, pricing_revision: str, calls: Iterable[dict]) -> int:
+    """Append one ``llm_calls`` row per call. Idempotent only for a replay of the SAME attempt (the unique indexes are
+    per (job, attempt, call) and per kind: reservation or settlement); a retry is a new attempt and always inserts.
+    Returns the rows written. Each call dict: call_id, status, reason, usage_known, input_tokens, output_tokens,
+    charged_micros, held_micros, attempts, request_sha256, response_length, response_sha256. The database checks the
+    cost/usage invariants."""
     written = 0
     for c in calls:
+        target = "WHERE status = 'reserved'" if c["status"] == "reserved" else "WHERE status <> 'reserved'"
         cur = conn.execute(
-            "INSERT INTO llm_calls (id, project_id, benchmark_id, job_id, call_id, model, status, reason, usage_known, "
-            "input_tokens, output_tokens, charged_micros, held_micros, attempts, currency, pricing_revision, "
-            "request_sha256, response_length, response_sha256) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (job_id, call_id) DO NOTHING",
-            (uuid.uuid4(), project_id, benchmark_id, job_id, c["call_id"], model, c["status"], (c.get("reason") or None),
-             c["usage_known"], c["input_tokens"], c["output_tokens"], c["charged_micros"], c["held_micros"], c["attempts"],
-             currency, pricing_revision, c["request_sha256"], c["response_length"], c.get("response_sha256")))
+            f"INSERT INTO llm_calls ({_COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            f"ON CONFLICT (job_id, attempt, call_id) {target} DO NOTHING",
+            (uuid.uuid4(), project_id, benchmark_id, job_id, c["call_id"], attempt, model, c["status"],
+             (c.get("reason") or None), c["usage_known"], c["input_tokens"], c["output_tokens"], c["charged_micros"],
+             c["held_micros"], c["attempts"], currency, pricing_revision, c["request_sha256"], c["response_length"],
+             c.get("response_sha256")))
         written += cur.rowcount
     return written
+
+
+def _row(call_id: str, status: str, reason: str, held: int, request_hash: str) -> dict:
+    return {"call_id": call_id, "status": status, "reason": reason, "usage_known": False, "input_tokens": 0,
+            "output_tokens": 0, "charged_micros": -1, "held_micros": held, "attempts": 0, "request_sha256": request_hash,
+            "response_length": 0, "response_sha256": None}
+
+
+def reserve_batch(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, job_id: uuid.UUID,
+                  attempt: int, cap: int, model: str, currency: str, pricing_revision: str,
+                  calls: Sequence[tuple[str, str, int]]) -> tuple[list[str], int]:
+    """Reserve the worst case of each call BEFORE anything is spawned. ``calls`` = (call_id, request_sha256, worst).
+
+    One transaction under a per-benchmark advisory lock (two workers can never both spend the same remaining budget):
+    in order, a call whose worst case fits the remaining budget gets a ``reserved`` row (held = worst); the first call
+    that does not fit, and every later one, gets a ``skipped_budget`` row and is never sent (fail-closed).
+    Returns (call ids that may be sent, their total hold)."""
+    sendable: list[str] = []
+    total = 0
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"llm_budget:{project_id}:{benchmark_id}",))
+        remaining = benchmark_budget(conn, project_id, benchmark_id, cap).remaining
+        stopped = False
+        for call_id, request_hash, worst in calls:
+            if not stopped and worst <= remaining:
+                record_llm_calls(conn, project_id, benchmark_id, job_id, attempt, model, currency, pricing_revision,
+                                 [_row(call_id, "reserved", "reserved before spawn", worst, request_hash)])
+                remaining -= worst
+                total += worst
+                sendable.append(call_id)
+            else:
+                stopped = True
+                record_llm_calls(conn, project_id, benchmark_id, job_id, attempt, model, currency, pricing_revision,
+                                 [_row(call_id, "skipped_budget", "worst case does not fit the remaining budget", 0, request_hash)])
+    return sendable, total
