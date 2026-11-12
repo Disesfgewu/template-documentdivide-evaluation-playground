@@ -254,7 +254,8 @@ def main() -> int:
         code, started = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/generate?project_id={project}",
                                  json.dumps({"model": model, "budget_cap_micros": cap}).encode(), "application/json")
         print(f"POST .../generate -> {code}; model {model}, <= {started.get('max_output_tokens')} output tokens per call, "
-              f"budget cap {cap} micro-USD, general target {started.get('general_target')} questions")
+              f"budget cap {cap} micro-USD, targets: {started.get('general_target')} general + "
+              f"{started.get('cross_page_target')} cross_page questions")
         progress = {}
         if code == 202:
             deadline = time.monotonic() + float(os.environ.get("DEMO_GEN_TIMEOUT", "900"))
@@ -265,8 +266,9 @@ def main() -> int:
                 time.sleep(3)
             job_status = (progress.get("job") or {}).get("status")
             ledger = progress.get("ledger") or {}
-            print(f"job {job_status}; questions {progress.get('questions')} / target {progress.get('general_target')} "
-                  f"(shortfall {progress.get('shortfall')})")
+            print(f"job {job_status}; questions {progress.get('questions')} by bucket {progress.get('by_bucket')} "
+                  f"(targets: general {progress.get('general_target')}, cross_page {progress.get('cross_page_target')}; "
+                  f"shortfall {progress.get('shortfall')})")
             print(f"ledger: calls {ledger.get('calls_by_state')}, spent {ledger.get('spent_micros')} micro-USD, "
                   f"held {ledger.get('held_micros')}, remaining {ledger.get('remaining_micros')}")
             print(f"last generation: {progress.get('last_generation')}")
