@@ -99,6 +99,41 @@ services:
     # worker in the middle of a job and skip the drain.
     stop_grace_period: 90s
     restart: unless-stopped
+  generate-worker:
+    # The document.generate worker (P-D, Refs #7). Not part of the `demo` profile: it needs a provider key, so it only
+    # starts through `scripts/demo.sh generate` (profile "generate"). The key comes from the CALLER's environment
+    # (LAB_GEN_API_KEY), is never stored in the image or this file, and goes only into the lab-gen child's environment.
+    profiles: ["generate"]
+    build:
+      context: ..
+      dockerfile: deploy/generate-worker.Dockerfile
+      args:
+        AGENTKIT_COMMIT: ${AGENTKIT_COMMIT:-}
+    environment:
+      LAB_ENV: dev
+      LAB_PROVIDER_MODE: mock
+      LAB_DATABASE_URL: postgresql://lab:lab-dev-only@db:5432/lab
+      LAB_ARTIFACT_ROOT: /var/lib/lab/artifacts
+      LAB_AUTH_SECRET: dev-only-secret-not-used-by-the-worker-but-required-by-the-settings-loader
+      LAB_GEN_API_KEY: ${LAB_GEN_API_KEY:-}
+      LAB_GEN_PROTOCOL: anthropic
+      LAB_GEN_BASE_URL: https://api.anthropic.com
+      LAB_GEN_ALLOWED_HOST: api.anthropic.com
+      LAB_GEN_PRICE_IN_MICROS_PER_MTOK: ${LAB_GEN_PRICE_IN_MICROS_PER_MTOK:-1000000}
+      LAB_GEN_PRICE_OUT_MICROS_PER_MTOK: ${LAB_GEN_PRICE_OUT_MICROS_PER_MTOK:-5000000}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=128m
+    user: "10001:10001"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 100
+    depends_on:
+      db:
+        condition: service_healthy
+    stop_grace_period: 90s
+    restart: "no"
 volumes:
   lab-db:
   lab-artifacts:
