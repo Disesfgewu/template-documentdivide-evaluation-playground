@@ -253,9 +253,9 @@ def _derive_confusable(reply: ConfusableReply, answer_units: Sequence[EvidenceUn
 
 
 def _content_words(text: str) -> set[str]:
-    """NFKC, case-folded content words (3+ letters or digits, CJK per character) as the grounding checks use them."""
-    from lab_api.validate_questions import _WORD, _norm
-    return set(_WORD.findall(_norm(text)))
+    """The content tokens of ``validate_questions.content_tokens`` (words of 3+ letters/digits, CJK character bigrams)."""
+    from lab_api.validate_questions import content_tokens
+    return set(content_tokens(text))
 
 
 def select_distractors(units: Sequence, question: str, facts: Sequence[str]) -> list:
