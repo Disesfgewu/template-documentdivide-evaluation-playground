@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-for _sub in (_REPO_ROOT / "db", _REPO_ROOT / "services" / "parser", _REPO_ROOT / "contracts"):
+for _sub in (_REPO_ROOT / "db", _REPO_ROOT / "services" / "parser", _REPO_ROOT / "contracts", _REPO_ROOT / "scoring"):
     if _sub.exists() and str(_sub) not in sys.path:
         sys.path.insert(0, str(_sub))
 

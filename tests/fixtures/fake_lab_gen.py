@@ -53,7 +53,7 @@ for i, c in enumerate(inp["calls"]):
                 a_line, b_line = (blocks + ["", ""])[:2]
                 if mode == "questions_ungrounded":
                     a_line, b_line = f"item {n} of the document", f"other item {n} of the document"
-                text = json.dumps({"question": f"How does statement number {n} of the first part relate to the second part?",
+                text = json.dumps({"question": f"How does statement number {n} of the first part relate to the second part ({a_line} / {b_line})?",
                                    "reference_answer": f"{a_line} and {b_line}",
                                    "facts": [{"statement": a_line, "source": "A"}, {"statement": b_line, "source": "B"}]})
                 answer = None
@@ -62,7 +62,7 @@ for i, c in enumerate(inp["calls"]):
             else:                                   # grounded: the answer and the fact are the first line of the shown page
                 answer, fact = body, body
             if answer is not None:
-                text = json.dumps({"question": f"What does statement number {n} of the document say?",
+                text = json.dumps({"question": f"What does statement number {n} of the document say about {body}?",
                                    "reference_answer": answer, "facts": [{"statement": fact}]})
     if mode.startswith("validate") and c["id"].startswith("v"):
         flags = {"supported": True, "answerable_from_evidence": True, "needs_outside_context": False}

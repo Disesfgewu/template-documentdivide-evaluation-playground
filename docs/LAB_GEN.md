@@ -123,6 +123,17 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   從草稿 PR #79 併入：新 benchmark revision 只能以 draft／row_version 1／無 frozen_at／無 compliance 插入；測試用的舊式凍結只能由 superuser 工作階段與 superuser 角色
   透過 `lab.test_allow_legacy_freeze` 繞過，應用程式角色不行（用 `current_setting('role')` 辨識 SET ROLE）。
 - **沒有做**：凍結時的 manifest 與四部分 hash、`compliant` 路徑、人工審核、對 fail 題的排除機制。
+
+## 在凍結的 benchmark 上跑一個 baseline 並評分（Refs #10、#12；PM-DECISION 項目 3）
+
+- `POST /api/v1/benchmarks/{logical_id}/revisions/{revision}/baseline-run`（owner／maintainer；benchmark 必須是 `frozen`）：對每一題執行既有的本機詞彙檢索 baseline
+  （`lab_parser.local_methods`，只看原始 PDF 與題目文字，**看不到系統解析結果或 gold**；整頁區域；不呼叫模型），用既有的表格記錄 run、attempt、被接受的 submission
+  （回應 JSON 存成 artifact）與 retrieved_hits，再以規則式評分器（`lab_scoring`，SPEC 16.5）建立一個 `provisional` 的 evaluation 與 `question_scores`。
+- 分數：`recall_at_k`、`complete_at_k`（單位在回傳區域涵蓋其每個 gold 區域至少 4/5 時算命中）、`localization_precision`（回傳整頁區域，所以數字本來就低，這是方法的真實性質）；
+  `textual_consistency` 不適用（生成題沒有 textual checks）；`correctness`、`citation_precision`、`citation_completeness`、`faithfulness` 需要語意 judge，**尚未執行**，
+  記為 `pending`（原因 `semantic_judge_not_run`），不猜、不當 0。
+- 讀結果：既有的 `GET /api/v1/runs/{run_id}/results?evaluation_id=…`；本端點只回指標與計數，不回分數或 gold。API 映像因此多帶 `lab_scoring`。
+- demo 的第 8、9 步串起：凍結（partial）→ baseline 評分 → 印出每個指標的 scored／pending／mean。
 ## cross_page 題目（跨兩頁，Refs #7；PM-DECISION 項目 1）
 
 - **何時生成**：同一個生成 job 的同一批呼叫裡，在一般題之後加上 Q 題（Q = ceil(0.10·N)，和 plan 的 cross_page 下限相同）的 cross_page 呼叫；
