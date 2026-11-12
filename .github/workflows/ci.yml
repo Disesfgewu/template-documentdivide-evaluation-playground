@@ -141,6 +141,32 @@ jobs:
         if: always()
         run: docker compose -f deploy/compose.dev.yml down -v
 
+  worker-agentflow:
+    name: worker-agentflow (Go, public agentKit pin, local fakes only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the agentKit pin (the repository is public; no credential is involved)
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+          git submodule update --init --checkout -- third_party/agentkit
+          test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/worker/agentflow/go.mod
+          cache: false
+      - name: Vet and test the agentflow module (never calls a real model; the real smoke is the manual llm-smoke job)
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          cd services/worker/agentflow
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -count=1 -race -skip '^TestRealProviderSmoke$' ./...
+
   unstructured-probe:
     name: unstructured-probe (synthetic, manual)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe }}
