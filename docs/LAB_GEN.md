@@ -158,3 +158,11 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   fact 與答案必須能在頁 A 的送出文字裡接地；`disambiguating_condition` 必須能在頁 A 文字或題目裡接地；頁 B **不可**同樣支持這些 fact 與答案
   （否則那是第二個來源，不是干擾項）。reasoning_type 為 `value_lookup`；`conditions` 帶 disambiguating_condition。
 - **限制**：「這個干擾項真的會讓人答錯」目前只有上述結構與接地檢查，沒有用模型或人去實測；chart_table 仍然不生成（D5）。
+
+## 後續修正（#160／#163 的 P3，Refs #7、#12）
+
+- **confusable**：B 只要**任何一個** fact 也被支持就拒絕（不再要求全部）；`confusion_reason` 至少要和頁 B 的送出文字共用一個內容詞（這是**弱**檢查：reason 對 B 是否為真並沒有被證明）；
+  只有和題目或 fact 有內容詞重疊的 B 單位才成為 distractor，不相關的不算；沒有任何重疊就丟棄該題。
+- **接地檢查的斷詞**：CJK 改成逐字比對（原本整段連續漢字被當成一個詞，部分重疊就永遠對不上）；其他文字仍是 3 個字元以上的詞。
+- **baseline**：整個評分是一個同步交易，所以題數上限 250（超過回 409，需要改成 job 才能跑更大的 benchmark）；method revision 編號在 (project, method) 的 advisory lock 下計算，
+  兩個同時的 run 不會撞號（unique 衝突也會轉成 409）；缺文件或 artifact 列時回 404，不再是 TypeError。

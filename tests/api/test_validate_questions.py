@@ -40,6 +40,9 @@ class CodeCheckTests(unittest.TestCase):
         self.assertTrue(code_checks("ＦＩＬＩＮＧ DEADLINE march", "deadline", ["Filing Deadline"])["passed"])
         self.assertTrue(code_checks("申報期限為三月三十一日", "三月三十一日", ["申報期限為三月三十一日"])["passed"])
         self.assertFalse(code_checks("申報期限為三月三十一日", "十二月", ["完全無關的敘述內容"])["passed"])
+        # CJK is matched per character, so a fact that is only PARTLY in the page is judged by its coverage, not all-or-nothing
+        self.assertTrue(code_checks("申報期限為三月三十一日，逾期加徵滯納金", "三月三十一日", ["申報期限是三月三十一日"])["passed"])
+        self.assertFalse(code_checks("申報期限為三月三十一日", "三月", ["滯納金依逾期天數加徵"])["passed"])
 
 
 class ReplyTests(unittest.TestCase):

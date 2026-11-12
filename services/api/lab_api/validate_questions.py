@@ -35,7 +35,7 @@ INDEPENDENCE = "validator and generator are the same provider and model (separat
 MIN_FACT_COVERAGE = 0.6
 _TAG = re.compile(r"<\s*/?\s*(evidence|question|reference_answer)", re.IGNORECASE)
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
-_WORD = re.compile(r"[^\W_]{3,}|[一-鿿]")
+_WORD = re.compile(r"[^\W_\u4e00-\u9fff]{3,}|[\u4e00-\u9fff]")   # words of 3+ letters/digits; CJK ideographs one by one
 
 SYSTEM = (
     "You are a strict reviewer of exam questions. You get one EVIDENCE passage, one QUESTION and one REFERENCE ANSWER.\n"

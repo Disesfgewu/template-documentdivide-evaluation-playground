@@ -38,6 +38,9 @@ ACTION = "register_method_and_submit"
 METHOD_LOGICAL_ID = "local-lexical-baseline"
 
 
+MAX_QUESTIONS = 250       # the run is ONE synchronous transaction inside the request: bounded (a larger benchmark needs a job)
+
+
 class BaselineError(Exception):
     """The baseline cannot run (fixed, value-free message)."""
 
@@ -74,9 +77,14 @@ def run_local_baseline(conn: psycopg.Connection, store: LocalArtifactStore, proj
         if bench[0] != "frozen":
             raise BaselineError("benchmark_is_not_frozen")
         doc_id = bench[1]
+        n_questions = conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0]
+        if n_questions > MAX_QUESTIONS:
+            raise BaselineError(f"benchmark_has_more_than_{MAX_QUESTIONS}_questions_for_a_synchronous_run")
         row = conn.execute(
             "SELECT dv.sha256, a.object_key, a.size_bytes FROM document_versions dv JOIN artifacts a ON a.id = dv.artifact_id "
             "WHERE dv.project_id = %s AND dv.id = %s", (project_id, doc_id)).fetchone()
+        if row is None:
+            raise NotFound("document")
         sha, object_key, size = row
         data = store.open(object_key, expected_size=size, max_bytes=local_methods.MethodConfig().max_pdf_bytes)
         if hashlib.sha256(data).hexdigest() != sha:
@@ -86,6 +94,8 @@ def run_local_baseline(conn: psycopg.Connection, store: LocalArtifactStore, proj
 
         # the method revision (a resource version) and the run
         config_hash = hashlib.sha256(json.dumps({"method": index.method_revision, "budget": BUDGET}, sort_keys=True).encode()).hexdigest()
+        # two concurrent runs must not compute the same revision number: serialize per (project, method)
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"method_revision:{project_id}:{METHOD_LOGICAL_ID}",))
         revision = 1 + conn.execute("SELECT count(*) FROM resource_versions WHERE project_id = %s AND resource_type = 'method_revision' "
                                     "AND logical_id = %s", (project_id, METHOD_LOGICAL_ID)).fetchone()[0]
         resource_id = record_change(conn, Change(project_id, actor_id, "method.register", "method_revision", METHOD_LOGICAL_ID,
