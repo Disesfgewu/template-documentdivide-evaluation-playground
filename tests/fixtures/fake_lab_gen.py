@@ -38,13 +38,23 @@ for i, c in enumerate(inp["calls"]):
             text = "I cannot comply."
         else:
             n = 0 if mode == "dupes" else i
-            body = c["user"].split(">", 1)[1].split("</evidence>")[0].strip().splitlines()[0] if "<evidence" in c["user"] else ""
-            if mode == "questions_ungrounded":
+            blocks = [b.split(">", 1)[1].strip().splitlines()[0] for b in c["user"].split("</evidence>") if "<evidence" in b]
+            body = blocks[0] if blocks else ""
+            if c["id"].startswith("x"):             # a cross_page call: two passages A and B
+                a_line, b_line = (blocks + ["", ""])[:2]
+                if mode == "questions_ungrounded":
+                    a_line, b_line = f"item {n} of the document", f"other item {n} of the document"
+                text = json.dumps({"question": f"How does statement number {n} of the first part relate to the second part ({a_line} / {b_line})?",
+                                   "reference_answer": f"{a_line} and {b_line}",
+                                   "facts": [{"statement": a_line, "source": "A"}, {"statement": b_line, "source": "B"}]})
+                answer = None
+            elif mode == "questions_ungrounded":
                 answer, fact = f"It says item {n}.", f"The document states item {n}."
             else:                                   # grounded: the answer and the fact are the first line of the shown page
                 answer, fact = body, body
-            text = json.dumps({"question": f"What does statement number {n} of the document say about {body}?",
-                               "reference_answer": answer, "facts": [{"statement": fact}]})
+            if answer is not None:
+                text = json.dumps({"question": f"What does statement number {n} of the document say about {body}?",
+                                   "reference_answer": answer, "facts": [{"statement": fact}]})
     if mode.startswith("validate") and c["id"].startswith("v"):
         flags = {"supported": True, "answerable_from_evidence": True, "needs_outside_context": False}
         if mode == "validate_mixed":

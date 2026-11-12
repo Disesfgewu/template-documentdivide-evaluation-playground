@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db, resolve_project_id
 from .benchmark_build import BENCHMARK_RESOURCE_TYPE, LOGICAL_ID_PATTERN, MAX_BODY_BYTES, READ_ACTION, _authorize, _find
-from .generate_questions import general_target
+from .generate_questions import cross_page_target, general_target
 from lab_db.generation import GenerateJobActive, GenerationError, MAX_OUTPUT_TOKENS, benchmark_budget, enqueue_generate_job
 from lab_db.repo import NotFound, PermissionDenied
 
@@ -65,7 +65,7 @@ def _start(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
     return {"job_id": str(job_id), "benchmark_revision_id": str(benchmark_id), "status": "queued", "phase": phase,
             "benchmark_status": "generating" if phase == "generate" else "validating", "model": body.model, "max_output_tokens": body.max_output_tokens,
             "budget_cap_micros": body.budget_cap_micros, "benchmark_cap_micros": total_cap,
-            "general_target": general_target(page_count)}
+            "general_target": general_target(page_count), "cross_page_target": cross_page_target(page_count)}
 
 
 def _progress(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int) -> dict:
@@ -81,11 +81,16 @@ def _progress(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UU
             "WHERE g.project_id = %s AND g.benchmark_id = %s ORDER BY g.created_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()
         out = {"benchmark_revision_id": str(benchmark_id), "logical_id": logical_id, "revision": revision,
                "benchmark_status": status, "general_target": general_target(page_count),
-               "human_review": "skipped", "limits": ["Only the general bucket is generated; cross_page, chart_table and confusable are "
+               "cross_page_target": cross_page_target(page_count),
+               "human_review": "skipped", "limits": ["Only the general and cross_page buckets are generated; chart_table and confusable are "
                                                      "not guessed (no material proof in this parse).",
                                                      "A question answerable without the page is not detected yet."]}
-        out["questions"] = int(conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0])
-        out["shortfall"] = max(0, out["general_target"] - out["questions"])
+        counts = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
+                                   (benchmark_id,)).fetchall())
+        out["questions"] = sum(int(v) for v in counts.values())
+        out["by_bucket"] = {"general": int(counts.get("general", 0)), "cross_page": int(counts.get("cross_page", 0))}
+        out["shortfall"] = (max(0, out["general_target"] - out["by_bucket"]["general"])
+                            + max(0, out["cross_page_target"] - out["by_bucket"]["cross_page"]))
         if job is None:
             out["job"] = None
             return out
@@ -102,7 +107,7 @@ def _progress(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UU
             "ORDER BY a.occurred_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()
         verdicts = dict(conn.execute(
             "SELECT verdict, count(*) FROM (SELECT DISTINCT ON (question_id) verdict FROM question_validations "
-            "WHERE benchmark_id = %s ORDER BY question_id, created_at DESC) v GROUP BY verdict", (benchmark_id,)).fetchall())
+            "WHERE benchmark_id = %s ORDER BY question_id, created_at DESC, id DESC) v GROUP BY verdict", (benchmark_id,)).fetchall())
         validated = sum(int(n) for n in verdicts.values())
         out["validation"] = {"pass": int(verdicts.get("pass", 0)), "fail": int(verdicts.get("fail", 0)),
                              "needs_review": int(verdicts.get("needs_review", 0)),

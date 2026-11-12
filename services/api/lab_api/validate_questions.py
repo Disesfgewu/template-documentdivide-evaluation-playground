@@ -12,6 +12,7 @@ validator's self-report and is not a proof that a question cannot be answered wi
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 import uuid
@@ -20,8 +21,10 @@ from typing import Callable, Sequence
 import psycopg
 from psycopg.types.json import Jsonb
 
-from lab_api.generate_prompts import DEFAULT_PAGE_CHARS, shown_pieces
+from lab_api.generate_prompts import DEFAULT_PAGE_CHARS, shown_by_page
 from lab_api.generate_worker import CallSpec
+
+LOG = logging.getLogger("lab.validate_questions")
 
 __all__ = ["VALIDATOR_REVISION", "VALIDATION_PROMPT_VERSION", "code_checks", "make_build_calls", "make_on_results",
            "parse_validator_reply", "verdict_for"]
@@ -121,9 +124,16 @@ def _question_rows(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id
         if semantic is None or source is None:
             continue
         ids = source["evidence_sets"][0]["evidence_ids"]
-        found = dict(conn.execute("SELECT evidence_key, normalized_content FROM evidence_units WHERE document_version_id = %s "
-                                  "AND evidence_key = ANY(%s)", (doc, ids)).fetchall())
-        units = [(i, found[i]) for i in ids if i in found]
+        found = {k: (t, pg) for k, t, pg in conn.execute(
+            "SELECT eu.evidence_key, eu.normalized_content, er.page_index FROM evidence_units eu "
+            "JOIN evidence_regions er ON er.evidence_unit_id = eu.id AND er.ordinal = 0 "
+            "WHERE eu.document_version_id = %s AND eu.evidence_key = ANY(%s)", (doc, ids)).fetchall()}
+        units = [(i, found[i][0], found[i][1]) for i in ids if i in found]      # (evidence id, text, page)
+        if len(units) != len(ids):
+            # A source unit without a stored region (or a missing row) would silently shrink the evidence the validator
+            # sees and could turn a good question into a fail: leave the question UNVALIDATED (it blocks a freeze) and say so.
+            LOG.warning("question %s: %d of %d source units cannot be loaded; not validated", qid, len(ids) - len(units), len(ids))
+            continue
         out.append((qid, ordinal, text, semantic["reference_answer"], [f["statement"] for f in semantic["required_facts"]], units))
     return out
 
@@ -134,8 +144,13 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
         for _, ordinal, text, answer, _, units in _question_rows(conn, project_id, benchmark_id):
             if not units:
                 continue
-            evidence = _neutralise("\n\n".join(piece for _, piece in shown_pieces(units, page_chars)))
-            user = (f"<evidence>\n{evidence}\n</evidence>\n<question>\n{_neutralise(text)}\n</question>\n"
+            # one fenced block per page (a cross_page question has two), each cut at its own per-page cap
+            by_page: dict[int, list[str]] = {}
+            for _, piece, page in shown_by_page(units, page_chars):
+                by_page.setdefault(page, []).append(piece)
+            evidence = "\n".join("<evidence page=\"%d\">\n%s\n</evidence>" % (page, _neutralise("\n\n".join(pieces)))
+                                 for page, pieces in sorted(by_page.items()))
+            user = (f"{evidence}\n<question>\n{_neutralise(text)}\n</question>\n"
                     f"<reference_answer>\n{_neutralise(answer)}\n</reference_answer>")
             calls.append(CallSpec(id=f"v{ordinal:04d}", system=SYSTEM, user=user))
         return calls
@@ -157,7 +172,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             if entry is None:
                 continue
             qid, _, answer, facts, units = entry
-            shown = "\n\n".join(piece for _, piece in shown_pieces(units, page_chars))
+            shown = "\n\n".join(piece for _, piece, _ in shown_by_page(units, page_chars))
             checks = code_checks(shown, answer, facts)
             reply = parse_validator_reply(row["text"])
             verdict, reason = verdict_for(checks, reply)

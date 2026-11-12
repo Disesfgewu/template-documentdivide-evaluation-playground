@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db, resolve_project_id
 from .benchmark_build import MAX_BODY_BYTES, _find
+from lab_db.jobs import ACTIVE_JOB_STATUSES
 from lab_db.repo import FreezeIneligible, NotFound, PermissionDenied, StaleVersion, authorize, transition_benchmark
 
 router = APIRouter()
@@ -55,12 +56,19 @@ def _freeze(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID
             benchmark_id, _, status, page_count = _find(conn, project_id, logical_id, revision, lock=True)
             if status != "validating":
                 raise ApiError(409, "conflict", f"a benchmark in status {status} cannot be frozen (it must be 'validating')")
+            active = conn.execute(
+                "SELECT j.id FROM generate_jobs g JOIN jobs j ON j.project_id = g.project_id AND j.id = g.job_id "
+                "WHERE g.project_id = %s AND g.benchmark_id = %s AND j.status::text = ANY(%s) LIMIT 1",
+                (project_id, benchmark_id, list(ACTIVE_JOB_STATUSES))).fetchone()
+            if active is not None:     # a re-validation in flight could still change the verdicts (and would hit the frozen guards)
+                raise ApiError(409, "conflict", "a generation or validation job is still active for this benchmark; "
+                                                "wait for it to finish (or cancel it) before freezing")
             conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))   # question_validations is gold-RLS
             totals = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
                                        (benchmark_id,)).fetchall())
             verdicts = dict(conn.execute(
                 "SELECT COALESCE(latest.verdict, 'unvalidated'), count(*) FROM questions q LEFT JOIN LATERAL ("
-                "SELECT verdict FROM question_validations v WHERE v.question_id = q.id ORDER BY v.created_at DESC LIMIT 1) latest ON true "
+                "SELECT verdict FROM question_validations v WHERE v.question_id = q.id ORDER BY v.created_at DESC, v.id DESC LIMIT 1) latest ON true "
                 "WHERE q.benchmark_id = %s GROUP BY 1", (benchmark_id,)).fetchall())
             n_questions = sum(int(v) for v in totals.values())
             counts = {k: int(verdicts.get(k, 0)) for k in ("pass", "fail", "needs_review", "unvalidated")}

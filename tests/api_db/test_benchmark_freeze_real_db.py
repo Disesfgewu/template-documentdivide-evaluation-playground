@@ -50,6 +50,28 @@ class BenchmarkFreezeRealDbTests(GenerateApiFixtures, FreshDatabase):
         again = self.api("post", owner, FREEZE, project, {"compliance": "partial"})
         self.assertEqual(again.status_code, 409)                                      # already frozen: not validating
 
+    def test_an_active_generation_or_validation_job_blocks_the_freeze(self):
+        project, owner = self.validated()
+        res = self.api("post", owner, self.VAL, project, BODY)                        # a re-validation is queued but not run
+        self.assertEqual(res.status_code, 202, res.text)
+        blocked = self.api("post", owner, FREEZE, project, {"compliance": "partial"})
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertIn("still active", blocked.text)
+        self.assertEqual(self.status(project)[0], "validating")
+        self.run_worker("validate_ok")                                                # the job ends (nothing left to validate: it fails)
+        self.assertEqual(self.api("post", owner, FREEZE, project, {"compliance": "partial"}).status_code, 200)
+
+    def test_the_database_only_freezes_from_ready_to_freeze_which_is_only_reachable_from_validating(self):
+        project, owner = self.validated()
+        with self.connect() as c:
+            bench, version = c.execute("SELECT id, row_version FROM benchmark_revisions WHERE project_id = %s", (project,)).fetchone()
+            with self.assertRaises(errors.IntegrityConstraintViolation) as ctx:        # validating -> frozen is not a legal transition
+                with c.transaction():
+                    c.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', 'raw', true)", (str(owner),))
+                    c.execute("UPDATE benchmark_revisions SET status = 'frozen', compliance = 'partial', frozen_at = now(), "
+                              "row_version = %s WHERE id = %s", (version + 1, bench))
+            self.assertIn("illegal benchmark transition", str(ctx.exception))
+
     def test_a_failed_or_unvalidated_question_blocks_the_freeze_and_nothing_is_deleted(self):
         project, owner = self.validated("validate_mixed")
         n = self.api("get", owner, self.GEN, project).json()["questions"]

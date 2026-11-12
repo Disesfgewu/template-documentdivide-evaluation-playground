@@ -134,3 +134,15 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   記為 `pending`（原因 `semantic_judge_not_run`），不猜、不當 0。
 - 讀結果：既有的 `GET /api/v1/runs/{run_id}/results?evaluation_id=…`；本端點只回指標與計數，不回分數或 gold。API 映像因此多帶 `lab_scoring`。
 - demo 的第 8、9 步串起：凍結（partial）→ baseline 評分 → 印出每個指標的 scored／pending／mean。
+## cross_page 題目（跨兩頁，Refs #7；PM-DECISION 項目 1）
+
+- **何時生成**：同一個生成 job 的同一批呼叫裡，在一般題之後加上 Q 題（Q = ceil(0.10·N)，和 plan 的 cross_page 下限相同）的 cross_page 呼叫；
+  乾淨且有文字的頁面少於兩頁時**不產生任何配對、不呼叫**（缺額如實記錄，不湊數）。頁面配對是兩個不同的頁，最近的頁優先，輪流使用。沒有新的 migration。
+- **prompt**（版本 `cross-page-v1`，固定在程式裡）：兩個頁面各自框成資料區塊 A 與 B（不含 evidence id 等識別碼），**每頁各自套用字元上限**（6000），
+  標籤中和同一般題；模型回 ≤ 500 token 的 JSON：題目、參考答案、2–3 個 fact，每個 fact 標明 `source`（A 或 B），兩邊都至少要有一個。
+- **程式導出與檢查**：source answer 的證據組 = A、B 兩頁**實際送出**的單位；每個 fact 的支持組只有它被標到的那一頁的單位。因此契約的檢查是真的在檢查：
+  證據組必須跨 ≥ 2 頁、且不能有任何單一頁就支持所有 fact（否則 `cross_page_single_page` 而被丟棄）。模型「這個 fact 在哪一頁」的宣稱還會用程式對照該頁送出的文字
+  （內容詞至少 60%、數字必須出現）；對不上就丟棄並計入 invalid。reasoning_type 為 `cross_page_integration`。
+- **驗證階段**：驗題 prompt 對跨頁題每頁一個 `<evidence page=…>` 區塊、每頁各自的字元上限；程式的接地檢查對象是兩頁實際送出的文字合併。
+- **限制**：「這題真的需要兩頁」目前由契約的結構檢查加上 fact 對頁面的接地檢查把關，**沒有**做移除某頁後是否仍可回答的實測（necessity ablation 屬於之後的工作）。
+- API：`GET .../generate` 多回 `cross_page_target` 與 `by_bucket`，`shortfall` 為兩個 bucket 缺額的總和；稽核事件與轉換原因帶 `cross_total/cross_target`。
