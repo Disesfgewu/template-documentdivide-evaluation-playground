@@ -77,3 +77,11 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   `document.generate`。缺 `LAB_GEN_BIN`、`LAB_GEN_API_KEY`、`LAB_GEN_BASE_URL`、`LAB_GEN_ALLOWED_HOST`、兩個價格任何一項就印出
   `{"status":"blocked"}` 並 exit 3，絕不當作通過。
 - **已知限制**：不靠頁面、靠常識就能回答的題目目前偵測不到（獨立驗題切片處理）；人工審核維持 `skipped`。
+
+## 啟動與觀察生成的 API（Refs #7）
+
+- `POST /api/v1/benchmarks/{logical_id}/revisions/{revision}/generate`，body `{"model", "budget_cap_micros", "max_output_tokens"?, "currency"?, "pricing_revision"?}`：
+  只有 owner／maintainer；benchmark 必須在 `planning` 且已釘住 parse；`max_output_tokens` 預設且最高 500；預算必須為正；同一 benchmark 同時只有一個
+  active job（409）；未知欄位或型別錯誤 400；不是成員 404、其他角色 403。回 202 與 job id。API 本身不呼叫模型，呼叫由 `generate_worker_main` 做。
+- `GET .../generate`：owner／maintainer／reviewer 可讀（`read_gold_and_generation_context`）。回 job 狀態、帳本（各狀態呼叫數、spent、held、cap、remaining）、
+  題數對一般題目標與 shortfall、最後一次生成的稽核計數、`human_review: skipped` 與限制說明。**不回任何題目文字、答案或 gold**。
