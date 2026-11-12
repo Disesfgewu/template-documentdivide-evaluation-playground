@@ -10,7 +10,21 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/Disesfgewu/agentkit/agentlog"
 )
+
+// audited gives every test its own agentKit audit directory: agentKit otherwise writes ./log into the package
+// directory (PM review of #149), and the log holds requests, so it must never land in the repository.
+func audited(t *testing.T) context.Context {
+	t.Helper()
+	r, err := agentlog.New("labgen-test", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	return agentlog.WithRecorder(context.Background(), r)
+}
 
 const secretKey = "sk-test-key-not-real-0123456789"
 
@@ -62,7 +76,7 @@ func TestCapAboveFiveHundredIsRefusedBeforeAnyCall(t *testing.T) {
 	for _, n := range []int{501, 1024, 100000, 0, -1} {
 		in := input(url, "q")
 		in.Model.MaxOutputTokens = n
-		out := Run(context.Background(), in, loop)
+		out := Run(audited(t), in, loop)
 		if out.Status != "refused" || len(out.Calls) != 0 {
 			t.Fatalf("cap %d: %+v", n, out)
 		}
@@ -75,7 +89,7 @@ func TestCapAboveFiveHundredIsRefusedBeforeAnyCall(t *testing.T) {
 func TestTheRequestCarriesTheCapAndNoMoreThanFiveHundred(t *testing.T) {
 	t.Setenv(KeyEnv, secretKey)
 	f := &fake{handler: reply("x", 5, 5, true)}
-	out := Run(context.Background(), input(f.start(t), "q"), loop)
+	out := Run(audited(t), input(f.start(t), "q"), loop)
 	if out.Status != "ok" {
 		t.Fatalf("%+v", out)
 	}
@@ -111,7 +125,7 @@ func TestEndpointRules(t *testing.T) {
 	for _, c := range cases {
 		in := input(c.url, "q")
 		in.Model.AllowedHost = c.allowed
-		out := Run(context.Background(), in, Options{})
+		out := Run(audited(t), in, Options{})
 		if out.Status != "refused" || !strings.Contains(out.Reason, c.want) {
 			t.Fatalf("%s: %+v", c.name, out)
 		}
@@ -131,12 +145,12 @@ func TestCostsAreSettledFromKnownUsageAndTheKeyNeverLeaks(t *testing.T) {
 		reply("answer", 5, 20, true)(n, w, r)
 	}}
 	in := input(f.start(t), "first prompt", "second prompt")
-	out := Run(context.Background(), in, loop)
+	out := Run(audited(t), in, loop)
 	if out.Status != "ok" || len(out.Calls) != 2 {
 		t.Fatalf("%+v", out)
 	}
 	for _, c := range out.Calls {
-		if c.Status != "ok" || !c.UsageKnown || c.InputTokens != 5 || c.OutputTokens != 20 || c.ChargedMicros != 315 || c.Text != "answer" {
+		if c.Status != "ok" || !c.UsageKnown || c.InputTokens != 5 || c.OutputTokens != 20 || c.ChargedMicros != 315 || c.HeldMicros != 0 || c.Text != "answer" {
 			t.Fatalf("%+v", c)
 		}
 	}
@@ -158,7 +172,7 @@ func TestBudgetIsReservedBeforeTheCallAndFailsClosed(t *testing.T) {
 	in := input(f.start(t), "q1", "q2", "q3", "q4")
 	// Worst case per call is 3 + 7500 micros; after two settled calls (315 each) a third reservation exceeds 8000.
 	in.Budget.LimitMicros = 8000
-	out := Run(context.Background(), in, loop)
+	out := Run(audited(t), in, loop)
 	got := []string{}
 	for _, c := range out.Calls {
 		got = append(got, c.Status)
@@ -177,10 +191,13 @@ func TestBudgetIsReservedBeforeTheCallAndFailsClosed(t *testing.T) {
 func TestUnknownUsageIsNeverSettledAsZero(t *testing.T) {
 	t.Setenv(KeyEnv, secretKey)
 	f := &fake{handler: reply("a", 0, 0, false)}
-	out := Run(context.Background(), input(f.start(t), "q"), loop)
+	out := Run(audited(t), input(f.start(t), "q"), loop)
 	c := out.Calls[0]
 	if c.Status != "ok" || c.UsageKnown || c.ChargedMicros != -1 {
 		t.Fatalf("%+v", c)
+	}
+	if c.HeldMicros <= 0 || c.HeldMicros != out.LedgerUnknown {
+		t.Fatalf("an unknown cost must be reported as held: %+v", out)
 	}
 	if out.LedgerSpent != 0 || out.LedgerUnknown == 0 || out.LedgerReserved == 0 {
 		t.Fatalf("unknown usage must keep its reservation: %+v", out)
@@ -191,7 +208,7 @@ func TestProviderErrorsAreRecordedAndNotPassed(t *testing.T) {
 	t.Setenv(KeyEnv, secretKey)
 	for _, code := range []int{401, 429, 503} {
 		f := &fake{handler: func(_ int32, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) }}
-		out := Run(context.Background(), input(f.start(t), "q"), loop)
+		out := Run(audited(t), input(f.start(t), "q"), loop)
 		if out.Status != "partial" || out.Calls[0].Status != "failed" || !strings.Contains(out.Calls[0].Reason, fmt.Sprint(code)) {
 			t.Fatalf("%d: %+v", code, out)
 		}
@@ -208,7 +225,7 @@ func TestARedirectIsNeverFollowedWithTheKey(t *testing.T) {
 	redirector := &fake{handler: func(_ int32, w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
 	}}
-	out := Run(context.Background(), input(redirector.start(t), "q"), loop)
+	out := Run(audited(t), input(redirector.start(t), "q"), loop)
 	if target.hits.Load() != 0 {
 		t.Fatalf("the redirect target received %d request(s): the key could have leaked", target.hits.Load())
 	}
@@ -234,7 +251,7 @@ func TestInputRules(t *testing.T) {
 	for name, mutate := range bad {
 		in := input(url, "q1", "q2")
 		mutate(&in)
-		if out := Run(context.Background(), in, loop); out.Status != "refused" {
+		if out := Run(audited(t), in, loop); out.Status != "refused" {
 			t.Fatalf("%s: %+v", name, out)
 		}
 	}

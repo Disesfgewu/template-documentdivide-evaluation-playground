@@ -98,6 +98,9 @@ type CallResult struct {
 	InputTokens   int    `json:"input_tokens"`
 	OutputTokens  int    `json:"output_tokens"`
 	ChargedMicros int64  `json:"charged_micros"` // -1 = unknown, never recorded as zero
+	// HeldMicros is the worst-case reservation that stays held because the cost is unknown (usage not reported, or the
+	// response was lost). The caller counts it against the benchmark budget: unknown is never free.
+	HeldMicros    int64  `json:"held_micros"`
 	Attempts      int    `json:"transport_attempts"`
 	RequestSHA256 string `json:"request_sha256"`
 	TextSHA256    string `json:"text_sha256,omitempty"`
@@ -279,6 +282,7 @@ func Run(ctx context.Context, in Input, opt Options) Output {
 				res.Status, res.Reason = "failed", fmt.Sprintf("provider status %d", pe.Status)
 			case errors.Is(err, agentflow.ErrResponseLost), errors.Is(err, agentflow.ErrOutcomeUnknown):
 				res.Status, res.Reason = "outcome_unknown", "response lost; the reservation is kept, not settled as zero"
+				res.HeldMicros = worst
 				stopped = "an earlier outcome is unknown"
 			default:
 				res.Status, res.Reason = "failed", "call failed"
@@ -294,6 +298,8 @@ func Run(ctx context.Context, in Input, opt Options) Output {
 		res.Attempts, _ = info["transport_attempts"].(int)
 		if res.UsageKnown {
 			res.ChargedMicros, _ = price.Cost(res.InputTokens, res.OutputTokens)
+		} else {
+			res.HeldMicros = worst
 		}
 		out.Calls = append(out.Calls, res)
 	}

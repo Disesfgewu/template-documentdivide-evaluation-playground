@@ -71,8 +71,9 @@ def marked(batch, page_index, status, diagnostics):
     return replace(batch, result=batch.result.model_copy(update={"pages": pages}))
 
 
-@unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
-class PromoteRealDbTests(FreshDatabase):
+class PromoteFixtures:
+    """Seeding helpers shared with other real-PG tests (documents, parse jobs, results, benchmarks)."""
+
     def setUp(self) -> None:
         super().setUp()
         tmp = tempfile.TemporaryDirectory()
@@ -141,6 +142,11 @@ class PromoteRealDbTests(FreshDatabase):
                     c.execute("SELECT count(*) FROM evidence_regions WHERE document_version_id = %s", (doc,)).fetchone()[0],
                     c.execute("SELECT count(*) FROM evidence_unit_sources s JOIN evidence_units u ON u.id = s.evidence_unit_id "
                               "WHERE u.document_version_id = %s", (doc,)).fetchone()[0])
+
+
+
+@unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
+class PromoteRealDbTests(PromoteFixtures, FreshDatabase):
 
     # ------------------------------------------------------------------------------------------------------------
 

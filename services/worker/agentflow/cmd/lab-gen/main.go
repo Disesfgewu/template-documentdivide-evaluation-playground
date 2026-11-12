@@ -38,7 +38,18 @@ func run(stdin io.Reader, stdout, stderr io.Writer, auditDir string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if auditDir != "" {
+	if auditDir == "" {
+		// The audit log holds requests: without an explicit directory it lives in a temp dir that is removed on exit,
+		// never in the working directory (agentKit's default is ./log).
+		tmp, err := os.MkdirTemp("", "lab-gen-audit-")
+		if err != nil {
+			fmt.Fprintln(stderr, "lab-gen: audit log unavailable")
+			return 2
+		}
+		defer os.RemoveAll(tmp)
+		auditDir = tmp
+	}
+	{
 		rec, err := agentlog.New("lab-gen", auditDir)
 		if err != nil {
 			fmt.Fprintln(stderr, "lab-gen: audit log unavailable")

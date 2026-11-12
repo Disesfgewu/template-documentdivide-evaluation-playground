@@ -30,3 +30,22 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 沒有 Python 呼叫端、沒有 `llm_calls` 表（migration 0014）、沒有題目生成與驗證、沒有 demo 步驟。CI 只用本機假 server 測，從不呼叫真實模型；
 真實模型只在擁有者手動執行的 demo 步驟（slice 5）才會用到。測試涵蓋：上限、端點規則、費用結算與 key 不外洩、預算預留與 fail-closed、
 未知 usage、provider 錯誤、redirect 不外送 key、輸入規則、JSON 無法開 loopback。
+
+## Slice 2：`document.generate` job、`llm_calls` 帳本與預算（Refs #7）
+
+- **migration 0014**：`generate_jobs`（一個 job 綁一個 benchmark、model pin、每次呼叫上限 ≤ 500 token、預算上限、幣別與價格版本）和
+  `llm_calls`（每次呼叫一列：model、狀態、token、費用 micro、held、嘗試次數、request／response 的 sha256 與長度）。兩者 append-only；
+  資料庫以 CHECK 保證不變式：已知用量才有已知費用；未知費用必須 `charged = -1` 且 `held > 0`（最壞情況）；沒跑的呼叫不計費。
+  表內**沒有** key、prompt、回應文字欄位。
+- **預算（fail-closed）**：benchmark 剩餘 = 上限 − 已花費 − held（所有該 benchmark 的 `llm_calls`）。剩餘 ≤ 0 時 job 以
+  `budget_exhausted` 失敗，**不啟動 lab-gen**。傳給 lab-gen 的 `budget.limit_micros` 就是剩餘額度。
+- **`enqueue_generate_job`**（lab_db）：自己授權（`build_edit_freeze`，owner／maintainer）；benchmark 必須在 `planning` 且已釘住 parse；
+  token 上限 > 500 或預算 ≤ 0 在寫入前就拒絕；每個 benchmark 同時只有一個 active job；同一交易把 benchmark 轉到 `generating`。
+- **`process_generate_job`**（lab_api）：fenced lease + heartbeat（取消會殺掉子程式）→ 讀 job → 預算檢查 → 以受限子程序執行 lab-gen
+  （環境只有 PATH 與 `LAB_GEN_API_KEY`）→ 嚴格驗證輸出（id 對應、request hash 重算比對、response hash、token ≤ 上限、費用與用量一致、
+  總額不超過預算）→ 同一交易寫 `llm_calls` 與 job 終態。
+- **記帳規則**：全部 `ok` → `succeeded`；有任何失敗 → `failed(partial_calls)` 但**所有已付費的列都保留**，且不把部分結果交給生成邏輯；
+  子程序崩潰、逾時、輸出無效或被取消 → 整批每個呼叫記成 `outcome_unknown` 並 hold 最壞情況（可能已送出，絕不當作免費）；
+  lab-gen 自己 `refused`（沒有任何呼叫）→ 不寫列、job `failed(lab_gen_refused)`。
+- **`on_results` hook**：成功批次的回應文字在同一交易裡交給 slice 3 的題目寫入與驗證（本切片沒有）。
+- **本切片沒有**：輪詢 worker 迴圈（slice 3 連同真正的 prompt 建構一起接）、題目生成與契約驗證、獨立驗題、demo 步驟、API 端點。
