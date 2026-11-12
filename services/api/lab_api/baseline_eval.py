@@ -139,7 +139,7 @@ def run_local_baseline(conn: psycopg.Connection, store: LocalArtifactStore, proj
             "evaluation_status": "provisional", "pending_metrics": list(PENDING_METRICS)}
 
 
-def _score_question(conn, benchmark_id, doc_id, qid, qkey, response) -> list[MetricResult]:
+def _score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_code=None) -> list[MetricResult]:
     source = conn.execute("SELECT payload FROM gold_answers WHERE question_id = %s AND kind = 'source'", (qid,)).fetchone()
     if source is None:
         raise BaselineError("a question has no source gold")
@@ -159,7 +159,10 @@ def _score_question(conn, benchmark_id, doc_id, qid, qkey, response) -> list[Met
            rules.complete_at_k(qkey, gold_sets, matched, GRADER_REVISION),
            rules.localization_precision(qkey, returned, first_set_regions, GRADER_REVISION),
            rules.textual_consistency(qkey, 0, 0, GRADER_REVISION)]
-    out += [_pending(qkey, m) for m in PENDING_METRICS]
+    if failure_code is None:
+        out += [_pending(qkey, m) for m in PENDING_METRICS]
+    else:       # the METHOD failed (budget, provider, contract): an error with its code, never a pending score or an abstention
+        out += [rules._error(qkey, m, GRADER_REVISION, [failure_code]) for m in PENDING_METRICS]
     return out
 
 

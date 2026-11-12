@@ -64,6 +64,24 @@ for i, c in enumerate(inp["calls"]):
             if answer is not None:
                 text = json.dumps({"question": f"What does statement number {n} of the document say about {body}?",
                                    "reference_answer": answer, "facts": [{"statement": fact}]})
+    if mode.startswith("answer") and c["id"].startswith("a"):
+        import re as _re
+        hit_ids = _re.findall(r'<hit id="([^"]+)"', c["user"])
+        good = {"status": "answered", "answer": "The page says so.",
+                "claims": [{"text": "The page says so.", "hit_ids": hit_ids[:1] or ["none"]}]}
+        kind = {"answer_ok": 0, "answer_abstain": 1, "answer_bad_json": 2, "answer_bad_citation": 3, "answer_no_claims": 4}.get(mode)
+        if mode == "answer_mixed":
+            kind = i % 5
+        if kind == 0:
+            text = json.dumps(good)
+        elif kind == 1:
+            text = json.dumps({"status": "abstained", "reason": "the passages do not say"})
+        elif kind == 2:
+            text = "I think the answer is probably yes."
+        elif kind == 3:
+            text = json.dumps({**good, "claims": [{"text": "x", "hit_ids": ["zzz-not-retrieved"]}]})
+        else:
+            text = json.dumps({"status": "answered", "answer": "Yes.", "claims": []})
     if mode.startswith("validate") and c["id"].startswith("v"):
         flags = {"supported": True, "answerable_from_evidence": True, "needs_outside_context": False}
         if mode == "validate_mixed":

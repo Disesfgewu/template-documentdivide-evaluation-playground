@@ -20,11 +20,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONPATH="/app/services/api:/app/db:/app/contracts:/app/services/parser" \
+    PYTHONPATH="/app/services/api:/app/db:/app/contracts:/app/services/parser:/app/scoring" \
     LAB_GEN_BIN=/usr/local/bin/lab-gen \
     LAB_WORKER_HEARTBEAT_FILE=/tmp/worker.heartbeat
 
-RUN groupadd -g 10001 lab && useradd -u 10001 -g lab -s /usr/sbin/nologin -M -d /nonexistent lab
+RUN groupadd -g 10001 lab && useradd -u 10001 -g lab -s /usr/sbin/nologin -M -d /nonexistent lab \
+    && mkdir -p /var/lib/lab/artifacts && chown -R 10001:10001 /var/lib/lab/artifacts && chmod 755 /var/lib/lab/artifacts
 
 WORKDIR /app
 COPY services/api/requirements.lock /app/services/api/requirements.lock
@@ -36,6 +37,7 @@ COPY db/lab_db /app/db/lab_db
 COPY contracts/lab_contracts /app/contracts/lab_contracts
 COPY services/parser/lab_parser /app/services/parser/lab_parser
 COPY services/api/lab_api /app/services/api/lab_api
+COPY scoring/lab_scoring /app/scoring/lab_scoring
 COPY --from=lab-gen /out/lab-gen /usr/local/bin/lab-gen
 
 WORKDIR /app/services/api

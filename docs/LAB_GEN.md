@@ -166,3 +166,21 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **接地檢查的斷詞**：CJK 以**相鄰兩字（bigram）**為單位（單字太寬鬆：幾百個常用字就涵蓋大部分文字，幾乎任兩段中文都會「重疊」；整段連續漢字當一個詞則部分重疊永遠對不上）；單獨一個漢字就是它自己；其他文字仍是 3 個字元以上的詞。
 - **baseline**：整個評分是一個同步交易，所以題數上限 250（超過回 409，需要改成 job 才能跑更大的 benchmark）；method revision 編號在 (project, method) 的 advisory lock 下計算，
   兩個同時的 run 不會撞號（unique 衝突也會轉成 409）；缺文件或 artifact 列時回 404，不再是 TypeError。
+
+## 第二個方法：`local-retrieval-answer-1`（參與者端、會回答、有引用；Refs #12；PM 核准的設計）
+
+- **啟動**：`POST /api/v1/benchmarks/{logical_id}/revisions/{revision}/method-runs`（owner／maintainer；benchmark 必須 `frozen`；body 同生成：`model`、`budget_cap_micros`
+  [這一次 run 的預算]、`max_output_tokens` ≤ 500）→ 202，建立 method revision、run（queued）與一個 `answer` job（`generate_jobs.phase = 'answer'` 加 `run_id`，migration 0018，
+  CHECK：phase 是 answer 若且唯若有 run_id）。同一個 benchmark 同時只允許一個進行中的 method run（409）。API 不呼叫模型，由 generate worker 執行。
+- **參與者端的隔離**：方法只拿到**原始 PDF**（用文件版本的 sha256 重新驗證）、題目的 key 與文字，以及它**自己**用 pypdf 解析後的詞彙檢索結果（top-5 頁，整頁區域）。
+  不讀解析結果、證據、`gold_answers`、facts、驗證。三層保護：(1) 參與者階段是獨立模組，測試錄下它執行的每一句 SQL 並斷言沒有任何 gold／解析表；(2) 這個階段在 `lab.actor_id`
+  **未設定**的交易裡執行，所以 gold 的 RLS（0008／0015）即使程式退化也會拒絕（對應用程式角色有測試）；(3) 評分在作答記錄寫完**之後**才設定 actor 並讀 gold。
+- **作答**：每題一次 claude-haiku-4-5 呼叫（經 lab-gen：≤ 500 輸出 token、預算先預留、key 只進子程序環境）。prompt（`answer-v1`，固定在程式裡）：題目與檢索到的頁面都框成資料並中和標籤；
+  回覆必須是嚴格 JSON：`answered`（非空答案、至少一個 claim、每個 claim 至少一個引用）或 `abstained`（附理由）。引用只能指向**真的被檢索到**的 hit；程式再建出經契約驗證的 `QueryResponse`。
+- **記錄與評分**：每題都有 attempt 與 submission（回應 JSON 存成 artifact）、retrieved_hits、citations。檢索指標（recall／complete／localization）照常從真實 hits 評分；
+  correctness、citation_precision、citation_completeness、faithfulness 在語意 judge 之前一律 `pending`。evaluation 是 `provisional`。
+- **失敗與棄答分開**（PM 的 Q3）：模型自己的棄答 → `answer_status = 'abstained'`＋模型的理由；預算用盡、provider 錯誤、回覆或引用不合契約、結果未知 →
+  `submissions.failure_reason` 的固定代碼（`budget_exhausted`／`provider_error`／`invalid_model_reply`／`outcome_unknown`），且保留真實 hits；這些題的答案指標記為 `error`（reason＝該代碼），
+  **不是** pending、也不是 0、也不是棄答。`GET /api/v1/runs/{id}/results` 的 `submissions` 分別數：`answered`、`abstained_by_model`、`method_failures{代碼: 數量}`。
+  run 狀態：全部有效作答 `completed`，否則 `completed_with_errors`；整批都不能送出（預算）時 job 以 `budget_exhausted` 失敗，但每一題仍然有記錄、run 仍然結束。
+- **限制**：不用 pgvector（這把 key 只有聊天模型，沒有 embedding 模型）；答案指標需要語意 judge（尚未做）；沒有任何人用真實模型跑過這個方法，測試只用假的 lab-gen。

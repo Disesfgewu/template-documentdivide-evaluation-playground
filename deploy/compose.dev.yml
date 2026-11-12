@@ -129,6 +129,8 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
     pids_limit: 100
+    volumes:
+      - lab-artifacts:/var/lib/lab/artifacts      # the answering method reads the original PDF and stores its submissions
     depends_on:
       db:
         condition: service_healthy

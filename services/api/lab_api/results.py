@@ -302,6 +302,19 @@ FROM target_eval te
             "submission_id": str(sub_id) if sub_id else None,
         })
 
+    # How the method's submissions ended (PM Q3): answered, a MODEL abstention (its own reason) and a METHOD failure (budget,
+    # provider, contract, unknown outcome: a fixed code) are three different things and are counted separately.
+    counts = {"answered": 0, "abstained_by_model": 0}
+    method_failures: dict[str, int] = {}
+    for status, failure, n in conn.execute(
+            "SELECT answer_status, failure_reason, count(*) FROM submissions WHERE run_id = %s AND status = 'accepted' "
+            "GROUP BY 1, 2", (run_id,)).fetchall():
+        if failure is not None:
+            method_failures[failure] = method_failures.get(failure, 0) + int(n)
+        elif status == "answered":
+            counts["answered"] += int(n)
+        elif status == "abstained":
+            counts["abstained_by_model"] += int(n)
     created_at_str = created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at)
     next_cursor = (
         encode_cursor(eval_id, items_list[-1]["ordinal"], items_list[-1]["metric_name"], filters=query_filters)
@@ -324,6 +337,7 @@ FROM target_eval te
         "provisional": True,
         "filters": query_filters,
         "metrics": metrics_list,
+        "submissions": {**counts, "method_failures": method_failures},
         "items": items_list,
         "next_cursor": next_cursor,
     }
