@@ -88,3 +88,24 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   active job（409）；未知欄位或型別錯誤 400；不是成員 404、其他角色 403。回 202 與 job id。API 本身不呼叫模型，呼叫由 `generate_worker_main` 做。
 - `GET .../generate`：owner／maintainer／reviewer 可讀（`read_gold_and_generation_context`）。回 job 狀態、帳本（各狀態呼叫數、spent、held、cap、remaining）、
   題數對一般題目標與 shortfall、最後一次生成的稽核計數、`human_review: skipped` 與限制說明。**不回任何題目文字、答案或 gold**。
+
+## Slice 4：自動驗題（migration 0016，Refs #7）
+
+- **誠實標籤**：驗證者與生成者是**同一個 provider、同一個模型**（獨立的呼叫、獨立的 prompt），所以不是強意義的「獨立」；
+  `needs_outside_context` 是驗證呼叫的自我回報，**不是**「沒有這頁也能答」的證明。這句話存在每一列 `llm_checks.independence`、
+  `validator_revision`（`code-grounding-v1+llm-same-model-validate-v1`）和這份文件裡。人工審核仍是 `skipped`。
+- **流程**：`POST .../validate`（同樣的 body 與權限；benchmark 必須在 `validating`；不改狀態；一個 benchmark 同時只有一個 active job，不分
+  generate／validate）→ 同一個 worker 依 `generate_jobs.phase` 分派 → 每題一次呼叫，走同一套 lab-gen、帳本、預先預留與 500 token 上限。
+- **每題兩層檢查**：(1) 免費的程式檢查，對象是**生成時實際送出的文字**：參考答案裡出現的每個數字都必須在文字裡、每個 fact 的內容詞至少 60% 出現在文字裡
+  （NFKC、case-fold，CJK 逐字）；(2) 驗證呼叫回 `{supported, answerable_from_evidence, needs_outside_context}`（固定 system prompt；
+  evidence／question／reference_answer 都框起來並中和標籤，當資料不當指令）。
+- **判定**：兩層都過才 `pass`；程式檢查失敗，或驗證者任何一項明確否定 → `fail`（驗證者救不回程式檢查失敗）；回覆不是預期 JSON → `needs_review`。
+  未知永遠不是 pass。**不刪除、不改寫、不修補任何題目**，`fail` 的題目照樣留在 benchmark 裡可見；benchmark 維持 `validating`，這裡不會讓它變成
+  `ready_to_freeze` 或 `frozen`。
+- **資料表**：`question_validations`（append-only、凍結後不可寫、與 gold 同一套 RLS：participant／observer 看不到）、`generate_jobs.phase`。
+  稽核事件只有計數（pass／fail／needs_review）與 `human_review=skipped same_model_validator=true`。
+- **預算語意**：`POST .../generate`／`.../validate` 的 `budget_cap_micros` 是**這一次執行**的預算；儲存的每個 benchmark 上限 = 該 benchmark 已花費與已 hold 的金額 + 這個數字（回應的 `benchmark_cap_micros`），所以驗證不會因為先前生成已花錢而被拒。
+- **重新驗證**：已有 `pass` 或 `fail` 的題目不會再驗證；只有 `needs_review` 的題目（或還沒驗證的）會被新的驗證 job 撿起。
+- **RLS**：worker 在讀 `gold_answers`（建呼叫）與寫結果時，都以 job 的請求者（owner／maintainer）身分設定 `lab.actor_id`；`GET` 進度也以呼叫者身分讀 `question_validations`。測試包含用非 superuser 的應用程式角色跑完整的生成加驗證流程（移除這個設定會以 `no_calls` 失敗）。
+- **API**：`GET .../generate` 多回 `validation: {pass, fail, needs_review, unvalidated, note}` 與 job 的 `phase`；仍然不回任何題目文字或答案。
+- **這個切片沒有**：cross_page／chart_table／confusable 的生成與驗證、非同一模型的驗證者、人工審核、ready_to_freeze。

@@ -54,18 +54,37 @@ class GenerateFixtures(PromoteFixtures):
 
     def process(self, project, job, mode, **kw):
         seen = kw.pop("seen", None)
+        role = kw.pop("role", None)
         builder = kw.pop("build_calls", build_calls)
         hook = kw.pop("on_results", None)
 
-        def on_results(conn, p, b, rows):
+        def on_results(conn, p, b, rows, job_id):
             if seen is not None:
                 seen.extend(rows)
             if hook is not None:
-                hook(conn, p, b, rows)
+                hook(conn, p, b, rows, job_id)
         with self.connect() as c:
+            if role:
+                c.execute(f'SET ROLE "{role}"')            # a non-superuser application role: row level security applies
             return process_generate_job(c, project, job, worker="w1", lab_gen_cmd=STUB, cfg=CFG, build_calls=builder,
                                         connect=self.connect, api_key="k", on_results=on_results,
                                         extra_env={"FAKE_LAB_GEN_MODE": mode}, **kw)
+
+    def app_role(self):
+        """A non-superuser application role with the app privileges (so RLS is NOT bypassed)."""
+        from lab_db.repo import grant_app_privileges
+        role = f"lab_app_{uuid.uuid4().hex[:10]}"
+        with self.connect() as c:
+            c.execute(f'CREATE ROLE "{role}" NOLOGIN')
+            grant_app_privileges(c, role)
+            c.commit()
+
+        def drop():
+            with self.connect(autocommit=True) as c:
+                c.execute(f'DROP OWNED BY "{role}"')
+                c.execute(f'DROP ROLE IF EXISTS "{role}"')
+        self.addCleanup(drop)
+        return role
 
     def calls(self, job):
         """The CURRENT state of each call (latest row per attempt and call), the ledger being append-only."""

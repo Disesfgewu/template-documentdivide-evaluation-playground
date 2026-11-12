@@ -140,10 +140,10 @@ def _derive(reply: ParsedReply, units: Sequence[EvidenceUnit], ordinal: int):
 
 
 def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
-    def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict]) -> GenerationStats:
+    def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict],
+                   job_id: uuid.UUID) -> GenerationStats:
         page_count, pages, doc_id = load_clean_pages(conn, project_id, benchmark_id)
-        actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE project_id = %s AND benchmark_id = %s "
-                             "ORDER BY created_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()[0]
+        actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE job_id = %s", (job_id,)).fetchone()[0]
         # facts/evidence_sets/gold_answers are under gold RLS (0008): the write is made as the job's owner/maintainer
         conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
         existing = {h for (h,) in conn.execute("SELECT question_hash FROM questions WHERE benchmark_id = %s", (benchmark_id,))}
