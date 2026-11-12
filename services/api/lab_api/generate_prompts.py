@@ -14,7 +14,8 @@ from typing import Optional, Sequence
 
 from lab_api.generate_worker import CallSpec
 
-__all__ = ["MAX_FACTS", "PROMPT_VERSION", "ParsedReply", "build_page_call", "detect_language", "parse_model_reply", "select_pages"]
+__all__ = ["MAX_FACTS", "PROMPT_VERSION", "ParsedReply", "build_page_call", "detect_language", "parse_model_reply",
+           "select_pages", "shown_pieces"]
 
 MAX_FACTS = 3
 PROMPT_VERSION = "general-page-v1"   # recorded with every generation batch (PM-DECISION 2026-11-12)
@@ -55,11 +56,11 @@ def select_pages(usable_text_pages: Sequence[int], needed: int) -> list[int]:
 _EVIDENCE_TAG = re.compile(r"<\s*/?\s*evidence", re.IGNORECASE)
 
 
-def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, str]],
-                    page_chars: int = DEFAULT_PAGE_CHARS, variant: int = 0) -> CallSpec:
-    """One call for one clean page. ``units`` = (evidence_id, normalized text) in reading order; the page text is cut at
-    ``page_chars`` characters (whole units only; a unit that alone exceeds the cap is cut)."""
-    lines, used = [], 0
+def shown_pieces(units: Sequence[tuple[str, str]], page_chars: int = DEFAULT_PAGE_CHARS) -> list[tuple[str, str]]:
+    """The (evidence_id, text piece) pairs that are ACTUALLY sent: units in reading order, empty ones skipped, the page text
+    cut at ``page_chars`` characters (the last unit may be cut short). The prompt and the gold source answer both use this,
+    so the source answer never lists a unit the model did not see."""
+    shown, used = [], 0
     for evidence_id, text in units:
         text = text.strip()
         if not text:
@@ -68,8 +69,15 @@ def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, st
         if room <= 0:
             break
         piece = text[:room]
-        lines.append(piece)                       # no evidence ids, file names or any other identifier (PM-DECISION (c))
+        shown.append((evidence_id, piece))
         used += len(piece)
+    return shown
+
+
+def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, str]],
+                    page_chars: int = DEFAULT_PAGE_CHARS, variant: int = 0) -> CallSpec:
+    """One call for one clean page. ``units`` = (evidence_id, normalized text) in reading order; see ``shown_pieces``."""
+    lines = [piece for _, piece in shown_pieces(units, page_chars)]   # no evidence ids, file names or other identifiers (PM-DECISION (c))
     # Neutralise anything in the DATA that could close or reopen the fence (PDF text is untrusted).
     body = _EVIDENCE_TAG.sub(lambda m: m.group(0).replace("<", "\uff1c"), "\n\n".join(lines))
     focus = ""
