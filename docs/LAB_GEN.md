@@ -109,3 +109,17 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **RLS**：worker 在讀 `gold_answers`（建呼叫）與寫結果時，都以 job 的請求者（owner／maintainer）身分設定 `lab.actor_id`；`GET` 進度也以呼叫者身分讀 `question_validations`。測試包含用非 superuser 的應用程式角色跑完整的生成加驗證流程（移除這個設定會以 `no_calls` 失敗）。
 - **API**：`GET .../generate` 多回 `validation: {pass, fail, needs_review, unvalidated, note}` 與 job 的 `phase`；仍然不回任何題目文字或答案。
 - **這個切片沒有**：cross_page／chart_table／confusable 的生成與驗證、非同一模型的驗證者、人工審核、ready_to_freeze。
+
+## 凍結（freeze）：只有 owner、誠實的 partial（migration 0017，Refs #10；PM-DECISION 項目 2）
+
+- **API**：`POST /api/v1/benchmarks/{logical_id}/revisions/{revision}/freeze`，body 必須是 `{"compliance": "partial"}`（要明說這是 partial，不是完整放行）。
+  只有專案 **owner** 能凍結（maintainer、reviewer、participant 403，非成員 404）。benchmark 必須在 `validating`，且**每一題**最新的自動驗證都是 `pass`。
+  有 `fail`、`needs_review` 或尚未驗證的題目 → **擋下整個凍結**（409，附各 verdict 的題數）。選擇「擋下」而不是「把壞題排除後凍結」，因為凍結後的集合不可變、
+  子資料不會被刪除，排除會需要另一套標記並牽動所有讀取方；owner 要先處理（再驗證，或開新 revision）。
+- **compliance 一律 `partial`**：人工審核被 owner 的範圍設為 skipped（D6），而且 quota 桶不完整（chart_table 與 confusable 沒有生成、一般／cross_page 也可能不足 N 與 Q）；
+  `compliant` 被拒絕。回應列出對 N 與 Q 的缺額（`shortfall`）、各 bucket 題數、驗證統計，以及三條限制（partial、驗證者與生成者同一模型、沒有 ablation 證明必要性）。
+- **資料庫是權威**：migration 0017 重寫 `benchmark_revisions_guard`，任何寫入者（不只這個 API）要把狀態轉成 frozen 都必須：actor 是 project owner、compliance = partial、
+  至少一題、每題最新驗證為 pass，否則 `check_violation`／`insufficient_privilege`。函式是 SECURITY DEFINER（才讀得到 gold 保護的 `question_validations`）。
+  從草稿 PR #79 併入：新 benchmark revision 只能以 draft／row_version 1／無 frozen_at／無 compliance 插入；測試用的舊式凍結只能由 superuser 工作階段與 superuser 角色
+  透過 `lab.test_allow_legacy_freeze` 繞過，應用程式角色不行（用 `current_setting('role')` 辨識 SET ROLE）。
+- **沒有做**：凍結時的 manifest 與四部分 hash、`compliant` 路徑、人工審核、對 fail 題的排除機制。
