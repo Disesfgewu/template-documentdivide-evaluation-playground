@@ -277,6 +277,9 @@ class RealBrowserDocumentUiAcceptanceTests(FreshDatabase):
 
         # A browser launch that had to be retried must be visible, not silently absorbed (Issue #145).
         launch = (evidence.get("launch") if isinstance(evidence, dict) else None) or {}
+        # EVERY launch reports its startup time, so the distribution of normal startups is known (Issue #145, PM-DECISION).
+        print("BROWSER LAUNCH STARTUP (Issue #145): " + json.dumps({"attempts": launch.get("attempts"), "startup_ms": launch.get("startup_ms")}),
+              file=sys.stderr, flush=True)
         if launch.get("attempts", 1) > 1:
             print("BROWSER LAUNCH RETRIED (Issue #145): " + json.dumps(launch), file=sys.stderr, flush=True)
 

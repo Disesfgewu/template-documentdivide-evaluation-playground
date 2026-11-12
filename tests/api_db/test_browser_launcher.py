@@ -70,6 +70,39 @@ sleep 30
         self.assertIn("start 1 failed", result["failedAttempts"][0]["stderr_tail"])
         self.assertEqual(list(profiles.iterdir()), [])                      # the successful attempt was stopped and cleaned too
 
+    def test_every_launch_reports_its_startup_time(self):
+        result, _ = self.drive(self.stub('echo "DevTools listening on ws://127.0.0.1:4321/devtools/browser/q" >&2\nsleep 30\n'))
+        self.assertTrue(result["ok"])
+        self.assertIsInstance(result["startupMs"], int)
+        self.assertGreaterEqual(result["startupMs"], 0)
+        self.assertLess(result["startupMs"], 1500)
+
+    def test_a_failed_attempts_log_is_a_bounded_tail_with_paths_scrubbed(self):
+        # 30 kB of log, then a failure: only the last 4000 characters are kept, absolute paths other than the temp profile are
+        # reduced to <path>, the profile of that attempt is shown as <profile>
+        browser = self.stub('i=0; while [ $i -lt 600 ]; do echo "[1:1:INFO:chrome/x.cc] loading /home/runner/.config/secret-dir/file$i.so" >&2; i=$((i+1)); done\n'
+                            'for a in "$@"; do case "$a" in --user-data-dir=*) echo "profile ${a#--user-data-dir=}/Default" >&2;; esac; done\n'
+                            'exit 5\n')
+        result, profiles = self.drive(browser, attempts=1)
+        self.assertFalse(result["ok"])
+        tail = result["failedAttempts"][0]["stderr_tail"]
+        self.assertLessEqual(len(tail), 4100)
+        self.assertNotIn("/home/runner", tail)
+        self.assertNotIn("secret-dir", tail)
+        self.assertIn("<path>", tail)
+        self.assertIn("<profile>/Default", tail)
+        self.assertNotIn(str(profiles), tail)
+        self.assertEqual(list(profiles.iterdir()), [])
+
+    def test_the_browser_is_started_with_its_own_logging_enabled(self):
+        counter = self.tmp / "argv"
+        browser = self.stub(f'echo "$@" > "{counter}"\necho "DevTools listening on ws://127.0.0.1:4322/devtools/browser/q" >&2\nsleep 30\n')
+        result, _ = self.drive(browser)
+        self.assertTrue(result["ok"])
+        argv = counter.read_text()
+        self.assertIn("--enable-logging=stderr", argv)
+        self.assertIn("--v=1", argv)
+
     def test_a_split_devtools_line_is_still_matched_and_the_first_attempt_wins(self):
         browser = self.stub('printf "DevTools listening on ws://127.0." >&2\nsleep 0.3\nprintf "0.1:5555/devtools/browser/x\\n" >&2\nsleep 30\n')
         result, _ = self.drive(browser)

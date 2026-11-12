@@ -9,7 +9,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const TAIL = 1500;
+const TAIL = 4000;                 // a failed attempt keeps at most this much of the browser's own log (Issue #145, PM-DECISION)
+const KEEP = 65536;                // the rolling buffer: a verbose log never grows without bound
+
+// Diagnostics must not leak the environment: the browser's own log may print absolute paths (binary, home, runner temp). The
+// temp profile of THIS attempt is kept (as <profile>); every other absolute path is reduced to <path>.
+export function scrubLog(text, userDataDir) {
+  return text.split(userDataDir).join("<profile>")
+    .replace(/(?<![\w:\/.])\/(?:[\w.+@-]+\/)+[\w.+@-]*/g, "<path>");
+}
 
 function startOnce({ browserPath, startupMs, tmpDir, redact }) {
   const userDataDir = fs.mkdtempSync(path.join(tmpDir, "chrome-ui-accept-"));
@@ -20,6 +28,8 @@ function startOnce({ browserPath, startupMs, tmpDir, redact }) {
     "--remote-debugging-address=127.0.0.1",
     "--disable-gpu",
     "--no-sandbox",
+    "--enable-logging=stderr",       // the browser's own log goes to stderr, where a failed attempt's tail is kept
+    "--v=1",
     `--user-data-dir=${userDataDir}`,
   ], { detached: true });
   const started = Date.now();
@@ -34,7 +44,7 @@ function startOnce({ browserPath, startupMs, tmpDir, redact }) {
     const finish = (fn, value) => { if (!settled) { settled = true; clearTimeout(timer); fn(value); } };
     const timer = setTimeout(() => finish(reject, "no DevTools line within " + startupMs + " ms"), startupMs);
     proc.stderr.on("data", (data) => {
-      stderrText += data.toString();
+      stderrText = (stderrText + data.toString()).slice(-KEEP);
       const m = stderrText.match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//);
       if (m) finish(resolve, { port: m[1], startupMs: Date.now() - started });
     });
@@ -46,7 +56,7 @@ function startOnce({ browserPath, startupMs, tmpDir, redact }) {
     elapsed_ms: Date.now() - started,
     exit: attempt.exit || null,
     spawn_error: attempt.spawnError || null,
-    stderr_tail: redact(stderrText.slice(-TAIL)),
+    stderr_tail: redact(scrubLog(stderrText.slice(-TAIL), userDataDir)),
   });
   return attempt;
 }

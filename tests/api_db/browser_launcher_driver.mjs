@@ -7,7 +7,7 @@ const config = JSON.parse(fs.readFileSync(0, "utf8"));
 try {
   const result = await launchBrowser(config);
   await stopAttempt(result.attempt);
-  console.log(JSON.stringify({ ok: true, port: result.port, attempts: result.attempts, failedAttempts: result.failedAttempts }));
+  console.log(JSON.stringify({ ok: true, port: result.port, attempts: result.attempts, startupMs: result.startupMs, failedAttempts: result.failedAttempts }));
 } catch (error) {
   console.log(JSON.stringify({ ok: false, message: String(error.message).slice(0, 300), failedAttempts: error.failedAttempts }));
 }
