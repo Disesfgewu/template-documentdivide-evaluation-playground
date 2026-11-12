@@ -56,3 +56,24 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   子程序在自己的 process group 執行，逾時、取消或輸出超過上限時整個 group 被殺；stdout 分塊讀取，不會整份進記憶體。
 - **`on_results` hook**：成功批次的回應文字在同一交易裡交給 slice 3 的題目寫入與驗證（本切片沒有）。
 - **本切片沒有**：輪詢 worker 迴圈（slice 3 連同真正的 prompt 建構一起接）、題目生成與契約驗證、獨立驗題、demo 步驟、API 端點。
+
+## Slice 3：一般題生成（general bucket）、`gold_answers`（migration 0015）與輪詢 worker（Refs #7）
+
+- **`build_calls`**（`lab_api/generate_questions.py`）：只讀 benchmark **釘住的 parse**（P-A）裡通過 G8 硬規則的頁、只取其文字證據單位；每題一個呼叫，
+  頁面輪流（round-robin），同一頁重複時用程式產生的「第 k 個敘述」提示避免重複。目標數 = N − 3Q（其餘三個 bucket 各至少 Q）。
+  **不送**檔名、document／project／actor id、diagnostics、其他頁、其他題的 gold、key。system prompt 固定在程式裡（版本
+  `general-page-v1`，寫進稽核事件），證據用 `<evidence>` 框起來並明說裡面的指令一律忽略。
+- **模型只寫三樣東西**（≤ 500 token）：題目、參考答案、1..3 個 fact。其餘契約欄位全由程式導出：language（粗略 zh／en）、tags `[]`、
+  modality `text`、reasoning_type `value_lookup`、SourceAnswer（該頁被送出的文字單位，不含干擾項）、TextualAnswer `checks: []`、
+  calculation `null`、每個 fact 平均權重、固定的評分敘述（無部分給分）。
+- **驗證**：回覆必須恰好是預期 JSON（不是就丟，不修補）；每題以現有契約與 `validate_bundle` 驗證，不合格者丟棄並計數；`question_hash`
+  （NFKC、折疊空白、case-fold 後的 sha256）重複者丟棄。合格者在同一交易寫入 `questions`、`facts`、`evidence_sets`／`members`、`gold_answers`
+  （semantic、textual、source），並寫一筆只有計數的稽核事件（replies／written／unparseable／invalid／duplicate／total／target／shortfall）。
+- **不足額就如實記錄**：寫不滿目標時 shortfall 記在稽核事件，benchmark 留在 `generating`，絕不湊數。只生成 general；cross_page、chart_table、
+  confusable 在這個 parse 沒有足夠證據前不猜（D5）。partial 批次中已付費且合格的回覆仍會寫入（job 狀態仍是 `failed(partial_calls)`）。
+- **migration 0015 `gold_answers`**：(question, kind) 唯一、append-only、凍結後不可寫（`benchmark_child_guard`）、payload ≤ 256 KiB、
+  與 facts 同一套 RLS（owner／maintainer／reviewer 可讀，只有 owner／maintainer 可寫；participant／observer 看不到）。
+- **輪詢 worker**：`python -m lab_api.generate_worker_main`，與 parse worker 同一個迴圈（lease、backoff、停止與關機釋放），只是 job 種類是
+  `document.generate`。缺 `LAB_GEN_BIN`、`LAB_GEN_API_KEY`、`LAB_GEN_BASE_URL`、`LAB_GEN_ALLOWED_HOST`、兩個價格任何一項就印出
+  `{"status":"blocked"}` 並 exit 3，絕不當作通過。
+- **已知限制**：不靠頁面、靠常識就能回答的題目目前偵測不到（獨立驗題切片處理）；人工審核維持 `skipped`。

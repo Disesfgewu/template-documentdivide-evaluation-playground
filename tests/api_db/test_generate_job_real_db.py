@@ -33,8 +33,9 @@ def build_calls(conn, project_id, benchmark_id):
     return [CallSpec("c0", "sys", "first prompt"), CallSpec("c1", "sys", "second prompt")]
 
 
-@unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
-class GenerateJobRealDbTests(PromoteFixtures, FreshDatabase):
+class GenerateFixtures(PromoteFixtures):
+    """Benchmarks in planning, enqueue/process helpers and ledger readers (shared with the question tests)."""
+
     def planning_benchmark(self):
         """A benchmark in 'planning' that pins a clean parse; returns (project, owner, bench)."""
         project, owner, doc, sha = self.seed()
@@ -53,12 +54,16 @@ class GenerateJobRealDbTests(PromoteFixtures, FreshDatabase):
 
     def process(self, project, job, mode, **kw):
         seen = kw.pop("seen", None)
+        builder = kw.pop("build_calls", build_calls)
+        hook = kw.pop("on_results", None)
 
         def on_results(conn, p, b, rows):
             if seen is not None:
                 seen.extend(rows)
+            if hook is not None:
+                hook(conn, p, b, rows)
         with self.connect() as c:
-            return process_generate_job(c, project, job, worker="w1", lab_gen_cmd=STUB, cfg=CFG, build_calls=build_calls,
+            return process_generate_job(c, project, job, worker="w1", lab_gen_cmd=STUB, cfg=CFG, build_calls=builder,
                                         connect=self.connect, api_key="k", on_results=on_results,
                                         extra_env={"FAKE_LAB_GEN_MODE": mode}, **kw)
 
@@ -85,6 +90,10 @@ class GenerateJobRealDbTests(PromoteFixtures, FreshDatabase):
         with self.connect() as c:
             return benchmark_budget(c, project, bench, CAP)
 
+
+
+@unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
+class GenerateJobRealDbTests(GenerateFixtures, FreshDatabase):
     # ---- enqueue ----------------------------------------------------------------------------------------------
 
     def test_enqueue_queues_a_job_and_moves_the_benchmark_to_generating(self):
@@ -162,7 +171,7 @@ class GenerateJobRealDbTests(PromoteFixtures, FreshDatabase):
         out = self.process(project, job, "partial", seen=seen)
         self.assertEqual((out.status, out.reason), ("failed", "partial_calls"))
         self.assertEqual([r[:2] for r in self.calls(job)], [("c0", "ok"), ("c1", "failed")])
-        self.assertEqual(seen, [])                                              # no results are consumed from a partial batch
+        self.assertEqual([r["status"] for r in seen], ["ok", "failed"])         # the paid ok reply is still consumed
         self.assertEqual(self.job_state(job), "failed")
 
     def test_a_child_that_crashes_times_out_or_prints_garbage_holds_the_whole_batch(self):

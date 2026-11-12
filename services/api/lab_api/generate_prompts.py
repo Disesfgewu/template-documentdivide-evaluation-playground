@@ -14,9 +14,10 @@ from typing import Optional, Sequence
 
 from lab_api.generate_worker import CallSpec
 
-__all__ = ["MAX_FACTS", "ParsedReply", "build_page_call", "detect_language", "parse_model_reply", "select_pages"]
+__all__ = ["MAX_FACTS", "PROMPT_VERSION", "ParsedReply", "build_page_call", "detect_language", "parse_model_reply", "select_pages"]
 
 MAX_FACTS = 3
+PROMPT_VERSION = "general-page-v1"   # recorded with every generation batch (PM-DECISION 2026-11-12)
 MAX_QUESTION_CHARS, MAX_ANSWER_CHARS, MAX_FACT_CHARS = 500, 600, 400
 DEFAULT_PAGE_CHARS = 6000
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S)
@@ -52,7 +53,7 @@ def select_pages(usable_text_pages: Sequence[int], needed: int) -> list[int]:
 
 
 def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, str]],
-                    page_chars: int = DEFAULT_PAGE_CHARS) -> CallSpec:
+                    page_chars: int = DEFAULT_PAGE_CHARS, variant: int = 0) -> CallSpec:
     """One call for one clean page. ``units`` = (evidence_id, normalized text) in reading order; the page text is cut at
     ``page_chars`` characters (whole units only; a unit that alone exceeds the cap is cut)."""
     lines, used = [], 0
@@ -67,7 +68,12 @@ def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, st
         lines.append(f"[{evidence_id}] {piece}")
         used += len(piece)
     body = "\n".join(lines)
-    return CallSpec(id=call_id, system=SYSTEM, user=f"<evidence page=\"{page_index}\">\n{body}\n</evidence>")
+    focus = ""
+    if variant > 0:
+        # Several questions come from the same page: steer each one to a different statement (a code-built hint,
+        # not document text). Duplicates that still occur are dropped by question_hash.
+        focus = f"\nWrite the question about statement number {variant + 1} of the evidence, counting from the start."
+    return CallSpec(id=call_id, system=SYSTEM, user=f"<evidence page=\"{page_index}\">\n{body}\n</evidence>{focus}")
 
 
 def detect_language(text: str) -> str:

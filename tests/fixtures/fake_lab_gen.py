@@ -33,10 +33,18 @@ for i, c in enumerate(inp["calls"]):
     r = {"id": c["id"], "status": "ok", "usage_known": True, "input_tokens": 5, "output_tokens": 20, "charged_micros": cost(5, 20),
          "held_micros": 0, "transport_attempts": 1, "request_sha256": req}
     text = f"reply {i}"
+    if mode in ("questions", "dupes", "badjson", "partial_questions"):
+        if mode == "badjson":
+            text = "I cannot comply."
+        else:
+            n = 0 if mode == "dupes" else i
+            text = json.dumps({"question": f"What does statement number {n} of the document say?",
+                               "reference_answer": f"It says item {n}.",
+                               "facts": [{"statement": f"The document states item {n}."}]})
     r["text"], r["text_sha256"] = text, hashlib.sha256(text.encode()).hexdigest()
     if mode == "unknown_usage":
         r.update(usage_known=False, input_tokens=0, output_tokens=0, charged_micros=-1, held_micros=worst)
-    if mode == "partial" and i == 1:
+    if mode in ("partial", "partial_questions") and i == 1:
         r.update(status="failed", reason="provider status 503", usage_known=False, input_tokens=0, output_tokens=0,
                  charged_micros=-1, text="", text_sha256="")
         del r["text"], r["text_sha256"]
@@ -47,6 +55,6 @@ for i, c in enumerate(inp["calls"]):
     spent += max(r["charged_micros"], 0)
     held += r["held_micros"]
     calls.append(r)
-status = "partial" if mode == "partial" else "ok"
+status = "partial" if mode in ("partial", "partial_questions") else "ok"
 print(json.dumps({"status": status, "calls": calls, "ledger_spent_micros": spent, "ledger_reserved_micros": held,
                   "ledger_unknown_micros": held}))
