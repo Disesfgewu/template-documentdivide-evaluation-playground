@@ -250,7 +250,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertEqual([u.evidence_id for u in select_distractors(units, "申報期限是幾月？", ["三月三十一日"])], ["cjk"])
         # a CJK unit on another topic sharing only common single ideographs with the question is NOT a distractor (bigrams)
         other = [U(evidence_id="other", normalized_content="滯納金依逾期天數加徵"), U(evidence_id="same", normalized_content="申報期限為四月")]
-        self.assertEqual([u.evidence_id for u in select_distractors(other, "申報期限是幾月？依天數而定", ["三月"])], ["same"])
+        self.assertEqual([u.evidence_id for u in select_distractors(other, "申報期限是幾月？", ["三月"])], ["same"])
         self.assertEqual(select_distractors(units, "zzz qqq", ["xxx"]), [])           # nothing overlaps: no distractor at all
 
     def test_the_question_hash_ignores_case_spacing_and_unicode_width(self):
