@@ -7,10 +7,11 @@ from __future__ import annotations
 import unittest
 import uuid
 
+# this import puts db/, services/ and contracts/ on sys.path (the shared fixtures bootstrap it): keep it FIRST
+from tests.api_db.test_benchmark_generate_real_db import ADMIN_URL, CFG, FreshDatabase, GenerateApiFixtures, STUB
 from lab_db.storage import LocalArtifactStore
 from lab_api.generate_worker_main import GenerateWorker
 from lab_api import answer_run
-from tests.api_db.test_benchmark_generate_real_db import ADMIN_URL, CFG, FreshDatabase, GenerateApiFixtures, STUB
 
 BODY = {"model": "fake-model", "budget_cap_micros": 50_000_000}
 FREEZE = "/api/v1/benchmarks/bench-gen/revisions/1/freeze"

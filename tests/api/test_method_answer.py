@@ -5,8 +5,7 @@ import unittest
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[2]
-for _sub in (_REPO, _REPO / "db", _REPO / "services" / "api", _REPO / "services" / "parser", _REPO / "contracts", _REPO / "scoring",
-             _REPO / "tests"):
+for _sub in (_REPO, _REPO / "db", _REPO / "services" / "api", _REPO / "services" / "parser", _REPO / "contracts", _REPO / "scoring"):
     if _sub.exists() and str(_sub) not in sys.path:
         sys.path.insert(0, str(_sub))
 
