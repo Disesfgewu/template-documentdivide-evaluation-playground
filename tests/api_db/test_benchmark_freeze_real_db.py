@@ -35,10 +35,10 @@ class BenchmarkFreezeRealDbTests(GenerateApiFixtures, FreshDatabase):
         body = res.json()
         self.assertEqual((body["status"], body["compliance"], body["human_review"]), ("frozen", "partial", "skipped"))
         self.assertEqual((body["questions"], body["validation"]["pass"], body["validation"]["fail"]), (n, n, 0))
-        self.assertGreaterEqual(n, 14)
+        self.assertEqual(n, 18)                                                       # 14 general + 2 cross_page + 2 confusable
         self.assertEqual((body["n_target"], body["q_min"]), (20, 2))
         self.assertEqual(body["shortfall"]["chart_table"], 2)                       # the missing buckets are stated, not hidden
-        self.assertEqual(body["shortfall"]["confusable"], 2)
+        self.assertEqual(body["shortfall"]["confusable"], 0)                        # generated now; chart_table is the one that is missing
         self.assertEqual(body["shortfall"]["total"], 20 - n)
         self.assertTrue(any("PARTIAL" in x for x in body["limits"]) and any("not independent" in x for x in body["limits"]))
         self.assertEqual(self.status(project), ("frozen", "partial"))

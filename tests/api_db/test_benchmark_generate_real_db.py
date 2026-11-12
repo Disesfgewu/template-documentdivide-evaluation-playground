@@ -5,7 +5,7 @@ import unittest
 import uuid
 
 from tests.api_db.test_generate_job_real_db import ADMIN_URL, CFG, FreshDatabase, GenerateFixtures, STUB
-from lab_api.generate_questions import cross_page_target, general_target
+from lab_api.generate_questions import confusable_target, cross_page_target, general_target
 from lab_api.generate_worker_main import GenerateWorker
 
 
@@ -57,10 +57,10 @@ class BenchmarkGenerateApiTests(GenerateApiFixtures, FreshDatabase):
         done = self.api("get", owner, self.GEN, project)
         self.assertEqual(done.status_code, 200, done.text)
         body = done.json()
-        g, x = general_target(3), cross_page_target(3)
-        n = g + x
+        g, x, f = general_target(3), cross_page_target(3), confusable_target(3)
+        n = g + x + f
         self.assertEqual((body["job"]["status"], body["questions"], body["shortfall"]), ("succeeded", n, 0))
-        self.assertEqual(body["by_bucket"], {"general": g, "cross_page": x})
+        self.assertEqual(body["by_bucket"], {"general": g, "cross_page": x, "confusable": f})
         self.assertEqual(body["ledger"]["calls_by_state"], {"ok": n})
         self.assertEqual((body["ledger"]["spent_micros"], body["ledger"]["held_micros"]), (315 * n, 0))
         self.assertIn(f"written={g}", body["last_generation"])
@@ -75,7 +75,7 @@ class BenchmarkGenerateApiTests(GenerateApiFixtures, FreshDatabase):
                                          grace=5, once_timeout=120, extra_env={"FAKE_LAB_GEN_MODE": mode})
         mk("questions").run_once()
         after_gen = self.api("get", owner, self.GEN, project).json()
-        n = general_target(3) + cross_page_target(3)
+        n = general_target(3) + cross_page_target(3) + confusable_target(3)
         self.assertEqual((after_gen["benchmark_status"], after_gen["questions"], after_gen["validation"]["unvalidated"]), ("validating", n, n))
         started = self.api("post", owner, self.VAL, project, {"model": "fake-model", "budget_cap_micros": 300_000})
         self.assertEqual((started.status_code, started.json()["phase"], started.json()["benchmark_status"]), (202, "validate", "validating"))
