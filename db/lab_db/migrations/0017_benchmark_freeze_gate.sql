@@ -8,6 +8,9 @@
 --   * at least one question, and EVERY question's latest automated validation (question_validations, 0016) is 'pass'.
 --     A question with a fail, needs_review or no validation blocks the freeze: nothing is excluded or deleted (a frozen set
 --     is immutable and children are never removed), so the owner must resolve it before freezing.
+-- The only way into ready_to_freeze is from validating (benchmark_transitions_allowed, 0002), and the freeze itself is only
+-- ready_to_freeze -> frozen, so validating -> ready_to_freeze -> frozen is enforced by the transition table for every writer.
+-- 'Latest validation' is the newest row by (created_at, id): rows of one transaction share created_at, id breaks the tie.
 -- Also from #79: a benchmark revision is only ever INSERTED as a fresh draft (status draft, row_version 1, no frozen_at,
 -- no compliance), so a pre-frozen row cannot be inserted around the gate.
 -- Test fixtures that need a frozen benchmark without validations can use the superuser-only setting
@@ -102,7 +105,7 @@ BEGIN
             WHERE q.benchmark_id = NEW.id AND NOT EXISTS (
                 SELECT 1 FROM (SELECT DISTINCT ON (v.question_id) v.verdict FROM question_validations v
                                WHERE v.benchmark_id = NEW.id AND v.question_id = q.id
-                               ORDER BY v.question_id, v.created_at DESC) latest
+                               ORDER BY v.question_id, v.created_at DESC, v.id DESC) latest
                 WHERE latest.verdict = 'pass');
             IF v_bad > 0 THEN
                 RAISE EXCEPTION 'cannot freeze benchmark revision %: % question(s) lack a passing automated validation', NEW.id, v_bad
