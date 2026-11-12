@@ -24,6 +24,13 @@ class CodeCheckTests(unittest.TestCase):
         self.assertFalse(c["passed"])
         self.assertEqual(c["numbers_missing_from_evidence"], 1)
 
+    def test_a_number_must_match_as_a_whole_number_not_as_a_substring(self):
+        page = "Revenue grew in 2019 to 12,500 units."
+        self.assertFalse(code_checks(page, "It was 1.", ["Revenue grew in 2019"])["passed"])        # "1" is only inside "2019"
+        self.assertFalse(code_checks(page, "It was 125.", ["Revenue grew in 2019"])["passed"])      # "125" is only inside "12,500"
+        self.assertTrue(code_checks(page, "It was 12500.", ["Revenue grew in 2019"])["passed"])     # separators are ignored
+        self.assertTrue(code_checks(page, "In 2019.", ["Revenue grew in 2019"])["passed"])
+
     def test_a_fact_that_is_mostly_not_in_the_text_fails(self):
         c = code_checks(PAGE, "March.", ["Penguins migrate south every winter"])
         self.assertFalse(c["passed"])

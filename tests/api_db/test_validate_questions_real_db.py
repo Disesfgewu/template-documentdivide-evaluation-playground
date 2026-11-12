@@ -24,10 +24,10 @@ BIG = 50_000_000
 
 @unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
 class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
-    def generated(self, mode="questions"):
+    def generated(self, mode="questions", role=None):
         project, owner, bench = self.planning_benchmark()
         job = self.enqueue(project, owner, bench, cap=BIG)
-        out = self.process(project, job, mode, build_calls=gq.make_build_calls(), on_results=gq.make_on_results())
+        out = self.process(project, job, mode, build_calls=gq.make_build_calls(), on_results=gq.make_on_results(), role=role)
         self.assertEqual((out.status, self.bench_status(bench)), ("succeeded", "validating"))
         return project, owner, bench
 
@@ -37,7 +37,8 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
             job = enqueue_generate_job(c, project_id=project, actor_id=owner, benchmark_id=bench, model="fake-model",
                                        max_output_tokens=500, budget_cap_micros=kw.pop("cap", BIG), currency="USD",
                                        pricing_revision="t1", phase="validate")
-        out = self.process(project, job, mode, build_calls=vq.make_build_calls(), on_results=vq.make_on_results())
+        out = self.process(project, job, mode, build_calls=vq.make_build_calls(), on_results=vq.make_on_results(),
+                           role=kw.pop("role", None))
         return job, out
 
     def verdicts(self, bench):
@@ -65,6 +66,27 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertEqual(len(ledger), n)                                              # one paid call per question, on the ledger
         self.assertTrue(all(r[1] == "ok" for r in ledger))
 
+    def test_the_whole_flow_works_for_a_non_superuser_worker_role_under_row_level_security(self):
+        role = self.app_role()
+        project, owner, bench = self.generated(role=role)          # generation, writing gold, as the application role
+        n = general_target(3)
+        job, out = self.validate(project, owner, bench, "validate_ok", role=role)
+        self.assertEqual((out.status, out.reason), ("succeeded", "generated"))     # build_calls could read gold_answers
+        self.assertEqual(self.verdicts(bench), ["pass"] * n)
+
+    def test_a_needs_review_question_can_be_validated_again_but_a_decided_one_cannot(self):
+        project, owner, bench = self.generated()
+        self.validate(project, owner, bench, "validate_garbage")
+        self.assertEqual(set(self.verdicts(bench)), {"needs_review"})
+        job2, out2 = self.validate(project, owner, bench, "validate_ok")             # a new job may decide them
+        self.assertEqual((out2.status, out2.reason), ("succeeded", "generated"))
+        with self.connect() as c:
+            latest = [r[0] for r in c.execute("SELECT DISTINCT ON (question_id) verdict FROM question_validations "
+                                              "WHERE benchmark_id = %s ORDER BY question_id, created_at DESC", (bench,))]
+        self.assertEqual(set(latest), {"pass"})
+        job3, out3 = self.validate(project, owner, bench, "validate_ok")             # all decided: nothing left
+        self.assertEqual((out3.status, out3.reason), ("failed", "no_calls"))
+
     def test_negative_validator_flags_and_ungrounded_questions_fail_and_garbage_needs_review(self):
         project, owner, bench = self.generated()
         self.validate(project, owner, bench, "validate_mixed")
@@ -78,7 +100,7 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.validate(project, owner, bench, "validate_ok")                          # the validator says yes, the code says no
         self.assertEqual(set(self.verdicts(bench)), {"fail"})
 
-    def test_questions_are_never_deleted_and_validated_ones_are_not_validated_again(self):
+    def test_questions_are_never_deleted_and_decided_ones_are_not_validated_again(self):
         project, owner, bench = self.generated()
         self.validate(project, owner, bench, "validate_mixed")
         n = general_target(3)

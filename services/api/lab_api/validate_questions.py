@@ -59,8 +59,10 @@ def code_checks(shown_text: str, reference_answer: str, facts: Sequence[str]) ->
     """Free grounding checks against the text that was actually shown. Words are matched after NFKC + case-folding."""
     page = _norm(shown_text)
     page_words = set(_WORD.findall(page))
-    numbers = [n for n in _NUMBER.findall(_norm(reference_answer))]
-    missing_numbers = [n for n in numbers if n not in page]
+    # Whole numbers only (thousands separators ignored): the answer's "1" must not match the "1" inside "2019".
+    page_numbers = {n.replace(",", "") for n in _NUMBER.findall(page)}
+    numbers = [n.replace(",", "") for n in _NUMBER.findall(_norm(reference_answer + " " + " ".join(facts)))]
+    missing_numbers = [n for n in numbers if n not in page_numbers]
 
     def coverage(statement: str) -> float:
         words = _WORD.findall(_norm(statement))
@@ -103,21 +105,22 @@ def verdict_for(checks: dict, reply) -> tuple[str, str]:
     return "pass", "code grounding checks passed and the validator found it supported and answerable from the evidence"
 
 
-def _question_rows(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, job_id=None):
+def _question_rows(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID):
     """(question uuid, ordinal, question_text, reference_answer, [fact statements], [evidence text in reading order])
-    for each question that has no validation row from any job yet."""
+    for each question that has no decisive (pass or fail) validation yet; a ``needs_review`` one can be validated again."""
     rows = conn.execute(
         "SELECT q.id, q.ordinal, q.question_text, "
         "(SELECT ga.payload FROM gold_answers ga WHERE ga.question_id = q.id AND ga.kind = 'semantic'), "
         "(SELECT ga.payload FROM gold_answers ga WHERE ga.question_id = q.id AND ga.kind = 'source') "
         "FROM questions q WHERE q.benchmark_id = %s AND NOT EXISTS ("
-        "SELECT 1 FROM question_validations v WHERE v.question_id = q.id) ORDER BY q.ordinal", (benchmark_id,)).fetchall()
+        "SELECT 1 FROM question_validations v WHERE v.question_id = q.id AND v.verdict IN ('pass', 'fail')) ORDER BY q.ordinal",
+        (benchmark_id,)).fetchall()
+    doc = conn.execute("SELECT document_version_id FROM benchmark_revisions WHERE id = %s", (benchmark_id,)).fetchone()[0]
     out = []
     for qid, ordinal, text, semantic, source in rows:
         if semantic is None or source is None:
             continue
         ids = source["evidence_sets"][0]["evidence_ids"]
-        doc = conn.execute("SELECT document_version_id FROM benchmark_revisions WHERE id = %s", (benchmark_id,)).fetchone()[0]
         found = dict(conn.execute("SELECT evidence_key, normalized_content FROM evidence_units WHERE document_version_id = %s "
                                   "AND evidence_key = ANY(%s)", (doc, ids)).fetchall())
         units = [(i, found[i]) for i in ids if i in found]
@@ -140,9 +143,8 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
 
 
 def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
-    def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict]) -> dict:
-        job_id = conn.execute("SELECT job_id FROM generate_jobs WHERE project_id = %s AND benchmark_id = %s AND phase = 'validate' "
-                              "ORDER BY created_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()[0]
+    def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict],
+                   job_id: uuid.UUID) -> dict:
         actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE job_id = %s", (job_id,)).fetchone()[0]
         conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))        # question_validations is under gold RLS
         questions = {ordinal: (qid, text, answer, facts, units)

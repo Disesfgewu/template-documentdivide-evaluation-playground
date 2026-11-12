@@ -45,10 +45,14 @@ def _start(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
     missing = ApiError(404, "not_found", "benchmark revision not found")
     _authorize(conn, project_id, actor_id, BUILD_ACTION, missing)
     benchmark_id, _, _, page_count = _find(conn, project_id, logical_id, revision)
+    # budget_cap_micros is the budget for THIS run: the stored per-benchmark cap is what the benchmark has already spent
+    # or holds plus that amount, so a validation run is not refused because the generation run spent money earlier.
+    used = benchmark_budget(conn, project_id, benchmark_id, 0)
+    total_cap = used.spent + used.held + body.budget_cap_micros
     try:
         job_id = enqueue_generate_job(
             conn, project_id=project_id, actor_id=actor_id, benchmark_id=benchmark_id, model=body.model,
-            max_output_tokens=body.max_output_tokens, budget_cap_micros=body.budget_cap_micros, currency=body.currency,
+            max_output_tokens=body.max_output_tokens, budget_cap_micros=total_cap, currency=body.currency,
             pricing_revision=body.pricing_revision, phase=phase)
     except NotFound:
         raise missing from None
@@ -60,52 +64,56 @@ def _start(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
         raise ApiError(409, "conflict", f"generation cannot start: {exc}") from None
     return {"job_id": str(job_id), "benchmark_revision_id": str(benchmark_id), "status": "queued", "phase": phase,
             "benchmark_status": "generating" if phase == "generate" else "validating", "model": body.model, "max_output_tokens": body.max_output_tokens,
-            "budget_cap_micros": body.budget_cap_micros, "general_target": general_target(page_count)}
+            "budget_cap_micros": body.budget_cap_micros, "benchmark_cap_micros": total_cap,
+            "general_target": general_target(page_count)}
 
 
 def _progress(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int) -> dict:
     missing = ApiError(404, "not_found", "benchmark revision not found")
     _authorize(conn, project_id, actor_id, READ_ACTION, missing)
     benchmark_id, _, status, page_count = _find(conn, project_id, logical_id, revision)
-    job = conn.execute(
-        "SELECT g.job_id, j.status::text, j.attempt, g.model, g.max_output_tokens, g.budget_cap_micros, g.currency, "
-        "g.pricing_revision, g.phase FROM generate_jobs g JOIN jobs j ON j.project_id = g.project_id AND j.id = g.job_id "
-        "WHERE g.project_id = %s AND g.benchmark_id = %s ORDER BY g.created_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()
-    out = {"benchmark_revision_id": str(benchmark_id), "logical_id": logical_id, "revision": revision,
-           "benchmark_status": status, "general_target": general_target(page_count),
-           "human_review": "skipped", "limits": ["Only the general bucket is generated; cross_page, chart_table and confusable are "
-                                                 "not guessed (no material proof in this parse).",
-                                                 "A question answerable without the page is not detected yet."]}
-    out["questions"] = int(conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0])
-    out["shortfall"] = max(0, out["general_target"] - out["questions"])
-    if job is None:
-        out["job"] = None
+    with conn.transaction():
+        # question_validations is under gold row level security: read it as the (already authorized) caller.
+        conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))
+        job = conn.execute(
+            "SELECT g.job_id, j.status::text, j.attempt, g.model, g.max_output_tokens, g.budget_cap_micros, g.currency, "
+            "g.pricing_revision, g.phase FROM generate_jobs g JOIN jobs j ON j.project_id = g.project_id AND j.id = g.job_id "
+            "WHERE g.project_id = %s AND g.benchmark_id = %s ORDER BY g.created_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()
+        out = {"benchmark_revision_id": str(benchmark_id), "logical_id": logical_id, "revision": revision,
+               "benchmark_status": status, "general_target": general_target(page_count),
+               "human_review": "skipped", "limits": ["Only the general bucket is generated; cross_page, chart_table and confusable are "
+                                                     "not guessed (no material proof in this parse).",
+                                                     "A question answerable without the page is not detected yet."]}
+        out["questions"] = int(conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0])
+        out["shortfall"] = max(0, out["general_target"] - out["questions"])
+        if job is None:
+            out["job"] = None
+            return out
+        job_id, job_status, attempt, model, cap_tokens, cap_micros, currency, pricing, phase = job
+        state = conn.execute(
+            "SELECT status, count(*), COALESCE(sum(GREATEST(charged_micros, 0)), 0), COALESCE(sum(held_micros), 0) FROM ("
+            "SELECT DISTINCT ON (job_id, attempt, call_id) status, charged_micros, held_micros FROM llm_calls "
+            "WHERE project_id = %s AND benchmark_id = %s ORDER BY job_id, attempt, call_id, seq DESC) s GROUP BY status",
+            (project_id, benchmark_id)).fetchall()
+        budget = benchmark_budget(conn, project_id, benchmark_id, cap_micros)
+        last = conn.execute(
+            "SELECT a.reason FROM audit_events a JOIN benchmark_revisions b ON b.resource_id = a.resource_id "
+            "WHERE a.project_id = %s AND b.id = %s AND a.action = 'benchmark.questions_generated' "
+            "ORDER BY a.occurred_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()
+        verdicts = dict(conn.execute(
+            "SELECT verdict, count(*) FROM (SELECT DISTINCT ON (question_id) verdict FROM question_validations "
+            "WHERE benchmark_id = %s ORDER BY question_id, created_at DESC) v GROUP BY verdict", (benchmark_id,)).fetchall())
+        validated = sum(int(n) for n in verdicts.values())
+        out["validation"] = {"pass": int(verdicts.get("pass", 0)), "fail": int(verdicts.get("fail", 0)),
+                             "needs_review": int(verdicts.get("needs_review", 0)),
+                             "unvalidated": max(0, out["questions"] - validated),
+                             "note": "automated only; the validator is the same provider and model as the generator; human review is skipped"}
+        out["job"] = {"job_id": str(job_id), "phase": phase, "status": job_status, "attempt": attempt, "model": model,
+                      "max_output_tokens": cap_tokens, "currency": currency, "pricing_revision": pricing}
+        out["ledger"] = {"calls_by_state": {s: int(n) for s, n, _, _ in state}, "spent_micros": budget.spent,
+                         "held_micros": budget.held, "cap_micros": budget.cap, "remaining_micros": budget.remaining}
+        out["last_generation"] = last[0] if last else None
         return out
-    job_id, job_status, attempt, model, cap_tokens, cap_micros, currency, pricing, phase = job
-    state = conn.execute(
-        "SELECT status, count(*), COALESCE(sum(GREATEST(charged_micros, 0)), 0), COALESCE(sum(held_micros), 0) FROM ("
-        "SELECT DISTINCT ON (job_id, attempt, call_id) status, charged_micros, held_micros FROM llm_calls "
-        "WHERE project_id = %s AND benchmark_id = %s ORDER BY job_id, attempt, call_id, seq DESC) s GROUP BY status",
-        (project_id, benchmark_id)).fetchall()
-    budget = benchmark_budget(conn, project_id, benchmark_id, cap_micros)
-    last = conn.execute(
-        "SELECT a.reason FROM audit_events a JOIN benchmark_revisions b ON b.resource_id = a.resource_id "
-        "WHERE a.project_id = %s AND b.id = %s AND a.action = 'benchmark.questions_generated' "
-        "ORDER BY a.occurred_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()
-    verdicts = dict(conn.execute(
-        "SELECT verdict, count(*) FROM (SELECT DISTINCT ON (question_id) verdict FROM question_validations "
-        "WHERE benchmark_id = %s ORDER BY question_id, created_at DESC) v GROUP BY verdict", (benchmark_id,)).fetchall())
-    validated = sum(int(n) for n in verdicts.values())
-    out["validation"] = {"pass": int(verdicts.get("pass", 0)), "fail": int(verdicts.get("fail", 0)),
-                         "needs_review": int(verdicts.get("needs_review", 0)),
-                         "unvalidated": max(0, out["questions"] - validated),
-                         "note": "automated only; the validator is the same provider and model as the generator; human review is skipped"}
-    out["job"] = {"job_id": str(job_id), "phase": phase, "status": job_status, "attempt": attempt, "model": model,
-                  "max_output_tokens": cap_tokens, "currency": currency, "pricing_revision": pricing}
-    out["ledger"] = {"calls_by_state": {s: int(n) for s, n, _, _ in state}, "spent_micros": budget.spent,
-                     "held_micros": budget.held, "cap_micros": budget.cap, "remaining_micros": budget.remaining}
-    out["last_generation"] = last[0] if last else None
-    return out
 
 
 async def start_handler(logical_id: str, revision: int, request: Request, conn: psycopg.Connection = Depends(get_db),

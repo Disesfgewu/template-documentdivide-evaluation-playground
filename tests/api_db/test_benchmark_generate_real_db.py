@@ -67,8 +67,10 @@ class BenchmarkGenerateApiTests(GenerateFixtures, FreshDatabase):
         after_gen = self.api("get", owner, self.GEN, project).json()
         n = general_target(3)
         self.assertEqual((after_gen["benchmark_status"], after_gen["questions"], after_gen["validation"]["unvalidated"]), ("validating", n, n))
-        started = self.api("post", owner, self.VAL, project, {"model": "fake-model", "budget_cap_micros": 50_000_000})
+        started = self.api("post", owner, self.VAL, project, {"model": "fake-model", "budget_cap_micros": 300_000})
         self.assertEqual((started.status_code, started.json()["phase"], started.json()["benchmark_status"]), (202, "validate", "validating"))
+        # the request is the budget of THIS run; the stored per-benchmark cap is what was already spent plus it
+        self.assertEqual(started.json()["benchmark_cap_micros"], 315 * n + 300_000)
         self.assertEqual(self.api("post", owner, self.VAL, project, {"model": "fake-model", "budget_cap_micros": 1}).status_code, 409)
         mk("validate_mixed").run_once()
         done = self.api("get", owner, self.GEN, project)
@@ -79,6 +81,15 @@ class BenchmarkGenerateApiTests(GenerateFixtures, FreshDatabase):
         self.assertEqual((body["validation"]["unvalidated"], body["benchmark_status"], body["human_review"]), (0, "validating", "skipped"))
         for leak in ("statement number", "supported", "reference_answer"):
             self.assertNotIn(leak, done.text)
+        # the same report read through a NON-superuser role (row level security applies) still counts the verdicts
+        from lab_api.benchmark_generate import _progress
+        role = self.app_role()
+        with self.connect() as c:
+            c.execute(f'SET ROLE "{role}"')
+            from lab_db.repo import authorize
+            owner_id = owner
+            report = _progress(c, owner_id, project, "bench-gen", 1)
+        self.assertEqual(report["validation"]["pass"] + report["validation"]["fail"], n)
 
     def test_only_owner_or_maintainer_may_start_and_a_reviewer_may_read(self):
         project, owner = self.planned()

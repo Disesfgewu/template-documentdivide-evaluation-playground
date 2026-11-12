@@ -104,5 +104,8 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   `ready_to_freeze` 或 `frozen`。
 - **資料表**：`question_validations`（append-only、凍結後不可寫、與 gold 同一套 RLS：participant／observer 看不到）、`generate_jobs.phase`。
   稽核事件只有計數（pass／fail／needs_review）與 `human_review=skipped same_model_validator=true`。
+- **預算語意**：`POST .../generate`／`.../validate` 的 `budget_cap_micros` 是**這一次執行**的預算；儲存的每個 benchmark 上限 = 該 benchmark 已花費與已 hold 的金額 + 這個數字（回應的 `benchmark_cap_micros`），所以驗證不會因為先前生成已花錢而被拒。
+- **重新驗證**：已有 `pass` 或 `fail` 的題目不會再驗證；只有 `needs_review` 的題目（或還沒驗證的）會被新的驗證 job 撿起。
+- **RLS**：worker 在讀 `gold_answers`（建呼叫）與寫結果時，都以 job 的請求者（owner／maintainer）身分設定 `lab.actor_id`；`GET` 進度也以呼叫者身分讀 `question_validations`。測試包含用非 superuser 的應用程式角色跑完整的生成加驗證流程（移除這個設定會以 `no_calls` 失敗）。
 - **API**：`GET .../generate` 多回 `validation: {pass, fail, needs_review, unvalidated, note}` 與 job 的 `phase`；仍然不回任何題目文字或答案。
 - **這個切片沒有**：cross_page／chart_table／confusable 的生成與驗證、非同一模型的驗證者、人工審核、ready_to_freeze。

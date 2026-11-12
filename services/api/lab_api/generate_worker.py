@@ -72,7 +72,7 @@ class GenModelConfig:
 
 
 GenBuilder = Callable[[psycopg.Connection, uuid.UUID, uuid.UUID], Sequence[CallSpec]]
-OnResults = Callable[[psycopg.Connection, uuid.UUID, uuid.UUID, list[dict]], None]
+OnResults = Callable[[psycopg.Connection, uuid.UUID, uuid.UUID, list[dict], uuid.UUID], None]
 
 
 def _int(v, lo=0, hi=2**62) -> int:
@@ -287,8 +287,14 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
         return _fail(conn, project_id, lease, "generate_job_missing")
     benchmark_id, model, cap_tokens, cap_micros, currency, pricing_rev, bench_status, attempt, phase = row
     if bench_status != ("generating" if phase == "generate" else "validating"):
-        return _fail(conn, project_id, lease, "benchmark_not_generating")
-    calls = list(build_calls(conn, project_id, benchmark_id))
+        return _fail(conn, project_id, lease, "benchmark_not_generating" if phase == "generate" else "benchmark_not_validating")
+    actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE project_id = %s AND job_id = %s",
+                         (project_id, job_id)).fetchone()[0]
+    with conn.transaction():
+        # Gold tables are under row level security: reading them (and writing results) happens as the job's requester,
+        # an owner or maintainer, exactly like the API call that queued the job.
+        conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
+        calls = list(build_calls(conn, project_id, benchmark_id))
     if not calls:
         return _fail(conn, project_id, lease, "no_calls")
     worst = {c.id: worst_case_micros(len((c.system + c.user).encode("utf-8")), cap_tokens, cfg.input_micros_per_mtok,
@@ -352,7 +358,8 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     def hook(c):
         record(c, plain)
         if on_results is not None:
-            on_results(c, project_id, benchmark_id, rows)   # only 'ok' rows carry text; a partial batch is not wasted
+            c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
+            on_results(c, project_id, benchmark_id, rows, job_id)   # only 'ok' rows carry text; a partial batch is not wasted
 
     try:
         jobs.finish(conn, project_id, lease, "succeeded" if ok else "failed",
