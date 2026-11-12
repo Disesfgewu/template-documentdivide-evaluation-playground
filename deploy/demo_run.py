@@ -240,7 +240,10 @@ def main() -> int:
         failures.append("cancel upload")
 
     banner("6. Generate questions with the real model (opt-in; needs your key, costs a few cents)")
-    if os.environ.get("DEMO_GENERATE") != "1":
+    no_key = os.environ.get("DEMO_GENERATE") == "1" and os.environ.get("DEMO_NO_KEY") == "1"
+    if no_key:
+        print("SKIPPED (no API key): LAB_GEN_API_KEY is not set and ./.env has no ANTHROPIC_API_KEY. A skipped step is not a pass.")
+    elif os.environ.get("DEMO_GENERATE") != "1":
         print("SKIPPED (not requested): run `scripts/demo.sh generate` with LAB_GEN_API_KEY to generate questions. "
               "A skipped step is not a pass.")
     elif path:
@@ -268,8 +271,10 @@ def main() -> int:
                   f"held {ledger.get('held_micros')}, remaining {ledger.get('remaining_micros')}")
             print(f"last generation: {progress.get('last_generation')}")
             _, listing = api.call("GET", f"/api/v1/benchmarks/{bench_name}/revisions/1/questions?project_id={project}&limit=5")
+            print("  [label] synthetic document, model-generated, NOT human-reviewed, not a verified benchmark")
             for item in (listing or {}).get("items", [])[:5]:
                 print(f"  Q{item.get('ordinal', 0) + 1}: {item.get('question_text')}")
+            print("  (the source page of each question is omitted here: the consumer questions API does not expose it)")
             checks = [
                 (job_status == "succeeded", "the generation job succeeded"),
                 (int(progress.get("questions") or 0) > 0, "at least one question was generated"),
@@ -289,6 +294,9 @@ def main() -> int:
     print(f"export TOKEN={token}")
     print(f"curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:${{LAB_API_PORT:-8000}}/api/v1/documents/{document}/parse-results/{job['job_id']}/pages/2")
     print(f"(throwaway dev credentials; project {project})")
+    if not failures and no_key:
+        print("\nRESULT: SKIPPED (no API key): steps 1-5 passed, step 6 (generation) was not run")
+        return 3
     print("\nRESULT:", "PASS" if not failures else "FAIL " + ", ".join(failures))
     return 0 if not failures else 1
 

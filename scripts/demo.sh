@@ -38,7 +38,7 @@ generate_up() {
     if [[ -n "$line" ]]; then
       LAB_GEN_API_KEY="${line#ANTHROPIC_API_KEY=}"; LAB_GEN_API_KEY="${LAB_GEN_API_KEY%\"}"; LAB_GEN_API_KEY="${LAB_GEN_API_KEY#\"}"
       export LAB_GEN_API_KEY
-      echo "using ANTHROPIC_API_KEY from .env (not printed)"
+      echo "using the API key from ./.env (not shown)"
     fi
   fi
   if [[ -z "${LAB_GEN_API_KEY:-}" ]]; then
@@ -47,15 +47,23 @@ generate_up() {
   fi
   AGENTKIT_COMMIT="$(git rev-parse HEAD:third_party/agentkit)"   # the pinned public agentKit commit the image builds against
   export AGENTKIT_COMMIT
-  "${compose[@]}" --profile generate up -d --build --wait-timeout 600 generate-worker
+  "${compose[@]}" --profile generate up -d --build --wait --wait-timeout 600 generate-worker
 }
 
 generate() {
   up
-  generate_up || { code=$?; [[ $code == 3 ]] && { run; return 0; }; return $code; }
   extra=(-e DEMO_GENERATE=1)
-  "${compose[@]}" --profile demo exec -T "${extra[@]}" api python - < deploy/demo_run.py
+  if generate_up; then
+    echo "prices used for the cost figures are UNVERIFIED list prices (LAB_GEN_PRICE_IN/OUT_MICROS_PER_MTOK override them)"
+  else
+    code=$?
+    [[ $code == 3 ]] || return $code
+    extra+=(-e DEMO_NO_KEY=1)               # no key: steps 1-5 still run; the run ends SKIPPED (exit 3), never PASS
+  fi
+  code=0
+  "${compose[@]}" --profile demo exec -T "${extra[@]}" api python - < deploy/demo_run.py || code=$?
   echo "the stack is still up; stop it with: scripts/demo.sh down"
+  return $code
 }
 
 down() { "${compose[@]}" --profile demo --profile tools --profile generate down -v; }

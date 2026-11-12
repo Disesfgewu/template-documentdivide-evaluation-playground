@@ -52,7 +52,9 @@ scripts/demo.sh down        # 看完再停掉並刪除示範資料
 **500** 個輸出 token，預設預算上限 200000 micro-USD = 0.20 美元），等 worker 做完，印出：job 狀態、題數對目標、帳本（各狀態的呼叫數、
 已花費、held、剩餘）、前 5 題的題目文字，以及 5 個檢查。
 
-- **沒有 key**：第 6 步印 `SKIPPED`，不是通過；其餘步驟照常。
+- **沒有 key**：第 6 步印 `SKIPPED (no API key)`，整個執行以 `RESULT: SKIPPED (no API key)` 和結束碼 3 結束，**不是 PASS**；步驟 1–5 照常執行。
+- 用到 `./.env` 的 key 時腳本會印 `using the API key from ./.env (not shown)`；key 只傳進 generate-worker 容器的環境，不進映像、不寫檔、不印出。
+- 印出的題目前面會有標籤「synthetic document, model-generated, NOT human-reviewed, not a verified benchmark」；每題的來源頁在消費者 API 不公開，所以這裡不顯示。
 - **CI 從不呼叫真實模型**；這一步只在你手動執行時才會花錢。價格預設是 Haiku 的公開牌價（1 與 5 美元每百萬 token，未獨立查證），可用
   `LAB_GEN_PRICE_IN_MICROS_PER_MTOK`／`LAB_GEN_PRICE_OUT_MICROS_PER_MTOK` 覆寫。
 - **只生成 general 題**（示範文件 6 頁、3 個乾淨頁，目標 14 題）；cross_page、chart_table、confusable 因這個 parse 沒有足夠證據而不猜。
