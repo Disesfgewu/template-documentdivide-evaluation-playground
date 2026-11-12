@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 import psycopg
+import psycopg.errors
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -31,6 +32,8 @@ def _start(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
         out = start_answer_run(conn, project_id, benchmark_id, actor_id, model=body.model, budget_cap_micros=body.budget_cap_micros,
                                currency=body.currency, pricing_revision=body.pricing_revision,
                                max_output_tokens=body.max_output_tokens)
+    except psycopg.errors.UniqueViolation:
+        raise ApiError(409, "conflict", "another method run is registering the same method revision; try again") from None
     except NotFound:
         raise missing from None
     except PermissionDenied as exc:

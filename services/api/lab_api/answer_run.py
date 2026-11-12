@@ -19,6 +19,7 @@ from typing import Callable, Optional, Sequence
 import psycopg
 
 from lab_contracts.method import QueryBudget, QueryRequest
+from lab_db.generation import request_sha256
 from lab_db.jobs import ACTIVE_JOB_STATUSES
 from lab_db.repo import Change, NotFound, PermissionDenied, authorize, record_change
 from lab_db.storage import LocalArtifactStore, store_and_register
@@ -51,6 +52,8 @@ def start_answer_run(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_
     run_id, job_id, op_id, method_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"answer_run:{project_id}:{benchmark_id}",))
+        # revision numbers are per (project, method): serialize across benchmarks too (as the baseline does)
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"method_revision:{project_id}:{METHOD_LOGICAL_ID}",))
         bench = conn.execute("SELECT status::text FROM benchmark_revisions WHERE project_id = %s AND id = %s FOR SHARE",
                              (project_id, benchmark_id)).fetchone()
         if bench is None:
@@ -134,6 +137,8 @@ def make_answer_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Cal
                 for _, qkey, qtext, ordinal in questions]
 
     def on_results(conn, project_id, benchmark_id, rows, job_id) -> dict:
+        conn.execute("SELECT set_config('lab.actor_id', '', true)")        # the participant records are written WITHOUT an actor
+        model = conn.execute("SELECT model FROM generate_jobs WHERE job_id = %s", (job_id,)).fetchone()[0]
         by_call = {r["call_id"]: r for r in rows}
         doc_id, index, questions = index_and_questions(conn, project_id, benchmark_id)
         evaluation_id = uuid.uuid4()
@@ -147,7 +152,12 @@ def make_answer_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Cal
             telemetry = {"latency_ms": None, "retrieval_calls": 1, "model_calls": 1 if sent else 0,
                          "input_tokens": row["input_tokens"] if row and row.get("usage_known") else None,
                          "output_tokens": row["output_tokens"] if row and row.get("usage_known") else None}
+            expected = build_answer_call(f"a{ordinal:04d}", qtext, hits)
             if row is None:
+                code = "outcome_unknown"
+            elif row.get("request_sha256") and row["request_sha256"] != request_sha256(model, expected.system, expected.user):
+                # The retrieval re-run here does NOT reproduce the prompt that was sent (a nondeterministic method, or a changed
+                # document): the answer cannot be mapped to these hits, so it is not scored as an answer.
                 code = "outcome_unknown"
             elif row["status"] == "ok":
                 reply = parse_answer_reply(row["text"])
