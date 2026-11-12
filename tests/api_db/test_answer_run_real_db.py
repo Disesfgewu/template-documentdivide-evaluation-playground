@@ -126,6 +126,29 @@ class AnswerRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertEqual(self.api("post", owner, RUN, project, BODY).status_code, 409)             # one active method run per benchmark
         self.assertEqual(self.api("post", owner, "/api/v1/benchmarks/nope/revisions/1/method-runs", project, BODY).status_code, 404)
 
+    def test_a_unique_violation_on_the_method_revision_is_a_409_not_a_500(self):
+        import psycopg.errors
+        from unittest import mock
+        project, owner = self.frozen()
+        with mock.patch("lab_api.benchmark_method.start_answer_run", side_effect=psycopg.errors.UniqueViolation("dup")):
+            res = self.api("post", owner, RUN, project, BODY)
+        self.assertEqual(res.status_code, 409, res.text)
+
+    def test_a_retrieval_that_does_not_reproduce_the_sent_prompt_is_not_scored_as_an_answer(self):
+        from unittest import mock
+        project, owner = self.frozen()
+        real, calls = answer_run.local_methods.query, {"n": 0}
+
+        def drifting(index, request):                       # every call returns different hit text: the re-run never matches
+            calls["n"] += 1
+            out = real(index, request)
+            hits = [h.model_copy(update={"content": f"{h.content} drift{calls['n']}"}) for h in out.retrieved_hits]
+            return out.model_copy(update={"retrieved_hits": hits})
+        with mock.patch.object(answer_run.local_methods, "query", drifting):
+            run, counts, body = self.run_method(project, owner, "answer_ok")
+        n = self.api("get", owner, self.GEN, project).json()["questions"]
+        self.assertEqual(body["submissions"], {"answered": 0, "abstained_by_model": 0, "method_failures": {"outcome_unknown": n}})
+
     def test_the_participant_phase_never_touches_gold_or_system_parse_tables(self):
         project, owner = self.frozen()
         started = self.api("post", owner, RUN, project, BODY).json()
