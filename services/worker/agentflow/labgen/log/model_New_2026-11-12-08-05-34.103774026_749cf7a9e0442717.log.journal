@@ -1,0 +1,1 @@
+{"call_id":1,"parent_call_id":0,"function":"model.New","input":{"api_key_env":"[REDACTED]","base_url":"http://127.0.0.1:42131","max_retries":1,"model":"fake-model","name":"gen","protocol":"openai_chat","requests_per_minute":6000,"timeout_seconds":10},"time":"2026-11-12T00:05:34.106302495Z"}
