@@ -31,7 +31,7 @@ from lab_contracts.benchmark import (EvidenceSet, EvidenceUnit, Fact, FactSuppor
                                      ReasoningType, ScoringRule, SemanticAnswer, SourceAnswer, TextualAnswer,
                                      target_counts, validate_bundle)
 from lab_api.generate_prompts import (DEFAULT_PAGE_CHARS, PROMPT_VERSION, ParsedReply, build_page_call, detect_language,
-                                      parse_model_reply, select_pages)
+                                      parse_model_reply, select_pages, shown_pieces)
 from lab_api.generate_worker import CallSpec
 
 __all__ = ["GenerationStats", "general_target", "load_clean_pages", "make_build_calls", "make_on_results",
@@ -139,7 +139,7 @@ def _derive(reply: ParsedReply, units: Sequence[EvidenceUnit], ordinal: int):
     return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
 
 
-def make_on_results() -> Callable:
+def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
     def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict]) -> GenerationStats:
         page_count, pages, doc_id = load_clean_pages(conn, project_id, benchmark_id)
         actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE project_id = %s AND benchmark_id = %s "
@@ -160,7 +160,12 @@ def make_on_results() -> Callable:
             if reply is None or not units:
                 stats.unparseable += 1
                 continue
-            units = units[:MAX_UNITS_IN_PROMPT]
+            # Only the units the model was ACTUALLY shown (same cut as the prompt) can be the question's source.
+            shown_ids = {eid for eid, _ in shown_pieces([(u.evidence_id, u.normalized_content) for u in units[:MAX_UNITS_IN_PROMPT]], page_chars)}
+            units = [u for u in units[:MAX_UNITS_IN_PROMPT] if u.evidence_id in shown_ids]
+            if not units:
+                stats.unparseable += 1
+                continue
             try:
                 question, semantic, textual, source = _derive(reply, units, ordinal)
             except Exception:
@@ -173,7 +178,13 @@ def make_on_results() -> Callable:
             if problems:
                 stats.invalid += 1
                 continue
-            _write(conn, project_id, benchmark_id, doc_id, question, semantic, textual, source)
+            ids = [u.evidence_id for u in units]
+            unit_rows = dict(conn.execute("SELECT evidence_key, id FROM evidence_units WHERE document_version_id = %s "
+                                          "AND evidence_key = ANY(%s)", (doc_id, ids)).fetchall())
+            if len(unit_rows) != len(ids):          # a unit that is not stored: skip and count, never raise and roll everything back
+                stats.invalid += 1
+                continue
+            _write(conn, project_id, benchmark_id, unit_rows, question, semantic, textual, source)
             existing.add(question.question_hash)
             ordinal += 1
             stats.written += 1
@@ -190,11 +201,18 @@ def make_on_results() -> Callable:
              f"prompt={PROMPT_VERSION} bucket=general replies={stats.replies} written={stats.written} "
              f"unparseable={stats.unparseable} invalid={stats.invalid} duplicate={stats.duplicate} "
              f"total={total} target={target} shortfall={max(0, target - total)}", op_id))
+        if total > 0:
+            # generating -> validating (PM-DECISION): never frozen, human review stays skipped; the shortfall is in the reason
+            conn.execute("SELECT set_config('lab.transition_reason', %s, true)",
+                         (f"general questions generated: total={total} target={target} shortfall={max(0, target - total)}; "
+                          "validation pending, human review skipped",))
+            conn.execute("UPDATE benchmark_revisions SET status = 'validating', row_version = row_version + 1 "
+                         "WHERE id = %s AND status = 'generating'", (benchmark_id,))
         return stats
     return on_results
 
 
-def _write(conn, project_id, benchmark_id, doc_id, q: Question, sem: SemanticAnswer, tex: TextualAnswer, src: SourceAnswer):
+def _write(conn, project_id, benchmark_id, unit_rows: dict, q: Question, sem: SemanticAnswer, tex: TextualAnswer, src: SourceAnswer):
     qrow = uuid.uuid4()
     conn.execute(
         "INSERT INTO questions (id, benchmark_id, question_key, ordinal, question_text, question_hash, quota_bucket, payload) "
@@ -210,10 +228,8 @@ def _write(conn, project_id, benchmark_id, doc_id, q: Question, sem: SemanticAns
         conn.execute("INSERT INTO evidence_sets (id, benchmark_id, question_id, set_key) VALUES (%s, %s, %s, %s)",
                      (set_row, benchmark_id, qrow, s.set_id))
         for ev in s.evidence_ids:
-            unit = conn.execute("SELECT id FROM evidence_units WHERE document_version_id = %s AND evidence_key = %s",
-                                (doc_id, ev)).fetchone()
             conn.execute("INSERT INTO evidence_set_members (evidence_set_id, benchmark_id, evidence_unit_id) VALUES (%s, %s, %s)",
-                         (set_row, benchmark_id, unit[0]))
+                         (set_row, benchmark_id, unit_rows[ev]))
     for kind, model in (("semantic", sem), ("textual", tex), ("source", src)):
         conn.execute("INSERT INTO gold_answers (id, benchmark_id, question_id, kind, payload) VALUES (%s, %s, %s, %s, %s)",
                      (uuid.uuid4(), benchmark_id, qrow, kind, Jsonb(json.loads(model.model_dump_json()))))

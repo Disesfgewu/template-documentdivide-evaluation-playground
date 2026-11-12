@@ -76,6 +76,9 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **輪詢 worker**：`python -m lab_api.generate_worker_main`，與 parse worker 同一個迴圈（lease、backoff、停止與關機釋放），只是 job 種類是
   `document.generate`。缺 `LAB_GEN_BIN`、`LAB_GEN_API_KEY`、`LAB_GEN_BASE_URL`、`LAB_GEN_ALLOWED_HOST`、兩個價格任何一項就印出
   `{"status":"blocked"}` 並 exit 3，絕不當作通過。
+- **失敗的 job 仍保留已付費且合格的題目**：partial 批次（job 是 `failed(partial_calls)`）裡合格的回覆已經寫入並維持，job 的失敗狀態只代表「不是每個呼叫都成功」，不會回收已寫的題目；shortfall 照實記在稽核事件。
+- **來源只列模型實際看到的單位**：gold 的 SourceAnswer 只含 prompt 裡真的送出的證據單位（頁面文字在 6000 字元處截斷，之後的單位不列）；單位若不在資料庫就跳過並計入 invalid，不會丟例外讓整個 finish 回滾。
+- **生成後轉 `validating`**：至少寫入一題時 benchmark 由 `generating` 轉 `validating`（轉換原因帶題數、目標與 shortfall）；從不 frozen，人工審核維持 skipped。
 - **已知限制**：不靠頁面、靠常識就能回答的題目目前偵測不到（獨立驗題切片處理）；人工審核維持 `skipped`。
 
 ## 啟動與觀察生成的 API（Refs #7）
