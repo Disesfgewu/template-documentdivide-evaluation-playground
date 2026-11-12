@@ -55,6 +55,9 @@ def select_pages(usable_text_pages: Sequence[int], needed: int) -> list[int]:
     return [pages[i % len(pages)] for i in range(needed)]
 
 
+_EVIDENCE_TAG = re.compile(r"<\s*/?\s*evidence", re.IGNORECASE)
+
+
 def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, str]],
                     page_chars: int = DEFAULT_PAGE_CHARS) -> CallSpec:
     """One call for one clean page. ``units`` = (evidence_id, normalized text) in reading order; the page text is cut at
@@ -72,7 +75,8 @@ def build_page_call(call_id: str, page_index: int, units: Sequence[tuple[str, st
         piece = text[:room]
         lines.append(piece)
         used += len(piece)
-    body = "\n\n".join(lines)
+    # Neutralise anything in the DATA that could close or reopen the fence (PDF text is untrusted).
+    body = _EVIDENCE_TAG.sub(lambda m: m.group(0).replace("<", "\uff1c"), "\n\n".join(lines))
     return CallSpec(id=call_id, system=SYSTEM, user=f"<evidence page=\"{page_index}\">\n{body}\n</evidence>")
 
 
