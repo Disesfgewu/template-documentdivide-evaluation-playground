@@ -290,6 +290,48 @@ def main() -> int:
             print(json.dumps(started))
             failures.append("generation start")
 
+    banner("7. Validate the generated questions (automated, same model; costs a few more cents)")
+    if os.environ.get("DEMO_GENERATE") != "1" or no_key or path:
+        print("SKIPPED (generation was not run, so there is nothing to validate). A skipped step is not a pass.")
+    elif "generation" in failures or "generation start" in failures:
+        print("SKIPPED (generation failed).")
+    else:
+        vcap = int(os.environ.get("DEMO_GEN_BUDGET_MICROS", "200000"))
+        code, vstarted = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/validate?project_id={project}",
+                                  json.dumps({"model": os.environ.get("DEMO_GEN_MODEL", "claude-haiku-4-5-20251001"),
+                                              "budget_cap_micros": vcap}).encode(), "application/json")
+        print(f"POST .../validate -> {code}; budget for this run {vcap} micro-USD, one extra call per question")
+        if code == 202:
+            deadline = time.monotonic() + float(os.environ.get("DEMO_GEN_TIMEOUT", "900"))
+            vprogress = {}
+            while time.monotonic() < deadline:
+                _, vprogress = api.call("GET", f"/api/v1/benchmarks/{bench_name}/revisions/1/generate?project_id={project}")
+                job = vprogress.get("job") or {}
+                if job.get("phase") == "validate" and job.get("status") in ("succeeded", "failed", "cancelled"):
+                    break
+                time.sleep(3)
+            verdict = vprogress.get("validation") or {}
+            vledger = vprogress.get("ledger") or {}
+            print(f"validation job {(vprogress.get('job') or {}).get('status')}: pass {verdict.get('pass')}, fail {verdict.get('fail')}, "
+                  f"needs_review {verdict.get('needs_review')}, unvalidated {verdict.get('unvalidated')}")
+            print(f"ledger so far: spent {vledger.get('spent_micros')} micro-USD, held {vledger.get('held_micros')}")
+            print(f"  [note] {verdict.get('note')}")
+            print("  (verdicts are automated and from the same provider and model as the generator; a failed question stays in the "
+                  "benchmark, nothing is deleted; the benchmark stays 'validating', never frozen)")
+            checks = [
+                ((vprogress.get("job") or {}).get("status") == "succeeded", "the validation job succeeded"),
+                (int(verdict.get("unvalidated") or 0) == 0, "every question has an automated verdict"),
+                (vprogress.get("benchmark_status") == "validating", "the benchmark stays in 'validating' (not frozen)"),
+                (vprogress.get("human_review") == "skipped", "human review is reported as skipped"),
+            ]
+            for ok, meaning in checks:
+                print(f"[{'ok' if ok else 'FAIL'}] {meaning}")
+                if not ok:
+                    failures.append("validation")
+        else:
+            print(json.dumps(vstarted))
+            failures.append("validation start")
+
     banner("Try it yourself")
     print(f"export TOKEN={token}")
     print(f"curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:${{LAB_API_PORT:-8000}}/api/v1/documents/{document}/parse-results/{job['job_id']}/pages/2")
