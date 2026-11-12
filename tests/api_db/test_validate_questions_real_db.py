@@ -87,6 +87,25 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         job3, out3 = self.validate(project, owner, bench, "validate_ok")             # all decided: nothing left
         self.assertEqual((out3.status, out3.reason), ("failed", "no_calls"))
 
+    def test_a_question_whose_source_unit_cannot_be_loaded_is_left_unvalidated_not_judged_on_less_evidence(self):
+        project, owner, bench = self.generated()
+        n = general_target(3) + cross_page_target(3)
+        qid = uuid.uuid4()
+        with self.connect() as c:
+            c.execute("SELECT set_config('lab.actor_id', %s, false)", (str(owner),))
+            c.execute("INSERT INTO questions (id, benchmark_id, question_key, ordinal, question_text, question_hash, quota_bucket, payload) "
+                      "VALUES (%s, %s, 'q-ghost', 999, 'What is the ghost?', %s, 'general', '{}')", (qid, bench, "a" * 64))
+            for kind, payload in (("semantic", {"reference_answer": "a ghost", "required_facts": [{"statement": "a ghost"}]}),
+                                  ("source", {"evidence_sets": [{"set_id": "s", "evidence_ids": ["ghost-unit"]}]})):
+                c.execute("INSERT INTO gold_answers (id, benchmark_id, question_id, kind, payload) VALUES (%s, %s, %s, %s, %s)",
+                          (uuid.uuid4(), bench, qid, kind, __import__("psycopg").types.json.Jsonb(payload)))
+            c.commit()
+        job, out = self.validate(project, owner, bench, "validate_ok")
+        self.assertEqual((out.status, out.reason), ("succeeded", "generated"))
+        self.assertEqual(self.verdicts(bench), ["pass"] * n)                         # the ghost question has no verdict at all
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM question_validations WHERE question_id = %s", (qid,)).fetchone()[0], 0)
+
     def test_negative_validator_flags_and_ungrounded_questions_fail_and_garbage_needs_review(self):
         project, owner, bench = self.generated()
         self.validate(project, owner, bench, "validate_mixed")
