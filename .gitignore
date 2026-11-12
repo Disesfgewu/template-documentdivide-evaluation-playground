@@ -11,3 +11,6 @@ services/worker/agentflow/log/
 !.env.example
 *.pem
 *.key
+
+# agentKit writes model/agentlog files into ./log/ of the package under test (go test)
+services/worker/**/log/

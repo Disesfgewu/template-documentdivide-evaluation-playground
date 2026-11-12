@@ -1,6 +1,0 @@
-{"call_id":1,"parent_call_id":0,"function":"model.Router.Chat","input":{"max_output_tokens":500,"messages":[{"content":"sys","role":"system"},{"content":"second prompt","role":"user"}],"model":"gen"},"time":"2026-11-12T00:05:42.810964154Z"}
-{"call_id":2,"parent_call_id":1,"function":"model.HTTPClient.Chat","input":{"model":"fake-model","protocol":"openai_chat","provider":"gen","request":{"max_output_tokens":500,"messages":[{"content":"sys","role":"system"},{"content":"second prompt","role":"user"}],"model":"gen"}},"time":"2026-11-12T00:05:42.813160106Z"}
-{"call_id":3,"parent_call_id":2,"function":"model.HTTPClient.payload","input":{"model":"fake-model","protocol":"openai_chat","request":{"max_output_tokens":500,"messages":[{"content":"sys","role":"system"},{"content":"second prompt","role":"user"}],"model":"gen"}},"time":"2026-11-12T00:05:42.814585812Z"}
-{"call_id":4,"parent_call_id":2,"function":"model.HTTPClient.awaitRate","input":{"rpm":6000},"time":"2026-11-12T00:05:42.817620487Z"}
-{"call_id":5,"parent_call_id":2,"function":"model.HTTPClient.doRequest","input":{"attempt":0,"provider":"gen"},"time":"2026-11-12T00:05:42.8204762Z"}
-{"call_id":6,"parent_call_id":2,"function":"model.HTTPClient.parse","input":{"protocol":"openai_chat","response_bytes":97},"time":"2026-11-12T00:05:42.823380141Z"}
