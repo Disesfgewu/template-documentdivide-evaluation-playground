@@ -35,7 +35,8 @@ INDEPENDENCE = "validator and generator are the same provider and model (separat
 MIN_FACT_COVERAGE = 0.6
 _TAG = re.compile(r"<\s*/?\s*(evidence|question|reference_answer)", re.IGNORECASE)
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
-_WORD = re.compile(r"[^\W_\u4e00-\u9fff]{3,}|[\u4e00-\u9fff]")   # words of 3+ letters/digits; CJK ideographs one by one
+_WORD = re.compile(r"[^\W_\u4e00-\u9fff]{3,}")        # non-CJK words of 3+ letters or digits
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
 
 SYSTEM = (
     "You are a strict reviewer of exam questions. You get one EVIDENCE passage, one QUESTION and one REFERENCE ANSWER.\n"
@@ -54,6 +55,18 @@ def _norm(text: str) -> str:
     return unicodedata.normalize("NFKC", text).casefold()
 
 
+def content_tokens(text: str) -> list[str]:
+    """Tokens for grounding and overlap checks (after NFKC + case-folding): non-CJK words of 3+ letters/digits, and for CJK
+    the character BIGRAMS of every run of ideographs (a run of one ideograph is itself the token). Single ideographs would
+    make almost any two CJK texts overlap (a few hundred common characters cover most text); bigrams keep the check
+    meaningful without a word segmenter."""
+    norm = _norm(text)
+    tokens = _WORD.findall(norm)
+    for run in _CJK_RUN.findall(norm):
+        tokens.extend([run] if len(run) == 1 else [run[i:i + 2] for i in range(len(run) - 1)])
+    return tokens
+
+
 def _neutralise(text: str) -> str:
     return _TAG.sub(lambda m: m.group(0).replace("<", "＜"), text)
 
@@ -61,14 +74,14 @@ def _neutralise(text: str) -> str:
 def code_checks(shown_text: str, reference_answer: str, facts: Sequence[str]) -> dict:
     """Free grounding checks against the text that was actually shown. Words are matched after NFKC + case-folding."""
     page = _norm(shown_text)
-    page_words = set(_WORD.findall(page))
+    page_words = set(content_tokens(shown_text))
     # Whole numbers only (thousands separators ignored): the answer's "1" must not match the "1" inside "2019".
     page_numbers = {n.replace(",", "") for n in _NUMBER.findall(page)}
     numbers = [n.replace(",", "") for n in _NUMBER.findall(_norm(reference_answer + " " + " ".join(facts)))]
     missing_numbers = [n for n in numbers if n not in page_numbers]
 
     def coverage(statement: str) -> float:
-        words = _WORD.findall(_norm(statement))
+        words = content_tokens(statement)
         return 1.0 if not words else sum(1 for w in words if w in page_words) / len(words)
     fact_cov = [round(coverage(f), 3) for f in facts]
     return {"numbers_in_answer": len(numbers), "numbers_missing_from_evidence": len(missing_numbers),

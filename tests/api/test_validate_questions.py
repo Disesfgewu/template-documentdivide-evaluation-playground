@@ -40,9 +40,21 @@ class CodeCheckTests(unittest.TestCase):
         self.assertTrue(code_checks("ＦＩＬＩＮＧ DEADLINE march", "deadline", ["Filing Deadline"])["passed"])
         self.assertTrue(code_checks("申報期限為三月三十一日", "三月三十一日", ["申報期限為三月三十一日"])["passed"])
         self.assertFalse(code_checks("申報期限為三月三十一日", "十二月", ["完全無關的敘述內容"])["passed"])
-        # CJK is matched per character, so a fact that is only PARTLY in the page is judged by its coverage, not all-or-nothing
+        # CJK is matched by character BIGRAMS: a fact that is mostly (>= 60% of its bigrams) in the page passes ...
         self.assertTrue(code_checks("申報期限為三月三十一日，逾期加徵滯納金", "三月三十一日", ["申報期限是三月三十一日"])["passed"])
+        # ... a fact on another topic fails ...
         self.assertFalse(code_checks("申報期限為三月三十一日", "三月", ["滯納金依逾期天數加徵"])["passed"])
+        # ... and scrambled common ideographs that merely occur somewhere in the page (high per-character coverage, no shared
+        # bigram) fail too, which single-character matching would have let through
+        self.assertFalse(code_checks("申報期限為三月三十一日", "三月", ["日期限申月報"])["passed"])
+        self.assertFalse(code_checks("申報期限為三月三十一日", "三月", ["限月日十三"])["passed"])
+
+    def test_cjk_tokens_are_bigrams_and_other_words_need_three_characters(self):
+        from lab_api.validate_questions import content_tokens
+        self.assertEqual(content_tokens("申報期限"), ["申報", "報期", "期限"])
+        self.assertEqual(content_tokens("月"), ["月"])
+        self.assertEqual(sorted(content_tokens("The deadline is ab 申報")), ["deadline", "the", "申報"])
+        self.assertEqual(content_tokens("ＦＩＬＩＮＧ"), ["filing"])                      # NFKC + case folding first
 
 
 class ReplyTests(unittest.TestCase):
