@@ -107,7 +107,7 @@ def _progress(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UU
             "ORDER BY a.occurred_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()
         verdicts = dict(conn.execute(
             "SELECT verdict, count(*) FROM (SELECT DISTINCT ON (question_id) verdict FROM question_validations "
-            "WHERE benchmark_id = %s ORDER BY question_id, created_at DESC) v GROUP BY verdict", (benchmark_id,)).fetchall())
+            "WHERE benchmark_id = %s ORDER BY question_id, created_at DESC, id DESC) v GROUP BY verdict", (benchmark_id,)).fetchall())
         validated = sum(int(n) for n in verdicts.values())
         out["validation"] = {"pass": int(verdicts.get("pass", 0)), "fail": int(verdicts.get("fail", 0)),
                              "needs_review": int(verdicts.get("needs_review", 0)),

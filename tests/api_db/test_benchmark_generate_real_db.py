@@ -9,8 +9,9 @@ from lab_api.generate_questions import cross_page_target, general_target
 from lab_api.generate_worker_main import GenerateWorker
 
 
-@unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
-class BenchmarkGenerateApiTests(GenerateFixtures, FreshDatabase):
+class GenerateApiFixtures(GenerateFixtures):
+    """API helpers shared with the freeze tests: api(), planned() (a planning benchmark 'bench-gen' made through the API)."""
+
     def api(self, method, actor, path, project, body=None):
         url = f"{path}?project_id={project}"
         if method == "post":
@@ -27,6 +28,15 @@ class BenchmarkGenerateApiTests(GenerateFixtures, FreshDatabase):
         return project, owner
 
     GEN = "/api/v1/benchmarks/bench-gen/revisions/1/generate"
+    VAL = "/api/v1/benchmarks/bench-gen/revisions/1/validate"
+
+    def run_worker(self, mode):
+        return GenerateWorker(self.connect, lab_gen_cmd=STUB, cfg=CFG, api_key="k", name="api-w", interval=1, backoff=1,
+                              grace=5, once_timeout=120, extra_env={"FAKE_LAB_GEN_MODE": mode}).run_once()
+
+
+@unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
+class BenchmarkGenerateApiTests(GenerateApiFixtures, FreshDatabase):
 
     def test_the_whole_flow_start_run_and_watch_without_ever_returning_gold(self):
         project, owner = self.planned()
@@ -56,8 +66,6 @@ class BenchmarkGenerateApiTests(GenerateFixtures, FreshDatabase):
         self.assertIn(f"written={g}", body["last_generation"])
         for leak in ("statement number", "reference_answer", "It says item", "The document states"):
             self.assertNotIn(leak, done.text)                                  # counts only: no question text, no gold
-
-    VAL = "/api/v1/benchmarks/bench-gen/revisions/1/validate"
 
     def test_validation_is_started_after_generation_and_reported_as_counts_only(self):
         project, owner = self.planned()

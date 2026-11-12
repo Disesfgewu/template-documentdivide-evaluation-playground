@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 import psycopg
-from psycopg import sql
+from psycopg import errors, sql
 from psycopg.types.json import Jsonb
 
 Role = Literal["owner", "maintainer", "reviewer", "participant", "observer"]
@@ -199,6 +199,11 @@ class StaleVersion(Exception):
     """row_version did not match: someone else changed the row (409)."""
 
 
+class FreezeIneligible(errors.CheckViolation):
+    """The benchmark revision cannot be frozen (no passing automated validation for every question, no questions, or
+    a compliance other than 'partial'); the database gate (0017) is the authority, this is how it surfaces."""
+
+
 def transition_benchmark(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID,
                          expected_row_version: int, to_status: str, reason: str, actor_id: uuid.UUID,
                          compliance: Optional[str] = None) -> int:
@@ -214,21 +219,34 @@ def transition_benchmark(conn: psycopg.Connection, project_id: uuid.UUID, benchm
     if decision.condition is not None:
         raise PermissionDenied(f"{decision.role} may only comment, not {to_status} a benchmark")
     with conn.transaction():
-        cur = conn.execute("SELECT status::text, row_version, resource_id FROM benchmark_revisions "
+        cur = conn.execute("SELECT status::text, row_version, resource_id, compliance FROM benchmark_revisions "
                            "WHERE id = %s AND project_id = %s FOR UPDATE", (benchmark_id, project_id)).fetchone()
         if cur is None:
             raise NotFound("benchmark")
-        from_status, version, resource_id = cur
+        from_status, version, resource_id, current_compliance = cur
         if version != expected_row_version:
             raise StaleVersion(f"benchmark {benchmark_id} is at row_version {version}, not {expected_row_version}")
+        effective_compliance = compliance if compliance is not None else current_compliance
+        if to_status == "frozen":
+            if not effective_compliance:
+                raise ValueError("a compliance designation ('partial') is required to freeze a benchmark")
+            if effective_compliance not in ("compliant", "partial"):
+                raise ValueError(f"invalid compliance {effective_compliance!r}")
+            if decision.role != "owner":
+                raise PermissionDenied(f"{decision.role} may not freeze a benchmark: owner required")
         conn.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', %s, true)",
                      (str(actor_id), reason))
-        new_version = conn.execute(
-            "UPDATE benchmark_revisions SET status = %s, row_version = row_version + 1, "
-            "compliance = COALESCE(%s, compliance), "
-            "frozen_at = CASE WHEN %s::text = 'frozen' THEN now() ELSE frozen_at END "
-            "WHERE id = %s RETURNING row_version",
-            (to_status, compliance, to_status, benchmark_id)).fetchone()[0]
+        try:
+            new_version = conn.execute(
+                "UPDATE benchmark_revisions SET status = %s, row_version = row_version + 1, "
+                "compliance = COALESCE(%s, compliance), "
+                "frozen_at = CASE WHEN %s::text = 'frozen' THEN now() ELSE frozen_at END "
+                "WHERE id = %s RETURNING row_version",
+                (to_status, compliance, to_status, benchmark_id)).fetchone()[0]
+        except errors.CheckViolation as exc:
+            if "cannot freeze benchmark revision" in str(exc):
+                raise FreezeIneligible(str(exc)) from exc
+            raise
         op_id = uuid.uuid4()
         conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
                      "VALUES (%s, %s, 'benchmark.transition', %s, 'succeeded', now())", (op_id, project_id, actor_id))
