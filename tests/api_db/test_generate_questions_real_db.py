@@ -71,12 +71,13 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertIn(f"written={n}", reason[0][0])
         self.assertIn("shortfall=0", reason[0][0])
         self.assertIn("prompt=general-page-v1", reason[0][0])
-        self.assertEqual(self.bench_status(bench), "generating")                     # validation is a later step
+        self.assertEqual(self.bench_status(bench), "validating")                     # generating -> validating, never frozen
 
     def test_unparseable_replies_write_nothing_and_are_counted(self):
         project, owner, bench, job, out = self.run_batch("badjson")
         self.assertEqual(out.status, "succeeded")
         self.assertEqual(self.count("questions", bench), 0)
+        self.assertEqual(self.bench_status(bench), "generating")                     # nothing was written: no validating
         self.assertIn(f"unparseable={general_target(3)}", self.audit_reason(project)[0][0])
         self.assertIn(f"shortfall={general_target(3)}", self.audit_reason(project)[0][0])    # recorded, never padded
 
@@ -89,6 +90,36 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         project, owner, bench, job, out = self.run_batch("partial_questions")
         self.assertEqual((out.status, out.reason), ("failed", "partial_calls"))
         self.assertEqual(self.count("questions", bench), general_target(3) - 1)      # every ok reply but the failed second call
+
+    def test_the_source_answer_lists_only_the_units_the_model_was_shown(self):
+        from lab_api.generate_prompts import shown_pieces
+        units = [("a", "x" * 40), ("b", "y" * 40), ("c", "z" * 40)]
+        self.assertEqual([e for e, _ in shown_pieces(units, 60)], ["a", "b"])         # the cut lands inside b: c is never shown
+        self.assertEqual(shown_pieces(units, 60)[1][1], "y" * 20)
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=BIG)
+        self.process(project, job, "questions", build_calls=make_build_calls(page_chars=5), on_results=make_on_results(page_chars=5))
+        with self.connect() as c:
+            sources = c.execute("SELECT payload FROM gold_answers WHERE benchmark_id = %s AND kind = 'source'", (bench,)).fetchall()
+        self.assertTrue(sources)
+        for (payload,) in sources:
+            self.assertEqual(len(payload["evidence_sets"][0]["evidence_ids"]), 1)      # the fixture page is one unit, cut to 5 chars
+
+    def test_a_unit_that_is_not_stored_skips_the_question_instead_of_raising(self):
+        from unittest.mock import patch
+        import lab_api.generate_questions as gq
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=BIG)
+        real = gq.load_clean_pages
+
+        def ghosts(conn, p, b):
+            count, pages, doc = real(conn, p, b)
+            return count, {k: [u.model_copy(update={"evidence_id": "ghost-" + u.evidence_id}) for u in v] for k, v in pages.items()}, doc
+        with patch.object(gq, "load_clean_pages", ghosts):
+            out = self.process(project, job, "questions", build_calls=make_build_calls(), on_results=make_on_results())
+        self.assertEqual((out.status, out.reason), ("succeeded", "generated"))          # the finish was not rolled back
+        self.assertEqual(self.count("questions", bench), 0)
+        self.assertIn(f"invalid={general_target(3)}", self.audit_reason(project)[0][0])
 
     def test_the_question_hash_ignores_case_spacing_and_unicode_width(self):
         self.assertEqual(question_hash("What  is\nthe deadline?"), question_hash("what is the DEADLINE?"))
