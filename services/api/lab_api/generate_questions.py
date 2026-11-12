@@ -224,8 +224,11 @@ def _derive_cross(reply: CrossReply, shown: dict[str, list[EvidenceUnit]], ordin
 
 
 def _derive_confusable(reply: ConfusableReply, answer_units: Sequence[EvidenceUnit], distractor_units: Sequence[EvidenceUnit], ordinal: int):
-    """Question, answers and source for a confusable question: the gold is the units of page A that were shown; every shown unit
-    of page B is a distractor with the model's reason and disambiguating condition (checked against the text by the caller)."""
+    """Question, answers and source for a confusable question: the gold is the units of page A that were shown; each distractor unit
+    (the caller passes only the shown units of page B that overlap the question or the facts) carries the model's reason and
+    disambiguating condition. The caller has checked, by code: facts and answer grounded in A, the condition grounded in A or
+    the question, B supporting none of the facts, and the reason sharing at least one content word with B (a WEAK check: that
+    the reason is true of B is not verified)."""
     qhash = question_hash(reply.question)
     qid = f"q-{qhash[:24]}"
     question = Question(
@@ -247,6 +250,19 @@ def _derive_confusable(reply: ConfusableReply, answer_units: Sequence[EvidenceUn
                                 disambiguating_condition=reply.disambiguating_condition) for u in distractor_units],
         validation_refs=[])
     return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
+
+
+def _content_words(text: str) -> set[str]:
+    """NFKC, case-folded content words (3+ letters or digits, CJK per character) as the grounding checks use them."""
+    from lab_api.validate_questions import _WORD, _norm
+    return set(_WORD.findall(_norm(text)))
+
+
+def select_distractors(units: Sequence, question: str, facts: Sequence[str]) -> list:
+    """The units of the distractor page that overlap (share a content word with) the question or the facts; unrelated units of
+    that page are not confusable with anything the question asks and are left out."""
+    relevant = _content_words(question + " " + " ".join(facts))
+    return [u for u in units if _content_words(u.normalized_content) & relevant]
 
 
 def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
@@ -299,9 +315,13 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 grounded = code_checks(text_a, reply.reference_answer, list(reply.facts))["passed"]
                 # the condition that tells A from B must come from what the model was shown (the question or passage A) ...
                 condition_ok = code_checks(text_a + "\n" + reply.question, "", [reply.disambiguating_condition])["passed"]
-                # ... and B must NOT support the same facts, or it is not a distractor but a second source
-                b_also_supports = code_checks(text_b, reply.reference_answer, list(reply.facts))["passed"]
-                if not grounded or not condition_ok or b_also_supports:
+                # ... B must NOT support ANY of the facts (a fact that B also states makes B a second source for it) ...
+                b_also_supports = any(code_checks(text_b, "", [fact])["passed"] for fact in reply.facts)
+                # ... the confusion_reason must refer to something that is really in B (weak check: it shares a content word) ...
+                reason_ok = bool(_content_words(reply.confusion_reason) & _content_words(text_b))
+                # ... and only the B units that actually overlap the question or the facts are distractors (not every unit of B)
+                d_units = select_distractors(d_units, reply.question, reply.facts)
+                if not grounded or not condition_ok or b_also_supports or not reason_ok or not d_units:
                     stats.invalid += 1
                     continue
                 try:

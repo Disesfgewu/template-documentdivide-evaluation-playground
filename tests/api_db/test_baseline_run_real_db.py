@@ -79,6 +79,23 @@ class BaselineRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertEqual(self.api("post", maintainer, BASELINE, project).status_code, 201)
         self.assertEqual(self.api("post", owner, "/api/v1/benchmarks/nope/revisions/1/baseline-run", project).status_code, 404)
 
+    def test_a_too_large_benchmark_is_refused_and_revisions_do_not_collide(self):
+        from unittest.mock import patch
+        import lab_api.baseline_eval as be
+        project, owner = self.frozen()
+        with patch.object(be, "MAX_QUESTIONS", 5):
+            res = self.api("post", owner, BASELINE, project)
+        self.assertEqual(res.status_code, 409, res.text)                              # bounded, not a 500 or a timeout
+        self.assertIn("synchronous_run", res.text)
+        # two runs in a row take revision 1 and 2 of the method (the number is computed under a lock)
+        r1 = self.api("post", owner, BASELINE, project).json()
+        r2 = self.api("post", owner, BASELINE, project).json()
+        self.assertNotEqual(r1["method_revision"], "")                                # both completed
+        with self.connect() as c:
+            revs = [r[0] for r in c.execute("SELECT rv.revision FROM method_revisions m JOIN resource_versions rv ON rv.id = m.resource_id "
+                                            "WHERE m.project_id = %s ORDER BY rv.revision", (project,))]
+        self.assertEqual(revs, [1, 2])
+
     def test_the_baseline_never_sees_gold_or_system_parse_output(self):
         project, owner = self.frozen()
         run = self.api("post", owner, BASELINE, project).json()

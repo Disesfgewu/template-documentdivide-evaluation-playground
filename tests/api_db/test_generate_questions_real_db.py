@@ -219,6 +219,37 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
                     {k: v for k, v in ok.items() if k != "confusion_reason"}, {**ok, "facts": [{"statement": "s", "w": 1}]}):
             self.assertIsNone(parse_confusable_reply(json.dumps(bad)), bad)
 
+    def test_confusable_checks_reject_when_b_supports_any_fact_or_the_reason_is_unrelated_to_b(self):
+        from unittest.mock import patch
+        import lab_api.generate_questions as gq
+        from lab_api.generate_prompts import parse_confusable_reply
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=BIG)
+        import json as _json
+
+        def run(reply_for):
+            orig = gq.parse_confusable_reply
+            with patch.object(gq, "parse_confusable_reply", lambda text: orig(_json.dumps(reply_for(_json.loads(text))))):
+                return self.process(project, job, "questions", build_calls=make_build_calls(), on_results=make_on_results())
+        # an unrelated reason (shares no word with passage B) and a condition that is fine: the confusable questions are dropped
+        out = run(lambda r: {**r, "confusion_reason": "zzzz qqqq unrelated"})
+        self.assertEqual(out.status, "succeeded")
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s AND quota_bucket = 'confusable'",
+                                       (bench,)).fetchone()[0], 0)
+        self.assertIn("confusable_written=0", self.audit_reason(project)[0][0])
+
+    def test_only_the_b_units_that_overlap_the_question_or_the_facts_become_distractors(self):
+        from types import SimpleNamespace as U
+        from lab_api.generate_questions import select_distractors
+        units = [U(evidence_id="near", normalized_content="The filing deadline is April 30 for small firms"),
+                 U(evidence_id="far", normalized_content="alpha beta gamma delta"),
+                 U(evidence_id="cjk", normalized_content="申報期限為四月三十日")]
+        kept = [u.evidence_id for u in select_distractors(units, "What is the filing deadline for large firms?", ["The deadline is March 31"])]
+        self.assertEqual(kept, ["near"])                                              # the unrelated units are not distractors
+        self.assertEqual([u.evidence_id for u in select_distractors(units, "申報期限是幾月？", ["三月三十一日"])], ["cjk"])
+        self.assertEqual(select_distractors(units, "zzz qqq", ["xxx"]), [])           # nothing overlaps: no distractor at all
+
     def test_the_question_hash_ignores_case_spacing_and_unicode_width(self):
         self.assertEqual(question_hash("What  is\nthe deadline?"), question_hash("what is the DEADLINE?"))
         self.assertEqual(question_hash("ＡＢＣ"), question_hash("abc"))

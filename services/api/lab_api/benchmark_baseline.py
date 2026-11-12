@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 
 import psycopg
+import psycopg.errors
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
@@ -31,6 +32,8 @@ def _run(conn: psycopg.Connection, store: LocalArtifactStore, actor_id: uuid.UUI
         raise missing from None
     except PermissionDenied as exc:
         raise ApiError(403, "permission_denied", str(exc)) from None
+    except psycopg.errors.UniqueViolation:
+        raise ApiError(409, "conflict", "another baseline run is registering the same method revision; try again") from None
     except BaselineError as exc:
         raise ApiError(409, "conflict", f"the baseline cannot run: {exc}") from None
     result["results_url"] = f"/api/v1/runs/{result['run_id']}/results?evaluation_id={result['evaluation_id']}"
