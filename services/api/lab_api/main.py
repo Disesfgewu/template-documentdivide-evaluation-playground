@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .audit import router as audit_router
+from .benchmark_baseline import router as benchmark_baseline_router
 from .benchmark_build import router as benchmark_build_router
 from .benchmark_freeze import router as benchmark_freeze_router
 from .benchmark_generate import router as benchmark_generate_router
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
     app.include_router(benchmark_build_router)
     app.include_router(benchmark_generate_router)
     app.include_router(benchmark_freeze_router)
+    app.include_router(benchmark_baseline_router)
 
     configure_openapi(app)
 
