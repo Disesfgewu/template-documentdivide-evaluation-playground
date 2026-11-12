@@ -9,7 +9,7 @@
   contracts and ``validate_bundle``; an invalid one is dropped and counted, never repaired; duplicates (by
   ``question_hash``) are dropped. Valid ones are written to questions/facts/evidence_sets/evidence_set_members and to
   ``gold_answers`` (semantic, textual, source) together with an audit event that carries counts only.
-* Only the general bucket is generated (D5: cross_page, chart_table and confusable need material this parse cannot
+* General and cross_page buckets are generated (D5: cross_page, chart_table and confusable need material this parse cannot
   prove; they are not guessed). If fewer than the plan's general target is written, the shortfall is recorded, never
   padded, and the benchmark stays in ``generating``.
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -30,11 +31,13 @@ from psycopg.types.json import Jsonb
 from lab_contracts.benchmark import (EvidenceSet, EvidenceUnit, Fact, FactSupportSet, Modality, Question, QuotaBucket,
                                      ReasoningType, ScoringRule, SemanticAnswer, SourceAnswer, TextualAnswer,
                                      target_counts, validate_bundle)
-from lab_api.generate_prompts import (DEFAULT_PAGE_CHARS, PROMPT_VERSION, ParsedReply, build_page_call, detect_language,
-                                      parse_model_reply, select_pages, shown_pieces)
+from lab_api.generate_prompts import (CROSS_PAGE_PROMPT_VERSION, DEFAULT_PAGE_CHARS, PROMPT_VERSION, CrossReply, ParsedReply,
+                                      build_cross_page_call, build_page_call, detect_language, parse_cross_page_reply,
+                                      parse_model_reply, select_page_pairs, select_pages, shown_pieces)
 from lab_api.generate_worker import CallSpec
+from lab_api.validate_questions import code_checks
 
-__all__ = ["GenerationStats", "general_target", "load_clean_pages", "make_build_calls", "make_on_results",
+__all__ = ["GenerationStats", "cross_page_target", "general_target", "load_clean_pages", "make_build_calls", "make_on_results",
            "question_hash"]
 
 MAX_UNITS_IN_PROMPT = 60
@@ -42,6 +45,7 @@ MAX_UNITS_IN_PROMPT = 60
 
 @dataclass
 class GenerationStats:
+    cross_written: int = 0
     replies: int = 0
     unparseable: int = 0
     invalid: int = 0
@@ -60,6 +64,23 @@ def general_target(page_count: int) -> int:
     """Questions the general bucket must reach: N - 3Q (the other three buckets have Q each at minimum)."""
     n, q = target_counts(page_count)
     return max(0, n - 3 * q)
+
+
+def cross_page_target(page_count: int) -> int:
+    """cross_page questions the plan asks for: Q = ceil(0.10 * N) (the minimum of each special bucket)."""
+    return target_counts(page_count)[1]
+
+
+_CROSS_ID = re.compile(r"x(\d+)-p(\d+)-p(\d+)")
+
+
+def cross_call_id(k: int, a: int, b: int) -> str:
+    return f"x{k:04d}-p{a}-p{b}"
+
+
+def parse_cross_id(cid: str):
+    m = _CROSS_ID.fullmatch(cid)
+    return None if m is None else (int(m.group(2)), int(m.group(3)))
 
 
 def load_clean_pages(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID
@@ -103,8 +124,9 @@ def parse_call_id(cid: str) -> tuple[int, int]:
 def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
     def build_calls(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID) -> Sequence[CallSpec]:
         page_count, pages, _ = load_clean_pages(conn, project_id, benchmark_id)
-        have = conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0]
-        needed = max(0, general_target(page_count) - have)
+        have = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
+                                 (benchmark_id,)).fetchall())
+        needed = max(0, general_target(page_count) - int(have.get("general", 0)))
         chosen = select_pages(sorted(pages), needed)
         seen: dict[int, int] = {}
         calls = []
@@ -113,6 +135,15 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             seen[page] = variant + 1
             units = [(u.evidence_id, u.normalized_content) for u in pages[page][:MAX_UNITS_IN_PROMPT]]
             calls.append(build_page_call(call_id(k, page), page, units, page_chars, variant))
+        # cross_page: two DIFFERENT clean text pages per call (no pair, no call, when fewer than two clean pages exist);
+        # these come last so that a budget that runs out skips them first.
+        needed_cross = max(0, cross_page_target(page_count) - int(have.get("cross_page", 0)))
+        pair_seen: dict[tuple[int, int], int] = {}
+        for k, (a_page, b_page) in enumerate(select_page_pairs(sorted(pages), needed_cross)):
+            variant = pair_seen.get((a_page, b_page), 0)
+            pair_seen[(a_page, b_page)] = variant + 1
+            pair = [(pg, [(u.evidence_id, u.normalized_content) for u in pages[pg][:MAX_UNITS_IN_PROMPT]]) for pg in (a_page, b_page)]
+            calls.append(build_cross_page_call(cross_call_id(k, a_page, b_page), pair, page_chars, variant))
         return calls
     return build_calls
 
@@ -139,6 +170,32 @@ def _derive(reply: ParsedReply, units: Sequence[EvidenceUnit], ordinal: int):
     return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
 
 
+def _derive_cross(reply: CrossReply, shown: dict[str, list[EvidenceUnit]], ordinal: int):
+    """Question, answers and source for a cross_page question. ``shown`` = {"A": units of page A actually shown, "B": ...}.
+    Each fact's support alternative is the units of the page the model attributed it to, so the contract's own check
+    (no single page may support every fact; every evidence set spans >= 2 pages) decides whether it is truly cross-page."""
+    qhash = question_hash(reply.question)
+    qid = f"q-{qhash[:24]}"
+    question = Question(
+        question_id=qid, ordinal=ordinal, question_text=reply.question, language=detect_language(reply.question),
+        tags=[], quota_bucket=QuotaBucket.cross_page, question_hash=qhash, modality_requirements=[Modality.text],
+        reasoning_type=ReasoningType.cross_page_integration, visual_object_refs=[])
+    weight = round(1.0 / len(reply.facts), 6)
+    facts = [Fact(fact_id=f"{qid}-f{i + 1}", statement=st, weight=weight, allowed_equivalences=[],
+                  scoring_rule=ScoringRule(full_credit="The answer states this fact.", partial_credit=None,
+                                           no_credit="The answer does not state this fact or contradicts it."))
+             for i, (st, _) in enumerate(reply.facts)]
+    semantic = SemanticAnswer(question_id=qid, reference_answer=reply.reference_answer, required_facts=facts,
+                              conditions=[], calculation=None)
+    all_ids = [u.evidence_id for label in ("A", "B") for u in shown[label]]
+    source = SourceAnswer(
+        question_id=qid, evidence_sets=[EvidenceSet(set_id=f"{qid}-s1", evidence_ids=all_ids)],
+        fact_support_sets=[FactSupportSet(fact_id=f.fact_id, support_sets=[[u.evidence_id for u in shown[src]]])
+                           for f, (_, src) in zip(facts, reply.facts)],
+        distractors=[], validation_refs=[])
+    return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
+
+
 def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
     def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict],
                    job_id: uuid.UUID) -> GenerationStats:
@@ -150,46 +207,83 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
         ordinal = conn.execute("SELECT COALESCE(max(ordinal) + 1, 0) FROM questions WHERE benchmark_id = %s",
                                (benchmark_id,)).fetchone()[0]
         stats = GenerationStats()
-        for row in rows:
-            if row["status"] != "ok":
-                continue
-            stats.replies += 1
-            reply = parse_model_reply(row["text"])
-            _, page = parse_call_id(row["call_id"])
-            units = pages.get(page)
-            if reply is None or not units:
-                stats.unparseable += 1
-                continue
-            # Only the units the model was ACTUALLY shown (same cut as the prompt) can be the question's source.
-            shown_ids = {eid for eid, _ in shown_pieces([(u.evidence_id, u.normalized_content) for u in units[:MAX_UNITS_IN_PROMPT]], page_chars)}
-            units = [u for u in units[:MAX_UNITS_IN_PROMPT] if u.evidence_id in shown_ids]
-            if not units:
-                stats.unparseable += 1
-                continue
-            try:
-                question, semantic, textual, source = _derive(reply, units, ordinal)
-            except Exception:
-                stats.invalid += 1
-                continue
+
+        def accept(question, semantic, textual, source, units) -> str:
+            """Validate and write one derived question: 'written', 'duplicate' or 'invalid' (never raises on bad input)."""
+            nonlocal ordinal
             if question.question_hash in existing:
-                stats.duplicate += 1
-                continue
-            problems = validate_bundle([question], [semantic], [textual], [source], {u.evidence_id: u for u in units}, {})
-            if problems:
-                stats.invalid += 1
-                continue
+                return "duplicate"
+            if validate_bundle([question], [semantic], [textual], [source], {u.evidence_id: u for u in units}, {}):
+                return "invalid"
             ids = [u.evidence_id for u in units]
             unit_rows = dict(conn.execute("SELECT evidence_key, id FROM evidence_units WHERE document_version_id = %s "
                                           "AND evidence_key = ANY(%s)", (doc_id, ids)).fetchall())
             if len(unit_rows) != len(ids):          # a unit that is not stored: skip and count, never raise and roll everything back
-                stats.invalid += 1
-                continue
+                return "invalid"
             _write(conn, project_id, benchmark_id, unit_rows, question, semantic, textual, source)
             existing.add(question.question_hash)
             ordinal += 1
-            stats.written += 1
+            return "written"
+
+        def shown_units(units: Sequence[EvidenceUnit]) -> list[EvidenceUnit]:
+            ids = {eid for eid, _ in shown_pieces([(u.evidence_id, u.normalized_content) for u in units[:MAX_UNITS_IN_PROMPT]], page_chars)}
+            return [u for u in units[:MAX_UNITS_IN_PROMPT] if u.evidence_id in ids]
+
+        for row in rows:
+            if row["status"] != "ok":
+                continue
+            stats.replies += 1
+            cross_pages = parse_cross_id(row["call_id"])
+            if cross_pages is not None:
+                reply = parse_cross_page_reply(row["text"])
+                a_units, b_units = shown_units(pages.get(cross_pages[0], [])), shown_units(pages.get(cross_pages[1], []))
+                if reply is None or not a_units or not b_units:
+                    stats.unparseable += 1
+                    continue
+                shown = {"A": a_units, "B": b_units}
+                texts = {label: "\n\n".join(piece for _, piece in shown_pieces([(u.evidence_id, u.normalized_content) for u in us], page_chars))
+                         for label, us in shown.items()}
+                # The model's claim of WHICH page a fact comes from is checked by code against the text of that page.
+                if not all(code_checks(texts[src], "", [st])["passed"] for st, src in reply.facts):
+                    stats.invalid += 1
+                    continue
+                try:
+                    derived = _derive_cross(reply, shown, ordinal)
+                except Exception:
+                    stats.invalid += 1
+                    continue
+                outcome = accept(*derived, a_units + b_units)
+                if outcome == "written":
+                    stats.cross_written += 1
+            else:
+                reply = parse_model_reply(row["text"])
+                _, page = parse_call_id(row["call_id"])
+                units = pages.get(page)
+                if reply is None or not units:
+                    stats.unparseable += 1
+                    continue
+                units = shown_units(units)         # only the units the model was ACTUALLY shown can be the source
+                if not units:
+                    stats.unparseable += 1
+                    continue
+                try:
+                    derived = _derive(reply, units, ordinal)
+                except Exception:
+                    stats.invalid += 1
+                    continue
+                outcome = accept(*derived, units)
+                if outcome == "written":
+                    stats.written += 1
+            if outcome == "duplicate":
+                stats.duplicate += 1
+            elif outcome == "invalid":
+                stats.invalid += 1
         target = general_target(page_count)
-        total = conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0]
+        by_bucket = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
+                                      (benchmark_id,)).fetchall())
+        total = int(by_bucket.get("general", 0))
+        cross_total, cross_target = int(by_bucket.get("cross_page", 0)), cross_page_target(page_count)
+        all_total = sum(int(v) for v in by_bucket.values())
         op_id = uuid.uuid4()
         conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
                      "VALUES (%s, %s, 'benchmark.questions_generated', %s, 'succeeded', now())", (op_id, project_id, actor))
@@ -198,13 +292,14 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, reason, outcome, "
             "operation_id) VALUES (%s, %s, %s, 'benchmark.questions_generated', 'benchmark_revision', %s, %s, 'succeeded', %s)",
             (uuid.uuid4(), project_id, actor, resource,
-             f"prompt={PROMPT_VERSION} bucket=general replies={stats.replies} written={stats.written} "
-             f"unparseable={stats.unparseable} invalid={stats.invalid} duplicate={stats.duplicate} "
-             f"total={total} target={target} shortfall={max(0, target - total)}", op_id))
-        if total > 0:
+             f"prompt={PROMPT_VERSION}+{CROSS_PAGE_PROMPT_VERSION} replies={stats.replies} written={stats.written} "
+             f"cross_written={stats.cross_written} unparseable={stats.unparseable} invalid={stats.invalid} "
+             f"duplicate={stats.duplicate} total={total} target={target} shortfall={max(0, target - total)} "
+             f"cross_total={cross_total} cross_target={cross_target} cross_shortfall={max(0, cross_target - cross_total)}", op_id))
+        if all_total > 0:
             # generating -> validating (PM-DECISION): never frozen, human review stays skipped; the shortfall is in the reason
             conn.execute("SELECT set_config('lab.transition_reason', %s, true)",
-                         (f"general questions generated: total={total} target={target} shortfall={max(0, target - total)}; "
+                         (f"questions generated: general={total}/{target} cross_page={cross_total}/{cross_target}; "
                           "validation pending, human review skipped",))
             conn.execute("UPDATE benchmark_revisions SET status = 'validating', row_version = row_version + 1 "
                          "WHERE id = %s AND status = 'generating'", (benchmark_id,))
