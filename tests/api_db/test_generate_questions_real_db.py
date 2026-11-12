@@ -15,7 +15,7 @@ for _sub in (_REPO, _REPO / "db", _REPO / "services" / "api", _REPO / "services"
     if _sub.exists() and str(_sub) not in sys.path:
         sys.path.insert(0, str(_sub))
 
-from lab_api.generate_questions import general_target, make_build_calls, make_on_results, question_hash
+from lab_api.generate_questions import cross_page_target, general_target, make_build_calls, make_on_results, question_hash
 from lab_contracts.benchmark import SemanticAnswer, SourceAnswer, TextualAnswer
 from lab_db.repo import grant_app_privileges
 from tests.api_db.test_generate_job_real_db import ADMIN_URL, FreshDatabase, GenerateFixtures
@@ -44,7 +44,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         project, owner, bench = self.planning_benchmark()
         with self.connect() as c:
             calls = list(make_build_calls()(c, project, bench))
-        self.assertEqual(len(calls), general_target(3))                       # N=20, Q=2 -> 14
+        self.assertEqual(len(calls), general_target(3) + cross_page_target(3))   # N=20, Q=2 -> 14 general + 2 cross_page
         pages = {c.id.split("-p")[1] for c in calls}
         self.assertEqual(pages, {"0", "2"})                                   # only the promoted pages (1 and 3 of the fixture)
         for c in calls:
@@ -56,12 +56,15 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
     def test_a_good_batch_writes_questions_facts_evidence_sets_and_all_three_gold_kinds(self):
         project, owner, bench, job, out = self.run_batch("questions")
         self.assertEqual((out.status, out.reason), ("succeeded", "generated"))
-        n = general_target(3)
-        self.assertEqual([self.count(t, bench) for t in ("questions", "facts", "evidence_sets", "gold_answers")], [n, n, n, 3 * n])
+        n, x = general_target(3), cross_page_target(3)
+        # 14 general (1 fact, 1 unit each) + 2 cross_page (2 facts, 2 units = both pages, each)
+        self.assertEqual([self.count(t, bench) for t in ("questions", "facts", "evidence_sets", "gold_answers")],
+                         [n + x, n + 2 * x, n + x, 3 * (n + x)])
         with self.connect() as c:
-            self.assertEqual(c.execute("SELECT count(DISTINCT question_hash) FROM questions WHERE benchmark_id = %s", (bench,)).fetchone()[0], n)
-            self.assertEqual({r[0] for r in c.execute("SELECT DISTINCT quota_bucket FROM questions WHERE benchmark_id = %s", (bench,))}, {"general"})
-            self.assertEqual(c.execute("SELECT count(*) FROM evidence_set_members WHERE benchmark_id = %s", (bench,)).fetchone()[0], n)
+            self.assertEqual(c.execute("SELECT count(DISTINCT question_hash) FROM questions WHERE benchmark_id = %s", (bench,)).fetchone()[0], n + x)
+            self.assertEqual(dict(c.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1", (bench,))),
+                             {"general": n, "cross_page": x})
+            self.assertEqual(c.execute("SELECT count(*) FROM evidence_set_members WHERE benchmark_id = %s", (bench,)).fetchone()[0], n + 2 * x)
             rows = c.execute("SELECT kind, payload FROM gold_answers WHERE benchmark_id = %s", (bench,)).fetchall()
         models = {"semantic": SemanticAnswer, "textual": TextualAnswer, "source": SourceAnswer}
         for kind, payload in rows:
@@ -69,7 +72,9 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         reason = self.audit_reason(project)
         self.assertEqual(len(reason), 1)
         self.assertIn(f"written={n}", reason[0][0])
+        self.assertIn(f"cross_written={x}", reason[0][0])
         self.assertIn("shortfall=0", reason[0][0])
+        self.assertIn("cross_shortfall=0", reason[0][0])
         self.assertIn("prompt=general-page-v1", reason[0][0])
         self.assertEqual(self.bench_status(bench), "validating")                     # generating -> validating, never frozen
 
@@ -78,18 +83,18 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertEqual(out.status, "succeeded")
         self.assertEqual(self.count("questions", bench), 0)
         self.assertEqual(self.bench_status(bench), "generating")                     # nothing was written: no validating
-        self.assertIn(f"unparseable={general_target(3)}", self.audit_reason(project)[0][0])
+        self.assertIn(f"unparseable={general_target(3) + cross_page_target(3)}", self.audit_reason(project)[0][0])
         self.assertIn(f"shortfall={general_target(3)}", self.audit_reason(project)[0][0])    # recorded, never padded
 
     def test_duplicate_questions_are_dropped_by_hash(self):
         project, owner, bench, job, out = self.run_batch("dupes")
-        self.assertEqual(self.count("questions", bench), 1)
-        self.assertIn(f"duplicate={general_target(3) - 1}", self.audit_reason(project)[0][0])
+        self.assertEqual(self.count("questions", bench), 2)                          # one general + one cross_page survive
+        self.assertIn(f"duplicate={general_target(3) - 1 + cross_page_target(3) - 1}", self.audit_reason(project)[0][0])
 
     def test_a_partial_batch_still_keeps_the_paid_valid_questions(self):
         project, owner, bench, job, out = self.run_batch("partial_questions")
         self.assertEqual((out.status, out.reason), ("failed", "partial_calls"))
-        self.assertEqual(self.count("questions", bench), general_target(3) - 1)      # every ok reply but the failed second call
+        self.assertEqual(self.count("questions", bench), general_target(3) - 1 + cross_page_target(3))   # all ok replies but the failed second call
 
     def test_the_source_answer_lists_only_the_units_the_model_was_shown(self):
         from lab_api.generate_prompts import shown_pieces
@@ -103,7 +108,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
             sources = c.execute("SELECT payload FROM gold_answers WHERE benchmark_id = %s AND kind = 'source'", (bench,)).fetchall()
         self.assertTrue(sources)
         for (payload,) in sources:
-            self.assertEqual(len(payload["evidence_sets"][0]["evidence_ids"]), 1)      # the fixture page is one unit, cut to 5 chars
+            self.assertIn(len(payload["evidence_sets"][0]["evidence_ids"]), (1, 2))    # one unit per page in the fixture, cut to 5 chars
 
     def test_a_unit_that_is_not_stored_skips_the_question_instead_of_raising(self):
         from unittest.mock import patch
@@ -119,7 +124,34 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
             out = self.process(project, job, "questions", build_calls=make_build_calls(), on_results=make_on_results())
         self.assertEqual((out.status, out.reason), ("succeeded", "generated"))          # the finish was not rolled back
         self.assertEqual(self.count("questions", bench), 0)
-        self.assertIn(f"invalid={general_target(3)}", self.audit_reason(project)[0][0])
+        self.assertIn(f"invalid={general_target(3) + cross_page_target(3)}", self.audit_reason(project)[0][0])
+
+    def test_cross_page_questions_span_two_pages_and_are_checked_by_the_contract_and_by_code(self):
+        project, owner, bench, job, out = self.run_batch("questions")
+        with self.connect() as c:
+            rows = c.execute("SELECT q.id, q.payload, g.payload FROM questions q JOIN gold_answers g ON g.question_id = q.id AND g.kind = 'source' "
+                             "WHERE q.benchmark_id = %s AND q.quota_bucket = 'cross_page'", (bench,)).fetchall()
+            self.assertEqual(len(rows), cross_page_target(3))
+            for qid, question, source in rows:
+                self.assertEqual(question["reasoning_type"], "cross_page_integration")
+                ids = source["evidence_sets"][0]["evidence_ids"]
+                pages = {r[0] for r in c.execute("SELECT DISTINCT er.page_index FROM evidence_units eu JOIN evidence_regions er "
+                                                  "ON er.evidence_unit_id = eu.id WHERE eu.evidence_key = ANY(%s)", (ids,))}
+                self.assertEqual(len(pages), 2)                                       # the evidence set needs both pages
+                supports = [fs["support_sets"][0] for fs in source["fact_support_sets"]]
+                self.assertEqual(len({tuple(s) for s in supports}), 2)                # one fact per page, not both on one page
+
+    def test_a_cross_page_question_whose_facts_are_not_on_the_claimed_pages_is_dropped(self):
+        project, owner, bench, job, out = self.run_batch("questions_ungrounded")
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s AND quota_bucket = 'cross_page'",
+                                       (bench,)).fetchone()[0], 0)                    # code grounding of the page attribution failed
+        self.assertIn(f"cross_written=0", self.audit_reason(project)[0][0])
+
+    def test_a_document_with_one_clean_page_gets_no_cross_page_call(self):
+        from lab_api.generate_prompts import select_page_pairs
+        self.assertEqual(select_page_pairs([3], 2), [])
+        self.assertEqual(select_page_pairs([], 2), [])
 
     def test_the_question_hash_ignores_case_spacing_and_unicode_width(self):
         self.assertEqual(question_hash("What  is\nthe deadline?"), question_hash("what is the DEADLINE?"))
@@ -142,7 +174,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
                 c.execute(f'SET LOCAL ROLE "{role}"')
                 c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
                 return c.execute("SELECT count(*) FROM gold_answers WHERE benchmark_id = %s", (bench,)).fetchone()[0]
-        n = 3 * general_target(3)
+        n = 3 * (general_target(3) + cross_page_target(3))
         self.assertEqual((visible(owner), visible(reviewer), visible(participant)), (n, n, 0))
         with self.connect() as c:
             qid = c.execute("SELECT id FROM questions WHERE benchmark_id = %s LIMIT 1", (bench,)).fetchone()[0]
@@ -175,7 +207,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         counts = worker.run_once()
         self.assertEqual(counts, {"succeeded:generated": 1})
         self.assertEqual(self.job_state(job), "succeeded")
-        self.assertEqual(self.count("questions", bench), general_target(3))
+        self.assertEqual(self.count("questions", bench), general_target(3) + cross_page_target(3))
         self.assertEqual(GenerateWorker(self.connect, lab_gen_cmd=STUB, cfg=CFG, api_key="k", name="again", interval=1,
                                         backoff=1, grace=5, once_timeout=30).run_once(), {})   # nothing left to claim
 

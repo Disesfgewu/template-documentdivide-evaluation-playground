@@ -14,7 +14,7 @@ for _sub in (_REPO, _REPO / "db", _REPO / "services" / "api", _REPO / "services"
         sys.path.insert(0, str(_sub))
 
 from lab_api import generate_questions as gq, validate_questions as vq
-from lab_api.generate_questions import general_target
+from lab_api.generate_questions import cross_page_target, general_target
 from lab_db.generation import GenerationError
 from lab_db.repo import PermissionDenied
 from tests.api_db.test_generate_job_real_db import ADMIN_URL, FreshDatabase, GenerateFixtures
@@ -50,7 +50,7 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         project, owner, bench = self.generated()
         job, out = self.validate(project, owner, bench, "validate_ok")
         self.assertEqual((out.status, out.reason), ("succeeded", "generated"))
-        n = general_target(3)
+        n = general_target(3) + cross_page_target(3)
         self.assertEqual(self.verdicts(bench), ["pass"] * n)
         self.assertEqual(self.bench_status(bench), "validating")                      # never ready_to_freeze/frozen here
         with self.connect() as c:
@@ -69,7 +69,7 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
     def test_the_whole_flow_works_for_a_non_superuser_worker_role_under_row_level_security(self):
         role = self.app_role()
         project, owner, bench = self.generated(role=role)          # generation, writing gold, as the application role
-        n = general_target(3)
+        n = general_target(3) + cross_page_target(3)
         job, out = self.validate(project, owner, bench, "validate_ok", role=role)
         self.assertEqual((out.status, out.reason), ("succeeded", "generated"))     # build_calls could read gold_answers
         self.assertEqual(self.verdicts(bench), ["pass"] * n)
@@ -103,7 +103,7 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
     def test_questions_are_never_deleted_and_decided_ones_are_not_validated_again(self):
         project, owner, bench = self.generated()
         self.validate(project, owner, bench, "validate_mixed")
-        n = general_target(3)
+        n = general_target(3) + cross_page_target(3)
         self.assertEqual(self.count_q(bench), n)
         job2, out2 = self.validate(project, owner, bench, "validate_ok")             # nothing left to validate
         self.assertEqual((out2.status, out2.reason), ("failed", "no_calls"))
@@ -147,7 +147,7 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
                 c.execute(f'SET LOCAL ROLE "{role}"')
                 c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
                 return c.execute("SELECT count(*) FROM question_validations WHERE benchmark_id = %s", (bench,)).fetchone()[0]
-        n = general_target(3)
+        n = general_target(3) + cross_page_target(3)
         self.assertEqual((visible(owner), visible(reviewer), visible(participant)), (n, n, 0))
 
     def count_q(self, bench):
