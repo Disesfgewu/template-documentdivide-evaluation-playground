@@ -153,6 +153,33 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertEqual(select_page_pairs([3], 2), [])
         self.assertEqual(select_page_pairs([], 2), [])
 
+    def test_a_cross_page_source_answer_lists_only_the_units_that_were_shown(self):
+        from unittest.mock import patch
+        import lab_api.generate_questions as gq
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=BIG)
+        real = gq.load_clean_pages
+
+        def with_unshown_unit(conn, p, b):
+            count, pages, doc = real(conn, p, b)
+            # a second unit on every page that the per-page cap hides; it is NOT stored in the database, so if it were listed
+            # as a source the question would be dropped as invalid
+            extra = {k: v + [v[0].model_copy(update={"evidence_id": "unshown-" + v[0].evidence_id,
+                                                      "normalized_content": "beyond the cap"})] for k, v in pages.items()}
+            return count, extra, doc
+        with patch.object(gq, "load_clean_pages", with_unshown_unit):
+            out = self.process(project, job, "questions", build_calls=make_build_calls(page_chars=len("Text on page 1")),
+                               on_results=make_on_results(page_chars=len("Text on page 1")))
+        self.assertEqual((out.status, out.reason), ("succeeded", "generated"))
+        with self.connect() as c:
+            sources = c.execute("SELECT g.payload FROM gold_answers g JOIN questions q ON q.id = g.question_id "
+                                "WHERE q.benchmark_id = %s AND q.quota_bucket = 'cross_page' AND g.kind = 'source'", (bench,)).fetchall()
+        self.assertEqual(len(sources), cross_page_target(3))
+        for (payload,) in sources:
+            ids = payload["evidence_sets"][0]["evidence_ids"]
+            self.assertEqual(len(ids), 2)                                              # one shown unit per page
+            self.assertFalse([i for i in ids if i.startswith("unshown-")])
+
     def test_the_question_hash_ignores_case_spacing_and_unicode_width(self):
         self.assertEqual(question_hash("What  is\nthe deadline?"), question_hash("what is the DEADLINE?"))
         self.assertEqual(question_hash("ＡＢＣ"), question_hash("abc"))

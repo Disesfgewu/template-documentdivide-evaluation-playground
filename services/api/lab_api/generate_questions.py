@@ -9,9 +9,10 @@
   contracts and ``validate_bundle``; an invalid one is dropped and counted, never repaired; duplicates (by
   ``question_hash``) are dropped. Valid ones are written to questions/facts/evidence_sets/evidence_set_members and to
   ``gold_answers`` (semantic, textual, source) together with an audit event that carries counts only.
-* General and cross_page buckets are generated (D5: cross_page, chart_table and confusable need material this parse cannot
-  prove; they are not guessed). If fewer than the plan's general target is written, the shortfall is recorded, never
-  padded, and the benchmark stays in ``generating``.
+* The general and cross_page buckets are generated; chart_table and confusable need material this parse cannot prove and are not
+  guessed (D5). cross_page needs two DIFFERENT clean text pages: with fewer there is no pair and no call. A shortfall of either
+  bucket (the plan's general target N-3Q, or Q for cross_page) is recorded in the audit event and the transition reason, never
+  padded; the benchmark moves to ``validating`` as soon as at least one question exists, whatever the shortfall.
 
 KNOWN LIMITATION: a question that can be answered without the page (general knowledge) is not detected yet; the later
 independent validation slice is where that is checked. Human review stays 'skipped'."""

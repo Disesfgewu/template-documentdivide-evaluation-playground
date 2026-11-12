@@ -12,6 +12,7 @@ validator's self-report and is not a proof that a question cannot be answered wi
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 import uuid
@@ -22,6 +23,8 @@ from psycopg.types.json import Jsonb
 
 from lab_api.generate_prompts import DEFAULT_PAGE_CHARS, shown_by_page
 from lab_api.generate_worker import CallSpec
+
+LOG = logging.getLogger("lab.validate_questions")
 
 __all__ = ["VALIDATOR_REVISION", "VALIDATION_PROMPT_VERSION", "code_checks", "make_build_calls", "make_on_results",
            "parse_validator_reply", "verdict_for"]
@@ -126,6 +129,11 @@ def _question_rows(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id
             "JOIN evidence_regions er ON er.evidence_unit_id = eu.id AND er.ordinal = 0 "
             "WHERE eu.document_version_id = %s AND eu.evidence_key = ANY(%s)", (doc, ids)).fetchall()}
         units = [(i, found[i][0], found[i][1]) for i in ids if i in found]      # (evidence id, text, page)
+        if len(units) != len(ids):
+            # A source unit without a stored region (or a missing row) would silently shrink the evidence the validator
+            # sees and could turn a good question into a fail: leave the question UNVALIDATED (it blocks a freeze) and say so.
+            LOG.warning("question %s: %d of %d source units cannot be loaded; not validated", qid, len(ids) - len(units), len(ids))
+            continue
         out.append((qid, ordinal, text, semantic["reference_answer"], [f["statement"] for f in semantic["required_facts"]], units))
     return out
 
