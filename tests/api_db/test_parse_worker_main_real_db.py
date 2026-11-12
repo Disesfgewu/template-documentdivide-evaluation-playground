@@ -302,6 +302,17 @@ class ParseWorkerMainRealDbTests(FreshDatabase):
             self.assertTrue(worker.forced)
             self.assertEqual(self.status(job)[0], "running")   # left to lease expiry, fenced
         release.set()
+        # Issue #162: the stuck job thread is still alive here. Once released it parses and stores its result under the artifact
+        # root, so the temp directory must not be removed (test cleanup) while it runs: that was the sporadic
+        # "OSError: [Errno 39] Directory not empty". Wait until the worker has dropped that job from its in-flight set.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with worker._lock:
+                if not worker._inflight:
+                    break
+            time.sleep(0.05)
+        with worker._lock:
+            self.assertFalse(worker._inflight, "the released job thread did not finish; cleaning the temp directory now would race it")
 
     def test_a_forced_worker_exits_the_process_with_status_1(self):
         from lab_api import parse_worker_main as module
