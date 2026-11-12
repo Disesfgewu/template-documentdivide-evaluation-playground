@@ -22,7 +22,9 @@ import hashlib
 import json
 import logging
 import os
+import signal
 import subprocess
+import threading
 import time
 import uuid
 from typing import Callable, Optional, Sequence
@@ -30,7 +32,7 @@ from typing import Callable, Optional, Sequence
 import psycopg
 
 from lab_db import jobs
-from lab_db.generation import benchmark_budget, record_llm_calls, request_sha256, worst_case_micros
+from lab_db.generation import record_llm_calls, request_sha256, reserve_batch, worst_case_micros
 from lab_api.parse_worker import ParseOutcome, _Heartbeat, _stopped, _unreachable, is_infrastructure
 
 LOG = logging.getLogger("lab.generate_worker")
@@ -131,48 +133,101 @@ def parse_lab_gen_output(data: bytes, calls: Sequence[CallSpec], *, model: str, 
     return {"status": status, "reason": str(out.get("reason", ""))[:200], "calls": rows}
 
 
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)          # the child leads its own session/group: kill everything it spawned
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def run_lab_gen(cmd: Sequence[str], payload: dict, *, key: Optional[str], timeout: float,
-                cancelled: Callable[[], bool] = lambda: False, extra_env: Optional[dict] = None) -> tuple[Optional[bytes], str]:
+                cancelled: Callable[[], bool] = lambda: False, extra_env: Optional[dict] = None,
+                max_stdout: int = MAX_STDOUT_BYTES) -> tuple[Optional[bytes], str]:
     """Run the child with the JSON payload on stdin. Returns ``(stdout, "")`` or ``(None, reason)`` where reason is
     ``timeout`` | ``cancelled`` | ``exit_<code>`` | ``spawn_failed`` | ``output_too_large``. The child gets a minimal
-    environment (PATH, the key, test extras) and never the parent's other secrets."""
+    environment (PATH, the key, test extras) and never the parent's other secrets; it runs in its own process group,
+    which is killed on timeout, cancel or oversized output; stdout is read in chunks and never buffered past the cap."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
     if key:
         env[KEY_ENV] = key
     env.update(extra_env or {})
     try:
-        proc = subprocess.Popen(list(cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+        proc = subprocess.Popen(list(cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                env=env, start_new_session=True)
     except OSError:
         return None, "spawn_failed"
-    deadline = time.monotonic() + timeout
-    data = json.dumps(payload).encode("utf-8")
-    first = True
-    while True:
+    chunks: list[bytes] = []
+    state = {"size": 0, "over": False}
+
+    def pump():
+        while True:
+            block = proc.stdout.read(65536)
+            if not block:
+                return
+            state["size"] += len(block)
+            if state["size"] > max_stdout:
+                state["over"] = True
+                return
+            chunks.append(block)
+
+    def feed():
         try:
-            stdout, _ = proc.communicate(input=data if first else None, timeout=0.2)
+            proc.stdin.write(json.dumps(payload).encode("utf-8"))
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    threads = [threading.Thread(target=pump, daemon=True), threading.Thread(target=feed, daemon=True)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + timeout
+    reason = ""
+    while proc.poll() is None:
+        if state["over"]:
+            reason = "output_too_large"
+        elif cancelled():
+            reason = "cancelled"
+        elif time.monotonic() > deadline:
+            reason = "timeout"
+        if reason:
+            _kill_group(proc)
             break
-        except subprocess.TimeoutExpired:
-            first = False
-            reason = "cancelled" if cancelled() else "timeout" if time.monotonic() > deadline else ""
-            if reason:
-                proc.kill()
-                proc.communicate()
-                return None, reason
+        time.sleep(0.05)
+    proc.wait()
+    for t in threads:
+        t.join(timeout=5)
+    for stream in (proc.stdout, proc.stdin):
+        try:
+            stream.close()
+        except OSError:
+            pass
+    if reason:
+        return None, reason
+    if state["over"]:
+        return None, "output_too_large"
     if proc.returncode != 0:
         return None, f"exit_{proc.returncode}"
-    if len(stdout) > MAX_STDOUT_BYTES:
-        return None, "output_too_large"
-    return stdout, ""
+    return b"".join(chunks), ""
 
 
-def _unknown_batch(calls: Sequence[CallSpec], model: str, cfg: GenModelConfig, cap_tokens: int) -> list[dict]:
-    """The batch result is lost: hold the worst case of every call (some may have been sent), never zero."""
-    return [{"call_id": c.id, "status": "outcome_unknown", "reason": "batch result lost", "usage_known": False,
-             "input_tokens": 0, "output_tokens": 0, "charged_micros": -1, "attempts": 0,
-             "held_micros": worst_case_micros(len((c.system + c.user).encode("utf-8")), cap_tokens,
-                                              cfg.input_micros_per_mtok, cfg.output_micros_per_mtok),
+def _unknown_rows(reserved: Sequence[tuple[CallSpec, int]], model: str, reason: str) -> list[dict]:
+    """The batch result is lost: settle each reserved call as outcome_unknown, holding exactly what was reserved."""
+    return [{"call_id": c.id, "status": "outcome_unknown", "reason": reason, "usage_known": False, "input_tokens": 0,
+             "output_tokens": 0, "charged_micros": -1, "attempts": 0, "held_micros": worst,
              "request_sha256": request_sha256(model, c.system, c.user), "response_length": 0, "response_sha256": None}
-            for c in calls]
+            for c, worst in reserved]
+
+
+def _released_rows(reserved: Sequence[tuple[CallSpec, int]], model: str, reason: str) -> list[dict]:
+    """No call was made (lab-gen refused before any network use): release the holds, charge nothing."""
+    return [{"call_id": c.id, "status": "skipped_after_stop", "reason": reason, "usage_known": False, "input_tokens": 0,
+             "output_tokens": 0, "charged_micros": -1, "attempts": 0, "held_micros": 0,
+             "request_sha256": request_sha256(model, c.system, c.user), "response_length": 0, "response_sha256": None}
+            for c, _ in reserved]
 
 
 def process_generate_job(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID, *, worker: str,
@@ -203,6 +258,7 @@ def process_generate_job(conn: psycopg.Connection, project_id: uuid.UUID, job_id
     except Exception as exc:
         if is_infrastructure(exc):
             return _unreachable(job_id)
+        LOG.warning("job %s: internal error (%s)", job_id, type(exc).__name__)   # the type only, never a message
         try:
             return _fail(conn, project_id, lease, "internal_error")
         except jobs.LeaseLost:
@@ -224,58 +280,77 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     with conn.transaction():
         row = conn.execute(
             "SELECT g.benchmark_id, g.model, g.max_output_tokens, g.budget_cap_micros, g.currency, g.pricing_revision, "
-            "b.status::text FROM generate_jobs g JOIN benchmark_revisions b ON b.project_id = g.project_id AND b.id = g.benchmark_id "
+            "b.status::text, j.attempt FROM generate_jobs g JOIN benchmark_revisions b ON b.project_id = g.project_id "
+            "AND b.id = g.benchmark_id JOIN jobs j ON j.project_id = g.project_id AND j.id = g.job_id "
             "WHERE g.project_id = %s AND g.job_id = %s", (project_id, job_id)).fetchone()
     if row is None:
         return _fail(conn, project_id, lease, "generate_job_missing")
-    benchmark_id, model, cap_tokens, cap_micros, currency, pricing_rev, bench_status = row
+    benchmark_id, model, cap_tokens, cap_micros, currency, pricing_rev, bench_status, attempt = row
     if bench_status != "generating":
         return _fail(conn, project_id, lease, "benchmark_not_generating")
     calls = list(build_calls(conn, project_id, benchmark_id))
     if not calls:
         return _fail(conn, project_id, lease, "no_calls")
-    state = benchmark_budget(conn, project_id, benchmark_id, cap_micros)
-    if state.remaining <= 0:                       # fail-closed: nothing is spawned, nothing can be spent
+    worst = {c.id: worst_case_micros(len((c.system + c.user).encode("utf-8")), cap_tokens, cfg.input_micros_per_mtok,
+                                     cfg.output_micros_per_mtok) for c in calls}
+    # Reserve BEFORE spawning (one transaction, per-benchmark lock): a worker that dies after this point leaves its
+    # holds in the ledger, so a retry sees the reduced budget; calls that do not fit are never sent (fail-closed).
+    sendable, hold_total = reserve_batch(
+        conn, project_id, benchmark_id, lease.job_id, attempt, cap_micros, model, currency, pricing_rev,
+        [(c.id, request_sha256(model, c.system, c.user), worst[c.id]) for c in calls])
+    if not sendable:
         return _fail(conn, project_id, lease, "budget_exhausted")
+    send = [c for c in calls if c.id in set(sendable)]
+    reserved = [(c, worst[c.id]) for c in send]
     payload = {
         "model": {"name": model, "protocol": cfg.protocol, "base_url": cfg.base_url, "allowed_host": cfg.allowed_host,
                   "max_output_tokens": cap_tokens, "input_micros_per_mtok": cfg.input_micros_per_mtok,
                   "output_micros_per_mtok": cfg.output_micros_per_mtok, "currency": currency,
                   "pricing_revision": pricing_rev, "timeout_seconds": cfg.timeout_seconds, "max_retries": cfg.max_retries,
                   "requests_per_minute": cfg.requests_per_minute},
-        "budget": {"limit_micros": state.remaining},
-        "calls": [{"id": c.id, "system": c.system, "user": c.user} for c in calls]}
+        "budget": {"limit_micros": hold_total},
+        "calls": [{"id": c.id, "system": c.system, "user": c.user} for c in send]}
     with _Heartbeat(connect, project_id, lease, ttl) as beat:
-        stdout, why = run_lab_gen(cmd, payload, key=api_key, timeout=child_timeout, cancelled=lambda: beat.lost.is_set() or (shutdown is not None and shutdown()),
+        stdout, why = run_lab_gen(cmd, payload, key=api_key, timeout=child_timeout,
+                                  cancelled=lambda: beat.lost.is_set() or (shutdown is not None and shutdown()),
                                   extra_env=extra_env)
     parsed = None
     if stdout is not None:
         try:
-            parsed = parse_lab_gen_output(stdout, calls, model=model, max_output_tokens=cap_tokens,
-                                          budget_limit=state.remaining)
+            parsed = parse_lab_gen_output(stdout, send, model=model, max_output_tokens=cap_tokens, budget_limit=hold_total)
         except LabGenOutputInvalid as exc:
             why = f"invalid_output:{exc}"
-    record = lambda c, rows: record_llm_calls(c, project_id, benchmark_id, job_id, model, currency, pricing_rev, rows)  # noqa: E731
+
+    def record(c, rows):
+        record_llm_calls(c, project_id, benchmark_id, job_id, attempt, model, currency, pricing_rev, rows)
+
     if parsed is not None and parsed["status"] == "refused":
-        return _fail(conn, project_id, lease, "lab_gen_refused")         # no call was made: nothing to record
+        # No call was made: release the holds (fenced, together with the job's final status).
+        jobs.finish(conn, project_id, lease, "failed", "lab_gen_refused",
+                    hook=lambda c: record(c, _released_rows(reserved, model, "lab-gen refused before any call")))
+        return ParseOutcome(job_id, "failed", "lab_gen_refused")
     if parsed is None:
-        rows = _unknown_batch(calls, model, cfg, cap_tokens)
-        with conn.transaction():                                         # unfenced and idempotent: holds, never zero
-            record(conn, rows)
+        rows = _unknown_rows(reserved, model, "batch result lost")
         if beat.lost.is_set():
+            with conn.transaction():          # the holds exist already; this only labels them (same attempt, idempotent)
+                record(conn, rows)
             raise jobs.LeaseLost()
         if why == "cancelled" and shutdown is not None and shutdown():
-            # The worker is stopping: the child was killed and the batch is held. Give the job back for the next worker
-            # (fenced); a user cancel wins (LeaseLost -> acknowledged by the caller).
+            with conn.transaction():
+                record(conn, rows)
+            # The worker is stopping: the child was killed and the batch stays held. Give the job back for the next
+            # worker (fenced); a user cancel wins (LeaseLost -> acknowledged by the caller).
             if jobs.release_for_shutdown(conn, project_id, lease) == "failed":
                 return ParseOutcome(job_id, "failed", "lease_exhausted")
             return ParseOutcome(job_id, "queued", "released: worker shutdown")
-        return _fail(conn, project_id, lease, "lab_gen_failed")
+        jobs.finish(conn, project_id, lease, "failed", "lab_gen_failed", hook=lambda c: record(c, rows))
+        return ParseOutcome(job_id, "failed", "lab_gen_failed")
     rows = parsed["calls"]
     ok = parsed["status"] == "ok"
+    plain = [{k: v for k, v in r.items() if k != "text"} for r in rows]
 
     def hook(c):
-        record(c, [{k: v for k, v in r.items() if k != "text"} for r in rows])
+        record(c, plain)
         if on_results is not None and ok:
             on_results(c, project_id, benchmark_id, rows)
 
@@ -284,6 +359,6 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
                     "generated" if ok else "partial_calls", hook=hook)
     except jobs.LeaseLost:
         with conn.transaction():                                         # the paid result must not be lost
-            record(conn, [{k: v for k, v in r.items() if k != "text"} for r in rows])
+            record(conn, plain)
         raise
     return ParseOutcome(job_id, "succeeded" if ok else "failed", "generated" if ok else "partial_calls")
