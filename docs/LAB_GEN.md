@@ -146,3 +146,15 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **驗證階段**：驗題 prompt 對跨頁題每頁一個 `<evidence page=…>` 區塊、每頁各自的字元上限；程式的接地檢查對象是兩頁實際送出的文字合併。
 - **限制**：「這題真的需要兩頁」目前由契約的結構檢查加上 fact 對頁面的接地檢查把關，**沒有**做移除某頁後是否仍可回答的實測（necessity ablation 屬於之後的工作）。
 - API：`GET .../generate` 多回 `cross_page_target` 與 `by_bucket`，`shortfall` 為兩個 bucket 缺額的總和；稽核事件與轉換原因帶 `cross_total/cross_target`。
+
+## confusable 題目（有干擾項，Refs #7；PM 的下一項）
+
+- **何時生成**：同一批呼叫裡，在 general 與 cross_page 之後再加 Q 題 confusable；需要兩個不同的乾淨文字頁（頁 A 回答、頁 B 是看起來相似的干擾來源，兩頁輪流當 A）。
+  少於兩頁就沒有配對、不呼叫，缺額如實記錄。沒有新的 migration（`distractors` 表早已存在，與 facts 同一套 gold RLS）。
+- **prompt**（`confusable-v1`，固定在程式裡）：A、B 各自框成資料並各自套字元上限、不送任何識別碼；模型回 ≤ 500 token 的 JSON：題目（必須只靠 A 就能答）、參考答案、1–3 個 fact、
+  `confusion_reason`（B 裡什麼看起來像答案但不是）、`disambiguating_condition`（區分 A 與 B 的細節）。
+- **程式導出與檢查**：gold 證據組 = 頁 A 實際送出的單位；頁 B 實際送出的每個單位都成為 distractor（附同一組 reason 與 condition），所以契約的檢查成立：
+  `confusable_without_distractor`（至少一個干擾項）、`distractor_is_gold`（干擾項不能是 gold）。程式再檢查三件事，不過就丟棄並計入 invalid：
+  fact 與答案必須能在頁 A 的送出文字裡接地；`disambiguating_condition` 必須能在頁 A 文字或題目裡接地；頁 B **不可**同樣支持這些 fact 與答案
+  （否則那是第二個來源，不是干擾項）。reasoning_type 為 `value_lookup`；`conditions` 帶 disambiguating_condition。
+- **限制**：「這個干擾項真的會讓人答錯」目前只有上述結構與接地檢查，沒有用模型或人去實測；chart_table 仍然不生成（D5）。

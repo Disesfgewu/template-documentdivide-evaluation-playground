@@ -9,7 +9,7 @@
   contracts and ``validate_bundle``; an invalid one is dropped and counted, never repaired; duplicates (by
   ``question_hash``) are dropped. Valid ones are written to questions/facts/evidence_sets/evidence_set_members and to
   ``gold_answers`` (semantic, textual, source) together with an audit event that carries counts only.
-* The general and cross_page buckets are generated; chart_table and confusable need material this parse cannot prove and are not
+* The general, cross_page and confusable buckets are generated; chart_table needs material this parse cannot prove and is not
   guessed (D5). cross_page needs two DIFFERENT clean text pages: with fewer there is no pair and no call. A shortfall of either
   bucket (the plan's general target N-3Q, or Q for cross_page) is recorded in the audit event and the transition reason, never
   padded; the benchmark moves to ``validating`` as soon as at least one question exists, whatever the shortfall.
@@ -29,16 +29,16 @@ from typing import Callable, Sequence
 import psycopg
 from psycopg.types.json import Jsonb
 
-from lab_contracts.benchmark import (EvidenceSet, EvidenceUnit, Fact, FactSupportSet, Modality, Question, QuotaBucket,
+from lab_contracts.benchmark import (Distractor, EvidenceSet, EvidenceUnit, Fact, FactSupportSet, Modality, Question, QuotaBucket,
                                      ReasoningType, ScoringRule, SemanticAnswer, SourceAnswer, TextualAnswer,
                                      target_counts, validate_bundle)
-from lab_api.generate_prompts import (CROSS_PAGE_PROMPT_VERSION, DEFAULT_PAGE_CHARS, PROMPT_VERSION, CrossReply, ParsedReply,
-                                      build_cross_page_call, build_page_call, detect_language, parse_cross_page_reply,
+from lab_api.generate_prompts import (CONFUSABLE_PROMPT_VERSION, CROSS_PAGE_PROMPT_VERSION, DEFAULT_PAGE_CHARS, ConfusableReply, PROMPT_VERSION, CrossReply, ParsedReply,
+                                      build_confusable_call, build_cross_page_call, build_page_call, parse_confusable_reply, detect_language, parse_cross_page_reply,
                                       parse_model_reply, select_page_pairs, select_pages, shown_pieces)
 from lab_api.generate_worker import CallSpec
 from lab_api.validate_questions import code_checks
 
-__all__ = ["GenerationStats", "cross_page_target", "general_target", "load_clean_pages", "make_build_calls", "make_on_results",
+__all__ = ["GenerationStats", "confusable_target", "cross_page_target", "general_target", "load_clean_pages", "make_build_calls", "make_on_results",
            "question_hash"]
 
 MAX_UNITS_IN_PROMPT = 60
@@ -46,6 +46,7 @@ MAX_UNITS_IN_PROMPT = 60
 
 @dataclass
 class GenerationStats:
+    confusable_written: int = 0
     cross_written: int = 0
     replies: int = 0
     unparseable: int = 0
@@ -72,11 +73,26 @@ def cross_page_target(page_count: int) -> int:
     return target_counts(page_count)[1]
 
 
+def confusable_target(page_count: int) -> int:
+    """confusable questions the plan asks for: Q, as for cross_page."""
+    return target_counts(page_count)[1]
+
+
 _CROSS_ID = re.compile(r"x(\d+)-p(\d+)-p(\d+)")
+_CONF_ID = re.compile(r"c(\d+)-a(\d+)-d(\d+)")
 
 
 def cross_call_id(k: int, a: int, b: int) -> str:
     return f"x{k:04d}-p{a}-p{b}"
+
+
+def confusable_call_id(k: int, answer_page: int, distractor_page: int) -> str:
+    return f"c{k:04d}-a{answer_page}-d{distractor_page}"
+
+
+def parse_confusable_id(cid: str):
+    m = _CONF_ID.fullmatch(cid)
+    return None if m is None else (int(m.group(2)), int(m.group(3)))
 
 
 def parse_cross_id(cid: str):
@@ -145,6 +161,16 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             pair_seen[(a_page, b_page)] = variant + 1
             pair = [(pg, [(u.evidence_id, u.normalized_content) for u in pages[pg][:MAX_UNITS_IN_PROMPT]]) for pg in (a_page, b_page)]
             calls.append(build_cross_page_call(cross_call_id(k, a_page, b_page), pair, page_chars, variant))
+        # confusable: passage A answers, passage B is the similar-looking distractor (two different clean text pages; the
+        # roles alternate so both pages serve as the answer page); last of all, so a budget that runs out skips them first.
+        needed_conf = max(0, confusable_target(page_count) - int(have.get("confusable", 0)))
+        conf_seen: dict[tuple[int, int], int] = {}
+        for k, (p1, p2) in enumerate(select_page_pairs(sorted(pages), needed_conf)):
+            a_page, d_page = (p1, p2) if k % 2 == 0 else (p2, p1)
+            variant = conf_seen.get((a_page, d_page), 0)
+            conf_seen[(a_page, d_page)] = variant + 1
+            pair = [(pg, [(u.evidence_id, u.normalized_content) for u in pages[pg][:MAX_UNITS_IN_PROMPT]]) for pg in (a_page, d_page)]
+            calls.append(build_confusable_call(confusable_call_id(k, a_page, d_page), pair, page_chars, variant))
         return calls
     return build_calls
 
@@ -197,6 +223,32 @@ def _derive_cross(reply: CrossReply, shown: dict[str, list[EvidenceUnit]], ordin
     return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
 
 
+def _derive_confusable(reply: ConfusableReply, answer_units: Sequence[EvidenceUnit], distractor_units: Sequence[EvidenceUnit], ordinal: int):
+    """Question, answers and source for a confusable question: the gold is the units of page A that were shown; every shown unit
+    of page B is a distractor with the model's reason and disambiguating condition (checked against the text by the caller)."""
+    qhash = question_hash(reply.question)
+    qid = f"q-{qhash[:24]}"
+    question = Question(
+        question_id=qid, ordinal=ordinal, question_text=reply.question, language=detect_language(reply.question),
+        tags=[], quota_bucket=QuotaBucket.confusable, question_hash=qhash, modality_requirements=[Modality.text],
+        reasoning_type=ReasoningType.value_lookup, visual_object_refs=[])
+    weight = round(1.0 / len(reply.facts), 6)
+    facts = [Fact(fact_id=f"{qid}-f{i + 1}", statement=st, weight=weight, allowed_equivalences=[],
+                  scoring_rule=ScoringRule(full_credit="The answer states this fact.", partial_credit=None,
+                                           no_credit="The answer does not state this fact or contradicts it."))
+             for i, st in enumerate(reply.facts)]
+    semantic = SemanticAnswer(question_id=qid, reference_answer=reply.reference_answer, required_facts=facts,
+                              conditions=[reply.disambiguating_condition], calculation=None)
+    ids = [u.evidence_id for u in answer_units]
+    source = SourceAnswer(
+        question_id=qid, evidence_sets=[EvidenceSet(set_id=f"{qid}-s1", evidence_ids=ids)],
+        fact_support_sets=[FactSupportSet(fact_id=f.fact_id, support_sets=[ids]) for f in facts],
+        distractors=[Distractor(evidence_id=u.evidence_id, confusion_reason=reply.confusion_reason,
+                                disambiguating_condition=reply.disambiguating_condition) for u in distractor_units],
+        validation_refs=[])
+    return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
+
+
 def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
     def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict],
                    job_id: uuid.UUID) -> GenerationStats:
@@ -234,8 +286,33 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             if row["status"] != "ok":
                 continue
             stats.replies += 1
+            conf_pages = parse_confusable_id(row["call_id"])
             cross_pages = parse_cross_id(row["call_id"])
-            if cross_pages is not None:
+            if conf_pages is not None:
+                reply = parse_confusable_reply(row["text"])
+                a_units, d_units = shown_units(pages.get(conf_pages[0], [])), shown_units(pages.get(conf_pages[1], []))
+                if reply is None or not a_units or not d_units:
+                    stats.unparseable += 1
+                    continue
+                join = lambda us: "\n\n".join(piece for _, piece in shown_pieces([(u.evidence_id, u.normalized_content) for u in us], page_chars))  # noqa: E731
+                text_a, text_b = join(a_units), join(d_units)
+                grounded = code_checks(text_a, reply.reference_answer, list(reply.facts))["passed"]
+                # the condition that tells A from B must come from what the model was shown (the question or passage A) ...
+                condition_ok = code_checks(text_a + "\n" + reply.question, "", [reply.disambiguating_condition])["passed"]
+                # ... and B must NOT support the same facts, or it is not a distractor but a second source
+                b_also_supports = code_checks(text_b, reply.reference_answer, list(reply.facts))["passed"]
+                if not grounded or not condition_ok or b_also_supports:
+                    stats.invalid += 1
+                    continue
+                try:
+                    derived = _derive_confusable(reply, a_units, d_units, ordinal)
+                except Exception:
+                    stats.invalid += 1
+                    continue
+                outcome = accept(*derived, a_units + d_units)
+                if outcome == "written":
+                    stats.confusable_written += 1
+            elif cross_pages is not None:
                 reply = parse_cross_page_reply(row["text"])
                 a_units, b_units = shown_units(pages.get(cross_pages[0], [])), shown_units(pages.get(cross_pages[1], []))
                 if reply is None or not a_units or not b_units:
@@ -284,6 +361,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                                       (benchmark_id,)).fetchall())
         total = int(by_bucket.get("general", 0))
         cross_total, cross_target = int(by_bucket.get("cross_page", 0)), cross_page_target(page_count)
+        conf_total, conf_target = int(by_bucket.get("confusable", 0)), confusable_target(page_count)
         all_total = sum(int(v) for v in by_bucket.values())
         op_id = uuid.uuid4()
         conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
@@ -293,14 +371,15 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, reason, outcome, "
             "operation_id) VALUES (%s, %s, %s, 'benchmark.questions_generated', 'benchmark_revision', %s, %s, 'succeeded', %s)",
             (uuid.uuid4(), project_id, actor, resource,
-             f"prompt={PROMPT_VERSION}+{CROSS_PAGE_PROMPT_VERSION} replies={stats.replies} written={stats.written} "
-             f"cross_written={stats.cross_written} unparseable={stats.unparseable} invalid={stats.invalid} "
+             f"prompt={PROMPT_VERSION}+{CROSS_PAGE_PROMPT_VERSION}+{CONFUSABLE_PROMPT_VERSION} replies={stats.replies} "
+             f"written={stats.written} cross_written={stats.cross_written} confusable_written={stats.confusable_written} unparseable={stats.unparseable} invalid={stats.invalid} "
              f"duplicate={stats.duplicate} total={total} target={target} shortfall={max(0, target - total)} "
-             f"cross_total={cross_total} cross_target={cross_target} cross_shortfall={max(0, cross_target - cross_total)}", op_id))
+             f"cross_total={cross_total} cross_target={cross_target} cross_shortfall={max(0, cross_target - cross_total)} "
+             f"confusable_total={conf_total} confusable_target={conf_target} confusable_shortfall={max(0, conf_target - conf_total)}", op_id))
         if all_total > 0:
             # generating -> validating (PM-DECISION): never frozen, human review stays skipped; the shortfall is in the reason
             conn.execute("SELECT set_config('lab.transition_reason', %s, true)",
-                         (f"questions generated: general={total}/{target} cross_page={cross_total}/{cross_target}; "
+                         (f"questions generated: general={total}/{target} cross_page={cross_total}/{cross_target} confusable={conf_total}/{conf_target}; "
                           "validation pending, human review skipped",))
             conn.execute("UPDATE benchmark_revisions SET status = 'validating', row_version = row_version + 1 "
                          "WHERE id = %s AND status = 'generating'", (benchmark_id,))
@@ -326,6 +405,9 @@ def _write(conn, project_id, benchmark_id, unit_rows: dict, q: Question, sem: Se
         for ev in s.evidence_ids:
             conn.execute("INSERT INTO evidence_set_members (evidence_set_id, benchmark_id, evidence_unit_id) VALUES (%s, %s, %s)",
                          (set_row, benchmark_id, unit_rows[ev]))
+    for d in src.distractors:
+        conn.execute("INSERT INTO distractors (question_id, benchmark_id, evidence_unit_id, confusion_reason, disambiguating_condition) "
+                     "VALUES (%s, %s, %s, %s, %s)", (qrow, benchmark_id, unit_rows[d.evidence_id], d.confusion_reason, d.disambiguating_condition))
     for kind, model in (("semantic", sem), ("textual", tex), ("source", src)):
         conn.execute("INSERT INTO gold_answers (id, benchmark_id, question_id, kind, payload) VALUES (%s, %s, %s, %s, %s)",
                      (uuid.uuid4(), benchmark_id, qrow, kind, Jsonb(json.loads(model.model_dump_json()))))

@@ -9,7 +9,7 @@
   frozen set is immutable and children are never removed. The owner has to resolve it (validate again, or start a new
   revision) before freezing;
 * compliance is ``partial``: human review was skipped by the owner's scope (D6) and the quota buckets are incomplete
-  (chart_table and confusable are not generated, general/cross_page may be short); ``compliant`` is refused.
+  (chart_table is not generated, the other buckets may be short); ``compliant`` is refused.
 The database gate (migration 0017) enforces the same rules for every writer; this endpoint reports them as clean 409/403s.
 The response lists what is missing against N and Q and states that the verdicts are automated by the generator's own model."""
 from __future__ import annotations
@@ -84,7 +84,7 @@ def _freeze(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID
                                            actor_id)
             transition_benchmark(conn, project_id, benchmark_id, version, "frozen",
                                  f"frozen by the owner as PARTIAL: questions={n_questions}/{n_target}; human review skipped; "
-                                 "chart_table and confusable not generated", actor_id, compliance="partial")
+                                 "chart_table not generated", actor_id, compliance="partial")
             frozen_at = conn.execute("SELECT frozen_at FROM benchmark_revisions WHERE id = %s", (benchmark_id,)).fetchone()[0]
     except FreezeIneligible as exc:
         raise ApiError(409, "conflict", str(exc).split("\n")[0]) from None

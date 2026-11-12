@@ -40,7 +40,16 @@ for i, c in enumerate(inp["calls"]):
             n = 0 if mode == "dupes" else i
             blocks = [b.split(">", 1)[1].strip().splitlines()[0] for b in c["user"].split("</evidence>") if "<evidence" in b]
             body = blocks[0] if blocks else ""
-            if c["id"].startswith("x"):             # a cross_page call: two passages A and B
+            if c["id"].startswith("c"):             # a confusable call: passage A answers, passage B is the distractor
+                a_line, b_line = (blocks + ["", ""])[:2]
+                if mode == "questions_ungrounded":
+                    a_line = f"item {n} of the document"
+                text = json.dumps({"question": f"Which statement says {a_line} (variant {n})?",
+                                   "reference_answer": a_line, "facts": [{"statement": a_line}],
+                                   "confusion_reason": f"The other passage says {b_line}, which looks similar.",
+                                   "disambiguating_condition": a_line})
+                answer = None
+            elif c["id"].startswith("x"):             # a cross_page call: two passages A and B
                 a_line, b_line = (blocks + ["", ""])[:2]
                 if mode == "questions_ungrounded":
                     a_line, b_line = f"item {n} of the document", f"other item {n} of the document"
