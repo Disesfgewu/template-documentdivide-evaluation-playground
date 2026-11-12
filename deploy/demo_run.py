@@ -332,6 +332,47 @@ def main() -> int:
             print(json.dumps(vstarted))
             failures.append("validation start")
 
+    banner("8. Freeze (owner only, honestly PARTIAL) and 9. run the local lexical baseline on the frozen benchmark")
+    if os.environ.get("DEMO_GENERATE") != "1" or no_key or path or any(f in failures for f in ("generation", "generation start", "validation", "validation start")):
+        print("SKIPPED (generation and validation did not complete, so there is nothing to freeze). A skipped step is not a pass.")
+    else:
+        code, frozen = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/freeze?project_id={project}",
+                                json.dumps({"compliance": "partial"}).encode(), "application/json")
+        if code != 200:
+            print(f"POST .../freeze -> {code}: {(frozen.get('error') or {}).get('message', frozen)}")
+            print("NOT FROZEN: a freeze needs a passing automated validation for EVERY question; nothing is excluded or deleted. "
+                  "The baseline run needs a frozen benchmark, so it is skipped. This is an honest outcome of the model's output, "
+                  "not a demo failure.")
+        else:
+            print(f"frozen as {frozen['compliance'].upper()}: {frozen['questions']} questions (N target {frozen['n_target']}), "
+                  f"shortfall {frozen['shortfall']}; human review {frozen['human_review']}")
+            for line in frozen["limits"]:
+                print(f"  - {line}")
+            code, run = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/baseline-run?project_id={project}", b"{}", "application/json")
+            print(f"POST .../baseline-run -> {code}")
+            if code != 201:
+                print(json.dumps(run))
+                failures.append("baseline run")
+            else:
+                _, res = api.call("GET", f"/api/v1/runs/{run['run_id']}/results?evaluation_id={run['evaluation_id']}")
+                print(f"run {run['status']}, evaluation {run['evaluation_status']} (local lexical page retrieval, no model)")
+                for m in res.get("metrics", []):
+                    print(f"  {m['metric_name']:<22} scored {m['scored']:>3}  not_applicable {m['not_applicable']:>3}  pending {m['pending']:>3}  "
+                          f"mean {m['mean'] if m['mean'] is not None else '-'}")
+                names = {m["metric_name"]: m for m in res.get("metrics", [])}
+                for line in run["limits"]:
+                    print(f"  - {line}")
+                checks = [
+                    (run["status"] == "completed", "the baseline run completed"),
+                    (names.get("recall_at_k", {}).get("scored") == run["questions"], "recall_at_k was scored for every question"),
+                    (names.get("correctness", {}).get("scored") == 0 and names.get("correctness", {}).get("pending") == run["questions"],
+                     "correctness is pending for every question (semantic judge not run; never guessed as a number)"),
+                ]
+                for ok, meaning in checks:
+                    print(f"[{'ok' if ok else 'FAIL'}] {meaning}")
+                    if not ok:
+                        failures.append("baseline")
+
     banner("Try it yourself")
     print(f"export TOKEN={token}")
     print(f"curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:${{LAB_API_PORT:-8000}}/api/v1/documents/{document}/parse-results/{job['job_id']}/pages/2")

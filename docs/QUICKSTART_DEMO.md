@@ -53,6 +53,7 @@ scripts/demo.sh down        # 看完再停掉並刪除示範資料
 已花費、held、剩餘）、前 5 題的題目文字，以及 5 個檢查。
 
 - **第 7 步（接著第 6 步）**：對同一個 benchmark 呼叫 `POST .../validate`，每題多一次呼叫（預設再 0.20 美元的額度上限，實際只花幾美分），印出 pass／fail／needs_review 的題數、帳本與 4 個檢查。驗證是**自動**的、與生成者是**同一個模型**（不是強意義的獨立）；fail 的題目仍留在 benchmark 裡，benchmark 維持 `validating`，不會 frozen；人工審核是 skipped。
+- **第 8、9 步**：只有在第 6、7 步完成時才會做。第 8 步由 owner 把 benchmark **凍結為 partial**（每一題都要有 pass 的自動驗證才凍得成；有任何 fail／needs_review 就印出原因並跳過第 9 步，這是模型輸出的誠實結果，不是 demo 失敗）；第 9 步在凍結的 benchmark 上跑本機的詞彙檢索 baseline（不呼叫模型），印出 `recall_at_k`、`complete_at_k`、`localization_precision`（整頁區域，數字本來就低）、`textual_consistency`（不適用），以及 `correctness`、citation、`faithfulness`（**pending**：語意 judge 沒有跑，絕不猜成數字或 0）。評估是 provisional。
 - **沒有 key**：第 6 步印 `SKIPPED (no API key)`，整個執行以 `RESULT: SKIPPED (no API key)` 和結束碼 3 結束，**不是 PASS**；步驟 1–5 照常執行。
 - 用到 `./.env` 的 key 時腳本會印 `using the API key from ./.env (not shown)`；key 只傳進 generate-worker 容器的環境，不進映像、不寫檔、不印出。
 - 印出的題目前面會有標籤「synthetic document, model-generated, NOT human-reviewed, not a verified benchmark」；每題的來源頁在消費者 API 不公開，所以這裡不顯示。

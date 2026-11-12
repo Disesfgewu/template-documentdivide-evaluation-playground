@@ -43,7 +43,7 @@ for i, c in enumerate(inp["calls"]):
                 answer, fact = f"It says item {n}.", f"The document states item {n}."
             else:                                   # grounded: the answer and the fact are the first line of the shown page
                 answer, fact = body, body
-            text = json.dumps({"question": f"What does statement number {n} of the document say?",
+            text = json.dumps({"question": f"What does statement number {n} of the document say about {body}?",
                                "reference_answer": answer, "facts": [{"statement": fact}]})
     if mode.startswith("validate") and c["id"].startswith("v"):
         flags = {"supported": True, "answerable_from_evidence": True, "needs_outside_context": False}

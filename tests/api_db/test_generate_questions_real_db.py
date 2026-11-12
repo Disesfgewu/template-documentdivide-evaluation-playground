@@ -83,8 +83,8 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
 
     def test_duplicate_questions_are_dropped_by_hash(self):
         project, owner, bench, job, out = self.run_batch("dupes")
-        self.assertEqual(self.count("questions", bench), 1)
-        self.assertIn(f"duplicate={general_target(3) - 1}", self.audit_reason(project)[0][0])
+        self.assertEqual(self.count("questions", bench), 2)                          # n is always 0: only the two page texts differ
+        self.assertIn(f"duplicate={general_target(3) - 2}", self.audit_reason(project)[0][0])
 
     def test_a_partial_batch_still_keeps_the_paid_valid_questions(self):
         project, owner, bench, job, out = self.run_batch("partial_questions")

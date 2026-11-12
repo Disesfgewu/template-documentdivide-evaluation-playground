@@ -21,6 +21,8 @@
 !contracts/lab_contracts/**
 !services/parser/lab_parser
 !services/parser/lab_parser/**
+!scoring/lab_scoring
+!scoring/lab_scoring/**
 !services/api/lab_api
 !services/api/lab_api/**
 !services/worker/agentflow

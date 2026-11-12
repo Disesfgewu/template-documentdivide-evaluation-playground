@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONPATH="/app/services/api:/app/db:/app/contracts:/app/services/parser"
+    PYTHONPATH="/app/services/api:/app/db:/app/contracts:/app/services/parser:/app/scoring"
 
 # Dedicated unprivileged non-root user and group (UID/GID 10001:10001)
 RUN groupadd -g 10001 lab \
@@ -30,6 +30,7 @@ RUN pip install --no-cache-dir \
 COPY db/lab_db /app/db/lab_db
 COPY contracts/lab_contracts /app/contracts/lab_contracts
 COPY services/parser/lab_parser /app/services/parser/lab_parser
+COPY scoring/lab_scoring /app/scoring/lab_scoring
 COPY services/api/lab_api /app/services/api/lab_api
 
 WORKDIR /app/services/api
