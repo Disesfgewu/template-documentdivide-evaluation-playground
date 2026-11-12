@@ -21,6 +21,7 @@ CREATE TABLE generate_jobs (
     pricing_revision    text NOT NULL CHECK (length(pricing_revision) BETWEEN 1 AND 128),
     created_at          timestamptz NOT NULL DEFAULT now(),
     UNIQUE (project_id, operation_id),
+    UNIQUE (project_id, job_id),
     FOREIGN KEY (project_id, job_id) REFERENCES jobs(project_id, id) ON DELETE RESTRICT,
     FOREIGN KEY (project_id, benchmark_id) REFERENCES benchmark_revisions(project_id, id) ON DELETE RESTRICT,
     FOREIGN KEY (project_id, operation_id) REFERENCES operations(project_id, id) ON DELETE RESTRICT
