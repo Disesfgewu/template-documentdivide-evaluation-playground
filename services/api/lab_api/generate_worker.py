@@ -280,13 +280,13 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     with conn.transaction():
         row = conn.execute(
             "SELECT g.benchmark_id, g.model, g.max_output_tokens, g.budget_cap_micros, g.currency, g.pricing_revision, "
-            "b.status::text, j.attempt FROM generate_jobs g JOIN benchmark_revisions b ON b.project_id = g.project_id "
+            "b.status::text, j.attempt, g.phase FROM generate_jobs g JOIN benchmark_revisions b ON b.project_id = g.project_id "
             "AND b.id = g.benchmark_id JOIN jobs j ON j.project_id = g.project_id AND j.id = g.job_id "
             "WHERE g.project_id = %s AND g.job_id = %s", (project_id, job_id)).fetchone()
     if row is None:
         return _fail(conn, project_id, lease, "generate_job_missing")
-    benchmark_id, model, cap_tokens, cap_micros, currency, pricing_rev, bench_status, attempt = row
-    if bench_status != "generating":
+    benchmark_id, model, cap_tokens, cap_micros, currency, pricing_rev, bench_status, attempt, phase = row
+    if bench_status != ("generating" if phase == "generate" else "validating"):
         return _fail(conn, project_id, lease, "benchmark_not_generating")
     calls = list(build_calls(conn, project_id, benchmark_id))
     if not calls:

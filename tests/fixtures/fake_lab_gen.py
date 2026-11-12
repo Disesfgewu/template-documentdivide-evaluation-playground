@@ -33,14 +33,26 @@ for i, c in enumerate(inp["calls"]):
     r = {"id": c["id"], "status": "ok", "usage_known": True, "input_tokens": 5, "output_tokens": 20, "charged_micros": cost(5, 20),
          "held_micros": 0, "transport_attempts": 1, "request_sha256": req}
     text = f"reply {i}"
-    if mode in ("questions", "dupes", "badjson", "partial_questions"):
+    if mode in ("questions", "questions_ungrounded", "dupes", "badjson", "partial_questions"):
         if mode == "badjson":
             text = "I cannot comply."
         else:
             n = 0 if mode == "dupes" else i
+            body = c["user"].split(">", 1)[1].split("</evidence>")[0].strip().splitlines()[0] if "<evidence" in c["user"] else ""
+            if mode == "questions_ungrounded":
+                answer, fact = f"It says item {n}.", f"The document states item {n}."
+            else:                                   # grounded: the answer and the fact are the first line of the shown page
+                answer, fact = body, body
             text = json.dumps({"question": f"What does statement number {n} of the document say?",
-                               "reference_answer": f"It says item {n}.",
-                               "facts": [{"statement": f"The document states item {n}."}]})
+                               "reference_answer": answer, "facts": [{"statement": fact}]})
+    if mode.startswith("validate") and c["id"].startswith("v"):
+        flags = {"supported": True, "answerable_from_evidence": True, "needs_outside_context": False}
+        if mode == "validate_mixed":
+            if i % 3 == 1:
+                flags["supported"] = False
+            elif i % 3 == 2:
+                flags["needs_outside_context"] = True
+        text = "no json here" if mode == "validate_garbage" else json.dumps(flags)
     r["text"], r["text_sha256"] = text, hashlib.sha256(text.encode()).hexdigest()
     if mode == "unknown_usage":
         r.update(usage_known=False, input_tokens=0, output_tokens=0, charged_micros=-1, held_micros=worst)

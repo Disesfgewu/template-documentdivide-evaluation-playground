@@ -64,8 +64,9 @@ def request_sha256(model: str, system: str, user: str) -> str:
 def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, actor_id: uuid.UUID,
                          benchmark_id: uuid.UUID, model: str, max_output_tokens: int, budget_cap_micros: int,
                          currency: str, pricing_revision: str,
-                         max_attempts: int = DEFAULT_GENERATE_MAX_ATTEMPTS) -> uuid.UUID:
-    """Queue a generation job and move the benchmark ``planning -> generating``.
+                         max_attempts: int = DEFAULT_GENERATE_MAX_ATTEMPTS, phase: str = "generate") -> uuid.UUID:
+    """Queue a generation job and move the benchmark ``planning -> generating``; with ``phase="validate"`` queue a
+    validation job instead (the benchmark must be ``validating`` and keeps that status).
 
     Authorized here for ``build_edit_freeze`` (owner/maintainer; non-member ``NotFound``, other roles
     ``PermissionDenied``). The cap above 500 output tokens is refused before anything is written."""
@@ -73,6 +74,8 @@ def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, act
         raise GenerationError("max_output_tokens_out_of_range")
     if budget_cap_micros <= 0:
         raise GenerationError("budget_cap_must_be_positive")
+    if phase not in ("generate", "validate"):
+        raise GenerationError("unknown_phase")
     job_id, op_id = uuid.uuid4(), uuid.uuid4()
     with conn.transaction():
         decision = authorize(conn, project_id, actor_id, "build_edit_freeze")
@@ -83,8 +86,9 @@ def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, act
                              "FOR UPDATE", (project_id, benchmark_id)).fetchone()
         if bench is None:
             raise NotFound("benchmark")
-        if bench[0] != "planning":
-            raise GenerationError("benchmark_is_not_in_planning")
+        needed = "planning" if phase == "generate" else "validating"
+        if bench[0] != needed:
+            raise GenerationError(f"benchmark_is_not_in_{needed}")
         if conn.execute("SELECT 1 FROM benchmark_parse_sources WHERE benchmark_id = %s", (benchmark_id,)).fetchone() is None:
             raise GenerationError("benchmark_has_no_pinned_parse")
         active = conn.execute(
@@ -99,14 +103,16 @@ def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, act
                      "VALUES (%s, %s, 'document.generate', 'queued', %s, true)", (job_id, project_id, max_attempts))
         conn.execute(
             "INSERT INTO generate_jobs (job_id, project_id, benchmark_id, operation_id, requested_by, model, "
-            "max_output_tokens, budget_cap_micros, currency, pricing_revision) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "max_output_tokens, budget_cap_micros, currency, pricing_revision, phase) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (job_id, project_id, benchmark_id, op_id, actor_id, model, max_output_tokens, budget_cap_micros, currency,
-             pricing_revision))
+             pricing_revision, phase))
         conn.execute(
             "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, outcome, operation_id) "
-            "VALUES (%s, %s, %s, 'generate.requested', 'generate_job', %s, 'succeeded', %s)",
-            (uuid.uuid4(), project_id, actor_id, job_id, op_id))
-        transition_benchmark(conn, project_id, benchmark_id, bench[1], "generating", "generation job queued", actor_id)
+            "VALUES (%s, %s, %s, %s, 'generate_job', %s, 'succeeded', %s)",
+            (uuid.uuid4(), project_id, actor_id, "generate.requested" if phase == "generate" else "validate.requested", job_id, op_id))
+        if phase == "generate":
+            transition_benchmark(conn, project_id, benchmark_id, bench[1], "generating", "generation job queued", actor_id)
     return job_id
 
 

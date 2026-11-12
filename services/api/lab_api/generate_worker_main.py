@@ -26,6 +26,7 @@ import uuid
 import psycopg
 
 from .config import load_settings
+from . import validate_questions
 from .generate_questions import make_build_calls, make_on_results
 from .generate_worker import GenModelConfig, process_generate_job
 from .parse_worker import ParseOutcome
@@ -63,11 +64,16 @@ class GenerateWorker(Worker):
         self.lab_gen_cmd, self.cfg, self.api_key, self.child_timeout = lab_gen_cmd, cfg, api_key, child_timeout
         self.extra_env = extra_env      # tests only (the fake child's mode); production passes nothing
         self.build_calls, self.on_results = make_build_calls(), make_on_results()
+        self.validate_build_calls, self.validate_on_results = validate_questions.make_build_calls(), validate_questions.make_on_results()
 
     def _process(self, conn, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome:
+        phase = conn.execute("SELECT phase FROM generate_jobs WHERE project_id = %s AND job_id = %s",
+                             (project_id, job_id)).fetchone()
+        validating = phase is not None and phase[0] == "validate"
         return process_generate_job(
             conn, project_id, job_id, worker=self.name, lab_gen_cmd=self.lab_gen_cmd, cfg=self.cfg,
-            build_calls=self.build_calls, connect=self.connect, api_key=self.api_key, on_results=self.on_results,
+            build_calls=self.validate_build_calls if validating else self.build_calls, connect=self.connect,
+            api_key=self.api_key, on_results=self.validate_on_results if validating else self.on_results,
             ttl_seconds=self.ttl, child_timeout=self.child_timeout, extra_env=self.extra_env, shutdown=self.abort.is_set)
 
 
