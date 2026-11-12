@@ -269,6 +269,12 @@ def process_generate_job(conn: psycopg.Connection, project_id: uuid.UUID, job_id
             raise
 
 
+def _pseudo_row(call_id: str, status: str) -> dict:
+    """A result row for a call that produced no reply (never sent, refused, or lost): the answering method records the question
+    from it. It is NOT written to llm_calls (the ledger already holds the reservation or the settlement)."""
+    return {"call_id": call_id, "status": status, "text": "", "usage_known": False, "input_tokens": 0, "output_tokens": 0}
+
+
 def _fail(conn, project_id, lease, code) -> ParseOutcome:
     jobs.finish(conn, project_id, lease, "failed", code)
     return ParseOutcome(lease.job_id, "failed", code)
@@ -286,14 +292,18 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     if row is None:
         return _fail(conn, project_id, lease, "generate_job_missing")
     benchmark_id, model, cap_tokens, cap_micros, currency, pricing_rev, bench_status, attempt, phase = row
-    if bench_status != ("generating" if phase == "generate" else "validating"):
-        return _fail(conn, project_id, lease, "benchmark_not_generating" if phase == "generate" else "benchmark_not_validating")
+    expected = {"generate": "generating", "validate": "validating", "answer": "frozen"}[phase]
+    if bench_status != expected:
+        return _fail(conn, project_id, lease, {"generate": "benchmark_not_generating", "validate": "benchmark_not_validating",
+                                               "answer": "benchmark_not_frozen"}[phase])
+    answer = phase == "answer"
     actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE project_id = %s AND job_id = %s",
                          (project_id, job_id)).fetchone()[0]
     with conn.transaction():
         # Gold tables are under row level security: reading them (and writing results) happens as the job's requester,
         # an owner or maintainer, exactly like the API call that queued the job.
-        conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
+        if not answer:      # the answering method's participant phase runs with the actor UNSET (its hook unsets it itself)
+            conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
         calls = list(build_calls(conn, project_id, benchmark_id))
     if not calls:
         return _fail(conn, project_id, lease, "no_calls")
@@ -304,9 +314,16 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     sendable, hold_total = reserve_batch(
         conn, project_id, benchmark_id, lease.job_id, attempt, cap_micros, model, currency, pricing_rev,
         [(c.id, request_sha256(model, c.system, c.user), worst[c.id]) for c in calls])
+    sent_ids = set(sendable)
+    # rows for the calls that were never sent (the answering method records those questions as budget failures)
+    skipped_rows = [_pseudo_row(c.id, "skipped_budget") for c in calls if c.id not in sent_ids]
     if not sendable:
+        if answer and on_results is not None:
+            jobs.finish(conn, project_id, lease, "failed", "budget_exhausted",
+                        hook=lambda c: on_results(c, project_id, benchmark_id, skipped_rows, job_id))
+            return ParseOutcome(job_id, "failed", "budget_exhausted")
         return _fail(conn, project_id, lease, "budget_exhausted")
-    send = [c for c in calls if c.id in set(sendable)]
+    send = [c for c in calls if c.id in sent_ids]
     reserved = [(c, worst[c.id]) for c in send]
     payload = {
         "model": {"name": model, "protocol": cfg.protocol, "base_url": cfg.base_url, "allowed_host": cfg.allowed_host,
@@ -332,8 +349,11 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
 
     if parsed is not None and parsed["status"] == "refused":
         # No call was made: release the holds (fenced, together with the job's final status).
-        jobs.finish(conn, project_id, lease, "failed", "lab_gen_refused",
-                    hook=lambda c: record(c, _released_rows(reserved, model, "lab-gen refused before any call")))
+        def refused_hook(c):
+            record(c, _released_rows(reserved, model, "lab-gen refused before any call"))
+            if answer and on_results is not None:
+                on_results(c, project_id, benchmark_id, [_pseudo_row(r.id, "failed") for r, _ in reserved] + skipped_rows, job_id)
+        jobs.finish(conn, project_id, lease, "failed", "lab_gen_refused", hook=refused_hook)
         return ParseOutcome(job_id, "failed", "lab_gen_refused")
     if parsed is None:
         rows = _unknown_rows(reserved, model, "batch result lost")
@@ -349,7 +369,11 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
             if jobs.release_for_shutdown(conn, project_id, lease) == "failed":
                 return ParseOutcome(job_id, "failed", "lease_exhausted")
             return ParseOutcome(job_id, "queued", "released: worker shutdown")
-        jobs.finish(conn, project_id, lease, "failed", "lab_gen_failed", hook=lambda c: record(c, rows))
+        def failed_hook(c):
+            record(c, rows)
+            if answer and on_results is not None:      # every question still gets its submission, as an unknown outcome
+                on_results(c, project_id, benchmark_id, [_pseudo_row(r.id, "outcome_unknown") for r, _ in reserved] + skipped_rows, job_id)
+        jobs.finish(conn, project_id, lease, "failed", "lab_gen_failed", hook=failed_hook)
         return ParseOutcome(job_id, "failed", "lab_gen_failed")
     rows = parsed["calls"]
     ok = parsed["status"] == "ok"
@@ -358,8 +382,9 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     def hook(c):
         record(c, plain)
         if on_results is not None:
-            c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
-            on_results(c, project_id, benchmark_id, rows, job_id)   # only 'ok' rows carry text; a partial batch is not wasted
+            if not answer:
+                c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
+            on_results(c, project_id, benchmark_id, rows + (skipped_rows if answer else []), job_id)   # only 'ok' rows carry text
 
     try:
         jobs.finish(conn, project_id, lease, "succeeded" if ok else "failed",

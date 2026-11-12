@@ -26,7 +26,7 @@ import uuid
 import psycopg
 
 from .config import load_settings
-from . import validate_questions
+from . import answer_run, validate_questions
 from .generate_questions import make_build_calls, make_on_results
 from .generate_worker import GenModelConfig, process_generate_job
 from .parse_worker import ParseOutcome
@@ -59,17 +59,27 @@ def load_gen_config(env) -> tuple[GenModelConfig | None, str | None, str]:
 class GenerateWorker(Worker):
     KIND = "document.generate"
 
-    def __init__(self, connect, *, lab_gen_cmd, cfg: GenModelConfig, api_key: str, child_timeout: float = 600.0, extra_env: dict | None = None, **kw):
-        super().__init__(connect, None, **kw)
+    def __init__(self, connect, *, lab_gen_cmd, cfg: GenModelConfig, api_key: str, child_timeout: float = 600.0,
+                 extra_env: dict | None = None, store=None, **kw):
+        super().__init__(connect, store, **kw)
         self.lab_gen_cmd, self.cfg, self.api_key, self.child_timeout = lab_gen_cmd, cfg, api_key, child_timeout
         self.extra_env = extra_env      # tests only (the fake child's mode); production passes nothing
         self.build_calls, self.on_results = make_build_calls(), make_on_results()
         self.validate_build_calls, self.validate_on_results = validate_questions.make_build_calls(), validate_questions.make_on_results()
 
     def _process(self, conn, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome:
-        phase = conn.execute("SELECT phase FROM generate_jobs WHERE project_id = %s AND job_id = %s",
-                             (project_id, job_id)).fetchone()
-        validating = phase is not None and phase[0] == "validate"
+        row = conn.execute("SELECT phase, run_id FROM generate_jobs WHERE project_id = %s AND job_id = %s",
+                           (project_id, job_id)).fetchone()
+        phase = row[0] if row else "generate"
+        if phase == "answer":
+            if self.store is None:
+                raise RuntimeError("the artifact store is required for answer jobs (LAB_ARTIFACT_ROOT)")
+            build, results = answer_run.make_answer_hooks(self.store, row[1])
+            return process_generate_job(
+                conn, project_id, job_id, worker=self.name, lab_gen_cmd=self.lab_gen_cmd, cfg=self.cfg, build_calls=build,
+                connect=self.connect, api_key=self.api_key, on_results=results, ttl_seconds=self.ttl,
+                child_timeout=self.child_timeout, extra_env=self.extra_env, shutdown=self.abort.is_set)
+        validating = phase == "validate"
         return process_generate_job(
             conn, project_id, job_id, worker=self.name, lab_gen_cmd=self.lab_gen_cmd, cfg=self.cfg,
             build_calls=self.validate_build_calls if validating else self.build_calls, connect=self.connect,
@@ -104,7 +114,9 @@ def main(argv: list[str] | None = None, env=None) -> int:
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, on_signal)
-    worker = GenerateWorker(lambda: psycopg.connect(url, connect_timeout=5), lab_gen_cmd=[(env or os.environ)["LAB_GEN_BIN"]],
+    from lab_db.storage import LocalArtifactStore
+    store = LocalArtifactStore(settings.artifact_root)
+    worker = GenerateWorker(lambda: psycopg.connect(url, connect_timeout=5), lab_gen_cmd=[(env or os.environ)["LAB_GEN_BIN"]], store=store,
                             cfg=cfg, api_key=key, child_timeout=args.child_timeout, name=f"generate-worker-{uuid.uuid4().hex[:8]}",
                             concurrency=1, interval=args.interval, grace=args.grace, backoff=args.backoff, stop=stop,
                             once_timeout=args.once_timeout, heartbeat_file=args.heartbeat_file)
