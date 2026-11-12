@@ -351,8 +351,8 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
 
     def hook(c):
         record(c, plain)
-        if on_results is not None and ok:
-            on_results(c, project_id, benchmark_id, rows)
+        if on_results is not None:
+            on_results(c, project_id, benchmark_id, rows)   # only 'ok' rows carry text; a partial batch is not wasted
 
     try:
         jobs.finish(conn, project_id, lease, "succeeded" if ok else "failed",
