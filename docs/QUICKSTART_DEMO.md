@@ -39,6 +39,28 @@ API 的互動文件在 `http://127.0.0.1:8000/docs`（需要 `run` 印出的 Bea
 
 最後印出 `RESULT: PASS`（以及可直接複製的 `curl` 範例與 token）；任何預期不成立就是 `FAIL` 並以非零結束碼結束。
 
+## 用真實模型生成題目（選用，你自己的 key，約幾美分）
+
+```bash
+# key 只放在你自己的環境變數；也可以不設，腳本會（不印出）讀根目錄 .env 的 ANTHROPIC_API_KEY
+LAB_GEN_API_KEY=sk-ant-... scripts/demo.sh generate
+scripts/demo.sh down        # 看完再停掉並刪除示範資料
+```
+
+`generate` 會先做和 `all` 一樣的 up 與 run（四個步驟），再多啟動 `generate-worker`（第一次會 build，含一個 Go 的 `lab-gen`，需要網路下載
+固定版本的 agentKit），然後第 6 步：對示範文件的 benchmark 呼叫 `POST .../generate`（模型 `claude-haiku-4-5-20251001`，每次呼叫最多
+**500** 個輸出 token，預設預算上限 200000 micro-USD = 0.20 美元），等 worker 做完，印出：job 狀態、題數對目標、帳本（各狀態的呼叫數、
+已花費、held、剩餘）、前 5 題的題目文字，以及 5 個檢查。
+
+- **沒有 key**：第 6 步印 `SKIPPED (no API key)`，整個執行以 `RESULT: SKIPPED (no API key)` 和結束碼 3 結束，**不是 PASS**；步驟 1–5 照常執行。
+- 用到 `./.env` 的 key 時腳本會印 `using the API key from ./.env (not shown)`；key 只傳進 generate-worker 容器的環境，不進映像、不寫檔、不印出。
+- 印出的題目前面會有標籤「synthetic document, model-generated, NOT human-reviewed, not a verified benchmark」；每題的來源頁在消費者 API 不公開，所以這裡不顯示。
+- **CI 從不呼叫真實模型**；這一步只在你手動執行時才會花錢。價格預設是 Haiku 的公開牌價（1 與 5 美元每百萬 token，未獨立查證），可用
+  `LAB_GEN_PRICE_IN_MICROS_PER_MTOK`／`LAB_GEN_PRICE_OUT_MICROS_PER_MTOK` 覆寫。
+- **只生成 general 題**（示範文件 6 頁、3 個乾淨頁，目標 14 題）；cross_page、chart_table、confusable 因這個 parse 沒有足夠證據而不猜。
+  題目還沒有獨立驗證，人工審核是 **skipped**，所以這些題目不是「已驗證」的 benchmark。
+- 預算用盡或某次呼叫失敗時，job 會是 `failed`，已付費的呼叫仍留在帳本裡；用量未知的呼叫以最壞情況 hold，不當作免費。
+
 ## 這個 demo **不是**什麼（誠實的範圍）
 
 - 這是**後端解析路徑加到題庫規劃**：上傳 → 解析 → 逐頁結果 API → 建立題庫並讀素材規劃。**還沒有**出題（LLM）、凍結題庫、兩種方法比較、評分（見 `docs/PARSE_TO_BENCHMARK.md` 的缺口與待決定事項）。
