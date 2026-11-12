@@ -6,6 +6,7 @@
 !deploy/api.Dockerfile
 !deploy/parser.Dockerfile
 !deploy/worker.Dockerfile
+!deploy/generate-worker.Dockerfile
 
 # Allow exact locked dependencies needed by COPY
 !services/api/requirements.lock
@@ -22,6 +23,8 @@
 !services/parser/lab_parser/**
 !services/api/lab_api
 !services/api/lab_api/**
+!services/worker/agentflow
+!services/worker/agentflow/**
 
 # Ensure secrets, caches, private modules, staff tools, and logs are denied everywhere
 **/__pycache__

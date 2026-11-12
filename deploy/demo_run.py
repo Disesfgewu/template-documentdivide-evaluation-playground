@@ -239,6 +239,52 @@ def main() -> int:
         print(f"[FAIL] upload of the long document -> {status}")
         failures.append("cancel upload")
 
+    banner("6. Generate questions with the real model (opt-in; needs your key, costs a few cents)")
+    if os.environ.get("DEMO_GENERATE") != "1":
+        print("SKIPPED (not requested): run `scripts/demo.sh generate` with LAB_GEN_API_KEY to generate questions. "
+              "A skipped step is not a pass.")
+    elif path:
+        print("SKIPPED: generation is demonstrated on the synthetic document only.")
+    else:
+        model = os.environ.get("DEMO_GEN_MODEL", "claude-haiku-4-5-20251001")
+        cap = int(os.environ.get("DEMO_GEN_BUDGET_MICROS", "200000"))
+        code, started = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/generate?project_id={project}",
+                                 json.dumps({"model": model, "budget_cap_micros": cap}).encode(), "application/json")
+        print(f"POST .../generate -> {code}; model {model}, <= {started.get('max_output_tokens')} output tokens per call, "
+              f"budget cap {cap} micro-USD, general target {started.get('general_target')} questions")
+        progress = {}
+        if code == 202:
+            deadline = time.monotonic() + float(os.environ.get("DEMO_GEN_TIMEOUT", "900"))
+            while time.monotonic() < deadline:
+                _, progress = api.call("GET", f"/api/v1/benchmarks/{bench_name}/revisions/1/generate?project_id={project}")
+                if (progress.get("job") or {}).get("status") in ("succeeded", "failed", "cancelled"):
+                    break
+                time.sleep(3)
+            job_status = (progress.get("job") or {}).get("status")
+            ledger = progress.get("ledger") or {}
+            print(f"job {job_status}; questions {progress.get('questions')} / target {progress.get('general_target')} "
+                  f"(shortfall {progress.get('shortfall')})")
+            print(f"ledger: calls {ledger.get('calls_by_state')}, spent {ledger.get('spent_micros')} micro-USD, "
+                  f"held {ledger.get('held_micros')}, remaining {ledger.get('remaining_micros')}")
+            print(f"last generation: {progress.get('last_generation')}")
+            _, listing = api.call("GET", f"/api/v1/benchmarks/{bench_name}/revisions/1/questions?project_id={project}&limit=5")
+            for item in (listing or {}).get("items", [])[:5]:
+                print(f"  Q{item.get('ordinal', 0) + 1}: {item.get('question_text')}")
+            checks = [
+                (job_status == "succeeded", "the generation job succeeded"),
+                (int(progress.get("questions") or 0) > 0, "at least one question was generated"),
+                (int(ledger.get("spent_micros") or 0) > 0, "the call cost was recorded from the provider's reported usage"),
+                ("outcome_unknown" not in (ledger.get("calls_by_state") or {}), "no call ended with an unknown outcome"),
+                (progress.get("human_review") == "skipped", "human review is reported as skipped"),
+            ]
+            for ok, meaning in checks:
+                print(f"[{'ok' if ok else 'FAIL'}] {meaning}")
+                if not ok:
+                    failures.append("generation")
+        else:
+            print(json.dumps(started))
+            failures.append("generation start")
+
     banner("Try it yourself")
     print(f"export TOKEN={token}")
     print(f"curl -s -H \"Authorization: Bearer $TOKEN\" http://127.0.0.1:${{LAB_API_PORT:-8000}}/api/v1/documents/{document}/parse-results/{job['job_id']}/pages/2")

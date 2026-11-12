@@ -4,6 +4,8 @@
 #   scripts/demo.sh run    upload a synthetic PDF, parse it, print the stored result, cancel a long job
 #   scripts/demo.sh down   stop everything and delete the demo database and artifacts
 #   scripts/demo.sh all    up, run, then down (exit status is the demo's)
+#   scripts/demo.sh generate  up, run INCLUDING question generation with the real model, then leave the stack up
+#                          (needs LAB_GEN_API_KEY in the environment; costs a few cents; without a key the step is SKIPPED, never passed)
 # Optional: DEMO_PDF=/path/to/your.pdf scripts/demo.sh run   (streamed into the container; your own file, parsed locally, never uploaded anywhere else)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -28,12 +30,41 @@ run() {
   "${compose[@]}" --profile demo exec -T "${extra[@]}" api python - < deploy/demo_run.py
 }
 
-down() { "${compose[@]}" --profile demo --profile tools down -v; }
+generate_up() {
+  # The key comes from the caller's environment (or, as a convenience, the ANTHROPIC_API_KEY line of the git-ignored root
+  # .env, read here without printing it). It is passed to the generate-worker container only.
+  if [[ -z "${LAB_GEN_API_KEY:-}" && -f .env ]]; then
+    line="$(grep -E '^ANTHROPIC_API_KEY=' .env | head -n1 || true)"
+    if [[ -n "$line" ]]; then
+      LAB_GEN_API_KEY="${line#ANTHROPIC_API_KEY=}"; LAB_GEN_API_KEY="${LAB_GEN_API_KEY%\"}"; LAB_GEN_API_KEY="${LAB_GEN_API_KEY#\"}"
+      export LAB_GEN_API_KEY
+      echo "using ANTHROPIC_API_KEY from .env (not printed)"
+    fi
+  fi
+  if [[ -z "${LAB_GEN_API_KEY:-}" ]]; then
+    echo "GENERATION STEP: SKIPPED - no LAB_GEN_API_KEY (and no ANTHROPIC_API_KEY in .env). A skipped step is not a pass." >&2
+    return 3
+  fi
+  AGENTKIT_COMMIT="$(git rev-parse HEAD:third_party/agentkit)"   # the pinned public agentKit commit the image builds against
+  export AGENTKIT_COMMIT
+  "${compose[@]}" --profile generate up -d --build --wait-timeout 600 generate-worker
+}
+
+generate() {
+  up
+  generate_up || { code=$?; [[ $code == 3 ]] && { run; return 0; }; return $code; }
+  extra=(-e DEMO_GENERATE=1)
+  "${compose[@]}" --profile demo exec -T "${extra[@]}" api python - < deploy/demo_run.py
+  echo "the stack is still up; stop it with: scripts/demo.sh down"
+}
+
+down() { "${compose[@]}" --profile demo --profile tools --profile generate down -v; }
 
 case "${1:-}" in
   up) up ;;
   run) run ;;
   down) down ;;
   all) trap down EXIT; up; run ;;
-  *) echo "usage: $0 up|run|down|all" >&2; exit 2 ;;
+  generate) generate ;;
+  *) echo "usage: $0 up|run|down|all|generate" >&2; exit 2 ;;
 esac
