@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchApiStatus, type ApiStatus } from "./status";
+import { fetchApiStatus, type ApiStatus, type GenerationStatus } from "./status";
 import { DocumentOperator } from "./DocumentOperator";
 import { Workflow } from "./Workflow";
 
@@ -72,9 +72,9 @@ function StatusView({ status }: { status: ApiStatus }) {
       return (
         <div>
           <p role="status" className={`status-pill ${status.kind === "ready" ? "ok" : "bad"}`}>
-            {status.kind === "ready" ? "API 就緒" : "API 未就緒"}（provider：{status.providerMode}
-            {status.providerMode === "mock" ? "，回應為本機假資料，非真模型" : ""}）
+            {status.kind === "ready" ? "API 就緒" : "API 未就緒"}
           </p>
+          {renderGenerationStatus(status.generation)}
           <details className="status-detail">
             <summary>各項檢查</summary>
             <ul>
@@ -83,9 +83,33 @@ function StatusView({ status }: { status: ApiStatus }) {
                   {name}：{c.ok ? "正常" : "失敗"} — {c.detail}
                 </li>
               ))}
+              <li>provider_mode（API 服務的舊設定，出題流程不使用）：{status.providerMode}</li>
             </ul>
           </details>
         </div>
       );
   }
+}
+
+function renderGenerationStatus(generation: GenerationStatus) {
+  if (generation.state === "worker_running") {
+    const host = generation.providerHost ?? "";
+    const modelPart = generation.model !== null ? `，上次呼叫 ${generation.model}` : "";
+    return (
+      <p data-testid="generation-status">
+        {`題目生成：真實模型（${host}）${modelPart}`}
+      </p>
+    );
+  }
+  if (generation.state === "no_worker") {
+    return (
+      <p
+        data-testid="generation-status"
+        title={generation.detail ? generation.detail : undefined}
+      >
+        題目生成：沒有可用的出題 worker（沒有 API key 時它不會啟動），模型步驟會失敗
+      </p>
+    );
+  }
+  return <p data-testid="generation-status">題目生成：狀態未知</p>;
 }

@@ -21,6 +21,7 @@ import os
 import signal
 import sys
 import threading
+import time
 import uuid
 
 import psycopg
@@ -77,6 +78,25 @@ class GenerateWorker(Worker):
         self.extra_env = extra_env      # tests only (the fake child's mode); production passes nothing
         self.build_calls, self.on_results = make_build_calls(), make_on_results()
         self.validate_build_calls, self.validate_on_results = validate_questions.make_build_calls(), validate_questions.make_on_results()
+
+    STATUS_EVERY_SECONDS = 15.0
+
+    def beat(self) -> None:
+        """The base heartbeat file, plus (at most every 15 s) a ``worker_status`` row so the API can report what is true about
+        generation (Issue #181). The row holds the provider HOST and protocol only: never the key, never a model or a prompt."""
+        super().beat()
+        now = time.monotonic()
+        if now - getattr(self, "_status_at", -1e9) < self.STATUS_EVERY_SECONDS:
+            return
+        self._status_at = now
+        try:
+            with self.connect() as c:
+                c.execute(
+                    "INSERT INTO worker_status (worker_name, kind, provider_host, protocol, updated_at) VALUES (%s, %s, %s, %s, now()) "
+                    "ON CONFLICT (worker_name) DO UPDATE SET provider_host = EXCLUDED.provider_host, protocol = EXCLUDED.protocol, "
+                    "kind = EXCLUDED.kind, updated_at = now()", (self.name, self.KIND, self.cfg.allowed_host, self.cfg.protocol))
+        except Exception as exc:       # status is best effort and must never stop the worker; the type only, never a message
+            LOG.warning("worker status not written (%s)", type(exc).__name__)
 
     def _process(self, conn, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome:
         row = conn.execute("SELECT phase, run_id FROM generate_jobs WHERE project_id = %s AND job_id = %s",
