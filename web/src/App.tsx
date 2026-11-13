@@ -1,17 +1,21 @@
 import { useEffect, useState } from "react";
 import { fetchApiStatus, type ApiStatus } from "./status";
 import { DocumentOperator } from "./DocumentOperator";
+import { Workflow } from "./Workflow";
 
 export function App({
   load = fetchApiStatus,
   fetchFn = fetch,
   triggerSave,
+  initialTab = "operator",
 }: {
   load?: () => Promise<ApiStatus>;
   fetchFn?: typeof fetch;
   triggerSave?: (blob: Blob, filename: string) => void;
+  initialTab?: "operator" | "workflow";
 }) {
   const [status, setStatus] = useState<ApiStatus>({ kind: "loading" });
+  const [activeTab, setActiveTab] = useState<"operator" | "workflow">(initialTab);
 
   useEffect(() => {
     let alive = true;
@@ -42,7 +46,42 @@ export function App({
         </p>
       </section>
 
-      <DocumentOperator fetchFn={fetchFn} triggerSave={triggerSave} />
+      <nav aria-label="主要分頁" style={{ display: "flex", gap: "0.5rem", marginTop: "1.5rem", marginBottom: "1rem" }}>
+        <button
+          type="button"
+          onClick={() => setActiveTab("operator")}
+          style={{
+            padding: "0.5rem 1rem",
+            cursor: "pointer",
+            fontWeight: activeTab === "operator" ? "bold" : "normal",
+            backgroundColor: activeTab === "operator" ? "#e8f0fe" : "#fff",
+            border: activeTab === "operator" ? "2px solid #1a73e8" : "1px solid #ccc",
+            borderRadius: "4px",
+          }}
+        >
+          文件操作員
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("workflow")}
+          style={{
+            padding: "0.5rem 1rem",
+            cursor: "pointer",
+            fontWeight: activeTab === "workflow" ? "bold" : "normal",
+            backgroundColor: activeTab === "workflow" ? "#e8f0fe" : "#fff",
+            border: activeTab === "workflow" ? "2px solid #1a73e8" : "1px solid #ccc",
+            borderRadius: "4px",
+          }}
+        >
+          工作流程
+        </button>
+      </nav>
+
+      {activeTab === "operator" ? (
+        <DocumentOperator fetchFn={fetchFn} triggerSave={triggerSave} />
+      ) : (
+        <Workflow fetchFn={fetchFn} />
+      )}
     </main>
   );
 }

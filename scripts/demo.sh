@@ -66,6 +66,13 @@ generate() {
   return $code
 }
 
+ui() {
+  up
+  generate_up || { code=$?; [[ $code == 3 ]] || return $code; echo "no API key: upload/parse/benchmark work in the page, model steps will fail (not a pass)" >&2; }
+  "${compose[@]}" --profile demo exec -T api python - < deploy/ui_session.py
+  echo "paste PROJECT_ID and TOKEN into the page; then: cd web && npm ci && npm run dev   (stop the stack with: scripts/demo.sh down)"
+}
+
 down() { "${compose[@]}" --profile demo --profile tools --profile generate down -v; }
 
 case "${1:-}" in
@@ -74,5 +81,6 @@ case "${1:-}" in
   down) down ;;
   all) trap down EXIT; up; run ;;
   generate) generate ;;
-  *) echo "usage: $0 up|run|down|all|generate" >&2; exit 2 ;;
+  ui) ui ;;
+  *) echo "usage: $0 up|run|down|all|generate|ui" >&2; exit 2 ;;
 esac
