@@ -5,7 +5,7 @@
 
 ## 流程（全在 main 上，CI 用假模型測過）
 
-`上傳 PDF` → `解析（Unstructured fast）` → `建立 benchmark、釘住解析、素材計畫` → `生成題目（模型）` → `自動驗題（模型＋程式檢查）` → `owner 凍結（partial）` → `在凍結的 benchmark 上跑一個 baseline 並評分` → `（step 10）第二個方法 local-retrieval-answer-1：模型依檢索段落作答`
+`上傳 PDF` → `解析（Unstructured fast）` → `建立 benchmark、釘住解析、素材計畫` → `生成題目（模型）` → `自動驗題（模型＋程式檢查）` → `owner 凍結（partial）` → `在凍結的 benchmark 上跑一個 baseline 並評分` → `（step 10）第二個方法 local-retrieval-answer-1：模型依檢索段落作答` → `（API）語意 judge 對作答評分（provisional）`
 
 | 階段 | 做了什麼 | 看哪裡 |
 |---|---|---|
@@ -33,7 +33,7 @@ scripts/demo.sh down                                  # 看完清掉
   「這題真的需要兩頁」「這個干擾項真的會誤導」只有結構與接地檢查，沒有實測。
 - **不是完整的 quota**：chart_table 沒有生成（快速解析沒有表格結構，不猜）；其他 bucket 不足 N、Q 時缺額會如實列出，不會湊數。
 - **評分只是一部分**：correctness、citation_precision、citation_completeness、faithfulness 需要語意 judge，尚未執行，記為 pending（不是 0）；評估是 provisional。
-- **hi_res／MinerU** 沒有環境（沒有 GPU 與模型），沒有跑。
+- **hi_res／MinerU／chart_table** 不在範圍內（預設純文字，owner 2026-11-13 決定），沒有跑，也不宣稱有跑。
 
 ## 仍然卡在你或外部的事
 

@@ -292,11 +292,12 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     if row is None:
         return _fail(conn, project_id, lease, "generate_job_missing")
     benchmark_id, model, cap_tokens, cap_micros, currency, pricing_rev, bench_status, attempt, phase = row
-    expected = {"generate": "generating", "validate": "validating", "answer": "frozen"}[phase]
+    expected = {"generate": "generating", "validate": "validating", "answer": "frozen", "judge": "frozen"}[phase]
     if bench_status != expected:
         return _fail(conn, project_id, lease, {"generate": "benchmark_not_generating", "validate": "benchmark_not_validating",
-                                               "answer": "benchmark_not_frozen"}[phase])
+                                               "answer": "benchmark_not_frozen", "judge": "benchmark_not_frozen"}[phase])
     answer = phase == "answer"
+    rowwise = phase in ("answer", "judge")      # these phases record EVERY question, also those whose call was never sent
     actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE project_id = %s AND job_id = %s",
                          (project_id, job_id)).fetchone()[0]
     with conn.transaction():
@@ -318,7 +319,7 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     # rows for the calls that were never sent (the answering method records those questions as budget failures)
     skipped_rows = [_pseudo_row(c.id, "skipped_budget") for c in calls if c.id not in sent_ids]
     if not sendable:
-        if answer and on_results is not None:
+        if rowwise and on_results is not None:
             jobs.finish(conn, project_id, lease, "failed", "budget_exhausted",
                         hook=lambda c: on_results(c, project_id, benchmark_id, skipped_rows, job_id))
             return ParseOutcome(job_id, "failed", "budget_exhausted")
@@ -351,7 +352,7 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
         # No call was made: release the holds (fenced, together with the job's final status).
         def refused_hook(c):
             record(c, _released_rows(reserved, model, "lab-gen refused before any call"))
-            if answer and on_results is not None:
+            if rowwise and on_results is not None:
                 on_results(c, project_id, benchmark_id, [_pseudo_row(r.id, "failed") for r, _ in reserved] + skipped_rows, job_id)
         jobs.finish(conn, project_id, lease, "failed", "lab_gen_refused", hook=refused_hook)
         return ParseOutcome(job_id, "failed", "lab_gen_refused")
@@ -371,7 +372,7 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
             return ParseOutcome(job_id, "queued", "released: worker shutdown")
         def failed_hook(c):
             record(c, rows)
-            if answer and on_results is not None:      # every question still gets its submission, as an unknown outcome
+            if rowwise and on_results is not None:      # every question still gets its submission, as an unknown outcome
                 on_results(c, project_id, benchmark_id, [_pseudo_row(r.id, "outcome_unknown") for r, _ in reserved] + skipped_rows, job_id)
         jobs.finish(conn, project_id, lease, "failed", "lab_gen_failed", hook=failed_hook)
         return ParseOutcome(job_id, "failed", "lab_gen_failed")
@@ -384,7 +385,7 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
         if on_results is not None:
             if not answer:
                 c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
-            on_results(c, project_id, benchmark_id, rows + (skipped_rows if answer else []), job_id)   # only 'ok' rows carry text
+            on_results(c, project_id, benchmark_id, rows + (skipped_rows if rowwise else []), job_id)   # only 'ok' rows carry text
 
     try:
         jobs.finish(conn, project_id, lease, "succeeded" if ok else "failed",

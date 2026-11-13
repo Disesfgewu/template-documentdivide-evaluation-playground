@@ -19,6 +19,7 @@ from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db,
 from .benchmark_build import MAX_BODY_BYTES, _find
 from .benchmark_generate import GenerateRequest
 from .answer_run import AnswerRunError, start_answer_run
+from .judge_run import JudgeRunError, start_judge_run
 from lab_db.repo import NotFound, PermissionDenied
 
 router = APIRouter()
@@ -63,3 +64,36 @@ async def start_handler(logical_id: str, revision: int, request: Request, conn: 
 
 router.add_api_route("/api/v1/benchmarks/{logical_id}/revisions/{revision}/method-runs", start_handler, methods=["POST"],
                      name="start_method_run_v1", status_code=202)
+
+
+def _start_judge(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, run_id: uuid.UUID, body: GenerateRequest) -> dict:
+    try:
+        out = start_judge_run(conn, project_id, run_id, actor_id, model=body.model, budget_cap_micros=body.budget_cap_micros,
+                              currency=body.currency, pricing_revision=body.pricing_revision, max_output_tokens=body.max_output_tokens)
+    except NotFound:
+        raise ApiError(404, "not_found", "run not found") from None
+    except PermissionDenied as exc:
+        raise ApiError(403, "permission_denied", str(exc)) from None
+    except JudgeRunError as exc:
+        raise ApiError(409, "conflict", f"the judge run cannot start: {exc}") from None
+    out["results_url"] = f"/api/v1/runs/{out['run_id']}/results"
+    return out
+
+
+async def judge_handler(run_id: uuid.UUID, request: Request, conn: psycopg.Connection = Depends(get_db),
+                        actor_id: uuid.UUID = Depends(get_authenticated_actor)) -> JSONResponse:
+    project_id = resolve_project_id(request)
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise ApiError(413, "payload_too_large", "request body is too large")
+    raw = await request.body()
+    if len(raw) > MAX_BODY_BYTES:
+        raise ApiError(413, "payload_too_large", "request body is too large")
+    try:
+        body = GenerateRequest.model_validate_json(raw)
+    except ValidationError:
+        raise ApiError(400, "bad_request", "invalid request body") from None
+    return JSONResponse(status_code=202, content=await _run_blocking(request, "meta", _start_judge, conn, actor_id, project_id, run_id, body))
+
+
+router.add_api_route("/api/v1/runs/{run_id}/judge-runs", judge_handler, methods=["POST"], name="start_judge_run_v1", status_code=202)

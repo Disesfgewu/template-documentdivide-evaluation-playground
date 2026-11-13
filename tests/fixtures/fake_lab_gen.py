@@ -82,6 +82,26 @@ for i, c in enumerate(inp["calls"]):
             text = json.dumps({**good, "claims": [{"text": "x", "hit_ids": ["zzz-not-retrieved"]}]})
         else:
             text = json.dumps({"status": "answered", "answer": "Yes.", "claims": []})
+    if mode.startswith("judge") and c["id"].startswith("j"):
+        import re as _re
+        fact_ids = _re.findall(r'<fact id="([^"]+)"', c["user"])
+        claims = [(m[0], [h for h in m[1].split(",") if h]) for m in _re.findall(r'<claim id="([^"]+)" cites="([^"]*)"', c["user"])]
+        verdict = {"facts": [{"id": f, "verdict": "stated"} for f in fact_ids],
+                   "claims": [{"id": cid, "supported": True, "supporting_hit_ids": ids} for cid, ids in claims]}
+        if mode == "judge_mixed":
+            if i % 2 == 1:
+                verdict["facts"][0]["verdict"] = "contradicted"
+                verdict["claims"][0].update(supported=False, supporting_hit_ids=[])
+        text = json.dumps(verdict)
+        if mode == "judge_bad_json":
+            text = "Looks right to me."
+        elif mode == "judge_invented_fact":
+            text = json.dumps({**verdict, "facts": verdict["facts"] + [{"id": "f99", "verdict": "stated"}]})
+        elif mode == "judge_omitted_claim":
+            text = json.dumps({**verdict, "claims": verdict["claims"][1:]})
+        elif mode == "judge_foreign_hit":
+            verdict["claims"][0]["supporting_hit_ids"] = ["not-cited"]
+            text = json.dumps(verdict)
     if mode.startswith("validate") and c["id"].startswith("v"):
         flags = {"supported": True, "answerable_from_evidence": True, "needs_outside_context": False}
         if mode == "validate_mixed":

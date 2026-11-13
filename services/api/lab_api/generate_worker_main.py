@@ -26,7 +26,7 @@ import uuid
 import psycopg
 
 from .config import load_settings
-from . import answer_run, validate_questions
+from . import answer_run, judge_run, validate_questions
 from .generate_questions import make_build_calls, make_on_results
 from .generate_worker import GenModelConfig, process_generate_job
 from .parse_worker import ParseOutcome
@@ -75,6 +75,14 @@ class GenerateWorker(Worker):
             if self.store is None:
                 raise RuntimeError("the artifact store is required for answer jobs (LAB_ARTIFACT_ROOT)")
             build, results = answer_run.make_answer_hooks(self.store, row[1])
+            return process_generate_job(
+                conn, project_id, job_id, worker=self.name, lab_gen_cmd=self.lab_gen_cmd, cfg=self.cfg, build_calls=build,
+                connect=self.connect, api_key=self.api_key, on_results=results, ttl_seconds=self.ttl,
+                child_timeout=self.child_timeout, extra_env=self.extra_env, shutdown=self.abort.is_set)
+        if phase == "judge":
+            if self.store is None:
+                raise RuntimeError("the artifact store is required for judge jobs (LAB_ARTIFACT_ROOT)")
+            build, results = judge_run.make_judge_hooks(self.store, row[1])
             return process_generate_job(
                 conn, project_id, job_id, worker=self.name, lab_gen_cmd=self.lab_gen_cmd, cfg=self.cfg, build_calls=build,
                 connect=self.connect, api_key=self.api_key, on_results=results, ttl_seconds=self.ttl,

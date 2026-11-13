@@ -184,3 +184,20 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   **不是** pending、也不是 0、也不是棄答。`GET /api/v1/runs/{id}/results` 的 `submissions` 分別數：`answered`、`abstained_by_model`、`method_failures{代碼: 數量}`。
   run 狀態：全部有效作答 `completed`，否則 `completed_with_errors`；整批都不能送出（預算）時 job 以 `budget_exhausted` 失敗，但每一題仍然有記錄、run 仍然結束。
 - **限制**：不用 pgvector（這把 key 只有聊天模型，沒有 embedding 模型）；答案指標需要語意 judge（尚未做）；沒有任何人用真實模型跑過這個方法，測試只用假的 lab-gen。
+
+## 語意 judge（對一個已結束的作答 run 評分；Refs #12；PM 核准的設計）
+
+- **啟動**：`POST /api/v1/runs/{run_id}/judge-runs`（owner／maintainer；body 同 method-runs）→ 202，建立一個 `judge` job（`generate_jobs.phase = 'judge'` 加 `run_id`，migration 0019）。
+  run 必須是**作答方法**的 run（有 `answer` job）、狀態 `completed`／`completed_with_errors`、benchmark `frozen`，至少有一題實際作答；同一個 benchmark 同時只有一個進行中的 method／judge job（409）。
+- **輸入**：每個「實際作答」的 submission 一次呼叫（≤ 500 輸出 token、預算先預留、fail-closed）。judge 只看到：該題 gold facts（編號 f1…）、submission 的答案文字與 claims、claims 所引用的 hit 文字（每個 hit 截斷）。
+  **看不到題目文字、其他 gold、其他題、參與者身分**。資料全部框成標籤並中和，judge 對其中的指令不予理會。claims 超過 12 個的答案不送出（記為 `judge_input_too_large`，不花錢）。
+- **輸出與計分**：judge 只回嚴格 JSON（每個 fact：`stated`／`missing`／`contradicted`；每個 claim：`supported` 與支持它的 hit ids）。**所有分數在程式裡由這份判定推導**：
+  correctness（fact 權重取自 gold，stated＝1、其餘＝0，不用部分分數）、faithfulness、citation_precision（每個 (claim, hit) 引用是否支持）、citation_completeness（有被支持、且至少一個引用支持它的 claim 比例）。
+  fact 或 claim 的 id 多了、少了、重複，或支持的 hit 不是該 claim 引用的 → 該題四個指標都是 `error`（`judge_fact_mismatch`／`judge_claim_mismatch`），不是猜的值。
+  無法解析 → `invalid_judge_reply`；預算用盡 → `budget_exhausted`；provider 錯誤 → `provider_error`；結果未知 → `outcome_unknown`。
+- **不呼叫 judge 的題目**（不花錢）：模型棄答 → correctness 照既有棄答規則（0，reason `abstained`），其餘三個 `not_applicable`；方法失敗 → 沿用該失敗代碼的 `error`。
+- **紀錄**：judge 寫的是一個**新的 evaluation**（`provisional`，grader `rule-based-scorer-1+llm-judge-1`），舊 evaluation 的列完全不動；規則式指標（recall、complete、localization、textual）從上一個 evaluation 原樣複製。
+  由 judge 回覆產生的列都帶 `judge_model`、`judge_prompt_revision`（`judge-v1`）、`judge_prompt_sha256`（固定 prompt 的 sha256）與 `judge_limitation`（同一個 provider／模型家族出題、未用人工標註校準、provisional）——
+  四個欄位要嘛全有要嘛全空（CHECK），所以沒有限制說明就不可能存下 judge 的分數。再評一次就是再一個新 evaluation。
+- **仍然成立**：同模型、未校準，所以分數是 provisional；人工審查仍是 skipped；evaluation 不會被 published；release verdict 不變。
+
