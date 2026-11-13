@@ -1,4 +1,4 @@
--- 0019: the semantic judge as a job (PM-DECISION on Issue #7, judge design GO, Refs #12).
+-- 0020: the semantic judge as a job (PM-DECISION on Issue #7, judge design GO, Refs #12).
 --
 -- generate_jobs gets a fourth phase, 'judge': a job that judges the answered submissions of ONE finished method run (one
 -- lab-gen call per (question, submission)) and writes a NEW evaluation for that run (re-judging never updates old score

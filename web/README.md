@@ -25,3 +25,14 @@ npm test && npm run build
 `.npmrc` 設定 `legacy-peer-deps`：npm 10.9 解析 `@vitejs/plugin-react` 的 optional peer 時會出現 `Cannot read properties of null (reading 'edgesOut')`。因此 peer 依賴（`@testing-library/dom`）改為明確列在 devDependencies。
 
 傳輸保護：預設 PDF 上限512 MiB、JSON 回應64 KiB、整個 fetch及body的時限120秒。程式化設定只能降低bytes上限，時限必須為有限正整數；服務端尚無公開limits端點，部署需核對一致。串流不可用則拒絕，不以blob/text/json的整份緩衝作fallback。取消和超限立即解除等待；底層cancel是best-effort，不等待其完成。取消／逾時／網路不明上傳保留原Idempotency-Key。此增量的自動測試為替身HTTP／ReadableStream，真瀏覽器與PG候選證據由既有harness和CI另記；post-merge與request-ID缺口仍屬#83。
+
+## 工作流程頁（Workflow）
+
+不用命令列，從上傳自己的 PDF 一路做到評分：上傳 → 解析 → 建立 benchmark／素材計畫 → 生成題目 → 自動驗題 → 凍結（partial）→ 跑方法（詞彙 baseline、模型回答方法）→ 結果表格。
+
+```bash
+scripts/demo.sh ui          # 啟動後端（有 key 時含 generate-worker），印出 PROJECT_ID 與本機開發用 TOKEN
+cd web && npm ci && npm run dev
+```
+
+把 PROJECT_ID 與 TOKEN 貼進頁面。TOKEN 只是本機開發用，勿分享、勿提交。標示「會呼叫真實模型、會花錢」的步驟會真的呼叫模型。pending 的指標顯示「尚未評分（judge 未執行）」，不是 0。自動測試只用替身 fetch；真實瀏覽器＋後端尚未驗證。

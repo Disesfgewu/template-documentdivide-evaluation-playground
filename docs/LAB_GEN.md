@@ -187,7 +187,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 
 ## 語意 judge（對一個已結束的作答 run 評分；Refs #12；PM 核准的設計）
 
-- **啟動**：`POST /api/v1/runs/{run_id}/judge-runs`（owner／maintainer；body 同 method-runs）→ 202，建立一個 `judge` job（`generate_jobs.phase = 'judge'` 加 `run_id`，migration 0019）。
+- **啟動**：`POST /api/v1/runs/{run_id}/judge-runs`（owner／maintainer；body 同 method-runs）→ 202，建立一個 `judge` job（`generate_jobs.phase = 'judge'` 加 `run_id`，migration 0020）。
   run 必須是**作答方法**的 run（有 `answer` job）、狀態 `completed`／`completed_with_errors`、benchmark `frozen`，至少有一題實際作答；同一個 benchmark 同時只有一個進行中的 method／judge job（409）。
 - **輸入**：每個「實際作答」的 submission 一次呼叫（≤ 500 輸出 token、預算先預留、fail-closed）。judge 只看到：該題 gold facts（編號 f1…）、submission 的答案文字與 claims、claims 所引用的 hit 文字（每個 hit 截斷）。
   **看不到題目文字、其他 gold、其他題、參與者身分**。資料全部框成標籤並中和，judge 對其中的指令不予理會。claims 超過 12 個的答案不送出（記為 `judge_input_too_large`，不花錢）。
@@ -201,3 +201,21 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   四個欄位要嘛全有要嘛全空（CHECK），所以沒有限制說明就不可能存下 judge 的分數。再評一次就是再一個新 evaluation。
 - **仍然成立**：同模型、未校準，所以分數是 provisional；人工審查仍是 skipped；evaluation 不會被 published；release verdict 不變。
 
+## 第一次真模型 run 找到的問題（#174，已修）
+
+- **generate worker 的連線必須是 autocommit**（`generate_worker_main.connect_factory`）：否則「領取 job + 預留預算」留在同一個沒結束的交易裡，鎖住 job 那一列，
+  另一條連線（heartbeat）永遠等它，job 一直是 `queued`。測試現在用 `main()` 實際使用的 factory 對真 PostgreSQL 跑，並有一個「舊 factory 會失敗」的對照。
+- **API key 的換行**：`scripts/demo.sh` 讀 `./.env` 時去掉 Windows 的 CR 與前後空白；含空白、控制字元或非 ASCII 的 key 被拒絕（`BLOCKED`，不顯示 key）。
+  `load_gen_config` 與 `lab-gen` 也各自拒絕這種 key（`lab-gen` 回 `refused`，不送任何呼叫、不留預留）。
+- **沒送出的請求不是「結果未知」**：HTTP client 在送出前就拒絕的請求（例如 header 值不合法）是 `failed`，預留釋放、不計費；同一批後面的呼叫標為 `skipped_after_stop`。
+- **`scripts/demo.sh up` 每次都重建 migrate image**，並且在跑 demo 之前確認資料庫的 migration 版本等於 repo 的最新版（不一致就 BLOCKED，不再讓 API 回 503）。
+
+## 凍結前排除題目（migration 0019；Refs #10、Issue #7 的 PM 決定）
+
+真實輸出裡 10 題有 3 題沒過驗題，而「每一題都要過才能凍結」的規則下，除了重新出題沒有別的辦法。現在 **owner** 可以在凍結前**排除**題目：
+
+- `GET  /api/v1/benchmarks/{id}/revisions/{rev}/questions/review`（owner／maintainer）：每一題（含已排除的）、最新的自動驗題結論與理由、是否被排除、`can_freeze`。
+- `POST /api/v1/benchmarks/{id}/revisions/{rev}/questions/{question_id}/exclusion`，body `{"excluded": true|false, "reason": "…"}`（只有 owner，且 benchmark 要在 `validating`）。
+- 排除是**一筆有理由的紀錄，不是刪除**：`question_exclusions` 只能新增（最新一筆為準，`restore` 就是再新增一筆），也寫入 audit。資料庫自己也檢查：只有 owner 寫得進去、凍結後寫不進去。
+- 被排除的題目**不凍結、不作答、不計分**：所有讀「benchmark 的題目」的地方都改讀 view `active_questions`。凍結的回應列出 `excluded_questions`，`GET /runs/{id}/results` 也有 `excluded_questions`，進度（`GET …/generate`）的 `questions`／`validation` 是「未被排除」的那些，另有 `excluded` 數量。
+- 凍結的條件變成：**每一題「未被排除」的題目的最新驗題都是 pass，而且至少剩一題**（資料庫的 freeze gate 同步改了）。其他規則不變（owner、compliance 只能是 partial）。

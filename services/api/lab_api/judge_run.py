@@ -1,6 +1,6 @@
 """Judge ONE finished answering-method run (PM-DECISION GO on Issue #7, Refs #12).
 
-A job of phase ``judge`` (migration 0019) makes one lab-gen call per ANSWERED submission of the run: the gold facts of the
+A job of phase ``judge`` (migration 0020) makes one lab-gen call per ANSWERED submission of the run: the gold facts of the
 question, the submission's answer and claims, and the text of the hits those claims cite (``method_judge``). It writes a NEW
 evaluation for the same run (never touching old score rows); the rule-based metrics (recall, complete, localization, textual)
 are copied unchanged from the run's latest evaluation, and the four semantic metrics come from the judge:
@@ -121,7 +121,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         out = []
         subs = conn.execute(
             "SELECT q.id, q.question_key, q.ordinal, s.id, s.answer_status, s.failure_reason, s.payload_hash, a.object_key, a.size_bytes "
-            "FROM questions q LEFT JOIN submissions s ON s.question_id = q.id AND s.run_id = %s AND s.status = 'accepted' "
+            "FROM active_questions q LEFT JOIN submissions s ON s.question_id = q.id AND s.run_id = %s AND s.status = 'accepted' "
             "LEFT JOIN artifacts a ON a.id = s.payload_artifact_id WHERE q.benchmark_id = %s ORDER BY q.ordinal",
             (run_id, benchmark_id)).fetchall()
         for qid, qkey, ordinal, sid, status, failure, phash, object_key, size in subs:

@@ -262,6 +262,11 @@ FROM target_eval te
             counts["answered"] += int(n)
         elif status == "abstained":
             counts["abstained_by_model"] += int(n)
+    # questions the owner excluded before the freeze: recorded with a reason, not frozen, not scored (read before the snapshot query)
+    excluded_questions = [{"ordinal": int(o), "reason": r} for o, r in conn.execute(
+        "SELECT q.ordinal, e.reason FROM questions q JOIN LATERAL (SELECT kind, reason FROM question_exclusions x "
+        "WHERE x.question_id = q.id ORDER BY x.seq DESC LIMIT 1) e ON e.kind = 'exclude' WHERE q.benchmark_id = %s "
+        "ORDER BY q.ordinal", (benchmark_id,)).fetchall()]
     snapshot = conn.execute(sql, tuple(eval_args + [run_id] + score_args + page_args)).fetchone()
     if snapshot is None:
         raise missing
@@ -338,6 +343,7 @@ FROM target_eval te
         "filters": query_filters,
         "metrics": metrics_list,
         "submissions": {**counts, "method_failures": method_failures},
+        "excluded_questions": excluded_questions,
         "items": items_list,
         "next_cursor": next_cursor,
     }

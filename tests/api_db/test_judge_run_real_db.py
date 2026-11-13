@@ -177,6 +177,27 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
             self.assertEqual(before, after)
             self.assertEqual(c.execute("SELECT count(*) FROM evaluations WHERE run_id = %s", (run["run_id"],)).fetchone()[0], 3)
 
+    def test_a_question_the_owner_excluded_before_the_freeze_is_never_judged(self):
+        project, owner = self.planned()
+        self.api("post", owner, self.GEN, project, BODY)
+        self.run_worker("questions")
+        self.api("post", owner, self.VAL, project, BODY)
+        self.run_worker("validate_ok")
+        review = self.api("get", owner, "/api/v1/benchmarks/bench-gen/revisions/1/questions/review", project).json()
+        gone = review["items"][0]["id"]
+        res = self.api("post", owner, f"/api/v1/benchmarks/bench-gen/revisions/1/questions/{gone}/exclusion", project,
+                       {"excluded": True, "reason": "not a good question"})
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(self.api("post", owner, FREEZE, project, {"compliance": "partial"}).status_code, 200)
+        run = self.api("post", owner, RUN, project, BODY).json()
+        self.worker("answer_ok").run_once()
+        _, body = self.judge(project, owner, run, "judge_ok")
+        n = review["total"] - 1
+        self.assertEqual(self.metric(body, "faithfulness")["scored"], n)
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM question_scores WHERE evaluation_id = %s AND question_id = %s",
+                                       (body["evaluation"]["id"], gone)).fetchone()[0], 0)
+
     def test_a_judge_score_without_the_limitation_cannot_be_stored(self):
         import psycopg
         project, owner, run = self.answered()
