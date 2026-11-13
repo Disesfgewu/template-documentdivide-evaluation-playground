@@ -100,6 +100,7 @@ class OpenApiSchemaStructureTests(unittest.TestCase):
             "/api/v1/benchmarks/{logical_id}/revisions/{revision}/freeze",
             "/api/v1/benchmarks/{logical_id}/revisions/{revision}/baseline-run",
             "/api/v1/benchmarks/{logical_id}/revisions/{revision}/method-runs",
+            "/api/v1/runs/{run_id}/judge-runs",
             "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/review",
             "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/{question_id}/exclusion",
             "/api/v1/audit-events",
