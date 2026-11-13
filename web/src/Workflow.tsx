@@ -59,12 +59,19 @@ export function getStatusStyle(state: StepState): React.CSSProperties {
 
 export type WorkflowProps = {
   fetchFn?: typeof fetch;
+  /** Local development session written by `scripts/demo.sh ui` (web/.env.local, git-ignored). */
+  devToken?: string;
+  devProjectId?: string;
 };
 
-export function Workflow({ fetchFn = fetch }: WorkflowProps) {
+const ENV_TOKEN = (import.meta.env.VITE_LAB_DEV_TOKEN as string | undefined) ?? "";
+const ENV_PROJECT = (import.meta.env.VITE_LAB_DEV_PROJECT_ID as string | undefined) ?? "";
+
+export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId = ENV_PROJECT }: WorkflowProps) {
   // Security invariant: Token held strictly in memory
-  const [token, setToken] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const autoLogin = Boolean(devToken.trim() && validateUuid(devProjectId.trim()));
+  const [token, setToken] = useState(autoLogin ? devToken.trim() : "");
+  const [projectId, setProjectId] = useState(autoLogin ? devProjectId.trim() : "");
 
   const isAuthValid = Boolean(token.trim() && validateUuid(projectId.trim()));
 
@@ -710,42 +717,48 @@ export function Workflow({ fetchFn = fetch }: WorkflowProps) {
             {getStatusLabel(isAuthValid ? "success" : "idle")}
           </span>
         </div>
-        <div style={{ marginTop: "0.75rem" }}>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <label htmlFor="workflow-token" style={{ display: "block", fontWeight: "bold" }}>
-              認證 Token (Bearer Token) *
-            </label>
-            <input
-              id="workflow-token"
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="lab_act_<actor_uuid>_<hmac_sha256>"
-              style={{ width: "100%", maxWidth: "500px", padding: "0.25rem" }}
-              autoComplete="off"
-            />
-          </div>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <label htmlFor="workflow-project-id" style={{ display: "block", fontWeight: "bold" }}>
-              Project ID (UUID) *
-            </label>
-            <input
-              id="workflow-project-id"
-              type="text"
-              value={projectId}
-              onChange={(e) => setProjectId(e.target.value)}
-              placeholder="00000000-0000-0000-0000-000000000000"
-              style={{ width: "100%", maxWidth: "500px", padding: "0.25rem" }}
-            />
-            {projectId.trim() && !validateUuid(projectId.trim()) && (
-              <span style={{ color: "#c00", fontSize: "0.85rem" }}>Project ID 格式必須為有效 UUID</span>
-            )}
-          </div>
-          <p className="help">
-            不知道填什麼？在專案資料夾執行 <code>scripts/demo.sh ui</code>，終端機最後會印出 <code>PROJECT_ID</code> 與 <code>TOKEN</code>，各貼一份到這裡即可。
-            Token 只放在這個分頁的記憶體裡，不會存到瀏覽器、也不會寫進紀錄。
+        {autoLogin ? (
+          <p data-testid="workflow-autologin" style={{ marginTop: "0.75rem" }}>
+            本機開發模式：已自動登入（專案 {projectId}）。不需要輸入任何 Token。
           </p>
+        ) : (
+        <div style={{ marginTop: "0.75rem" }}>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <label htmlFor="workflow-token" style={{ display: "block", fontWeight: "bold" }}>
+                認證 Token (Bearer Token) *
+              </label>
+              <input
+                id="workflow-token"
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="lab_act_<actor_uuid>_<hmac_sha256>"
+                style={{ width: "100%", maxWidth: "500px", padding: "0.25rem" }}
+                autoComplete="off"
+              />
+            </div>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <label htmlFor="workflow-project-id" style={{ display: "block", fontWeight: "bold" }}>
+                Project ID (UUID) *
+              </label>
+              <input
+                id="workflow-project-id"
+                type="text"
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value)}
+                placeholder="00000000-0000-0000-0000-000000000000"
+                style={{ width: "100%", maxWidth: "500px", padding: "0.25rem" }}
+              />
+              {projectId.trim() && !validateUuid(projectId.trim()) && (
+                <span style={{ color: "#c00", fontSize: "0.85rem" }}>Project ID 格式必須為有效 UUID</span>
+              )}
+            </div>
+            <p className="help">
+              不知道填什麼？在專案資料夾執行 <code>scripts/demo.sh ui</code>，會自動登入；或把終端機印出的 <code>PROJECT_ID</code> 與 <code>TOKEN</code> 貼到這裡。
+              Token 只放在這個分頁的記憶體裡，不會存到瀏覽器、也不會寫進紀錄。
+            </p>
         </div>
+        )}
       </div>
 
       {/* Step 2 Card: Upload PDF */}
