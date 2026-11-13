@@ -267,6 +267,16 @@ FROM target_eval te
         "SELECT q.ordinal, e.reason FROM questions q JOIN LATERAL (SELECT kind, reason FROM question_exclusions x "
         "WHERE x.question_id = q.id ORDER BY x.seq DESC LIMIT 1) e ON e.kind = 'exclude' WHERE q.benchmark_id = %s "
         "ORDER BY q.ordinal", (benchmark_id,)).fetchall()]
+    # what the judge did in this evaluation (read before the snapshot query): how many questions had a CONTRADICTED fact (scored 0 like a
+    # missing one, but not the same thing), and the provenance and limitation that every judged row carries
+    judged_eval = target_eval_id or (conn.execute("SELECT id FROM evaluations WHERE run_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+                                                  (run_id,)).fetchone() or [None])[0]
+    judge_row = conn.execute(
+        "SELECT count(*) FILTER (WHERE judge_model IS NOT NULL), count(*) FILTER (WHERE 'contradicted_fact' = ANY(reason_codes)), "
+        "min(judge_model), min(judge_prompt_revision), min(judge_limitation) FROM question_scores "
+        "WHERE evaluation_id = %s AND metric_name = 'correctness'", (judged_eval,)).fetchone() if judged_eval else None
+    judge_summary = ({"judged_questions": int(judge_row[0]), "questions_with_a_contradicted_fact": int(judge_row[1]), "model": judge_row[2],
+                      "prompt_revision": judge_row[3], "limitation": judge_row[4]} if judge_row and judge_row[0] else None)
     snapshot = conn.execute(sql, tuple(eval_args + [run_id] + score_args + page_args)).fetchone()
     if snapshot is None:
         raise missing
@@ -344,6 +354,7 @@ FROM target_eval te
         "metrics": metrics_list,
         "submissions": {**counts, "method_failures": method_failures},
         "excluded_questions": excluded_questions,
+        "judge": judge_summary,
         "items": items_list,
         "next_cursor": next_cursor,
     }

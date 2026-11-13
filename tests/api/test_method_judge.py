@@ -57,7 +57,7 @@ class JudgeParserTests(unittest.TestCase):
         self.assertIsNotNone(mj.parse_judge_reply("```json\n" + json.dumps(verdict()) + "\n```"))
 
     def test_anything_else_is_none(self):
-        bad = ["", "Looks right.", "[]", json.dumps({"facts": []}), json.dumps({**verdict(), "score": 100}),
+        bad = ["", "Looks right.", "[]", json.dumps({"facts": []}),
                json.dumps(verdict(facts=[{"id": "f1", "verdict": "partial"}])),
                json.dumps(verdict(facts=[{"id": "f1", "verdict": "stated", "extra": 1}])),
                json.dumps(verdict(claims=[{"id": "c1", "supported": "yes", "supporting_hit_ids": []}])),
@@ -65,6 +65,24 @@ class JudgeParserTests(unittest.TestCase):
                json.dumps(verdict(claims=[{"id": 1, "supported": True, "supporting_hit_ids": []}]))]
         for text in bad:
             self.assertIsNone(mj.parse_judge_reply(text), text)
+
+    def test_prose_and_a_fence_around_the_verdict_are_tolerated_but_the_content_stays_strict(self):
+        good = verdict()
+        for text in ("Here is my grading:\n" + json.dumps(good) + "\nHope that helps.", "```json\n" + json.dumps(good) + "\n```\nDone",
+                     "[" + json.dumps(good) + "]", json.dumps({**good, "score": 100})):      # an unrelated extra top-level key is dropped
+            self.assertEqual(mj.parse_judge_reply(text), good, text[:50])
+        # the first object that has both keys wins; an unrelated object before it is skipped
+        self.assertEqual(mj.parse_judge_reply('{"note": 1} ' + json.dumps(good)), good)
+
+    def test_every_refusal_has_a_fixed_reason_code(self):
+        good = verdict()
+        cases = [("", "empty"), ("Looks right.", "not_json"), ('{"facts": []}', "bad_keys"), ("x" * 30_000, "reply_too_long"),
+                 (json.dumps({**good, "facts": "no"}), "bad_keys"),
+                 (json.dumps(verdict(facts=[{"id": "f1", "verdict": "partial"}])), "bad_facts_shape"),
+                 (json.dumps(verdict(facts=[{"id": "f1", "verdict": "stated", "extra": 1}])), "bad_facts_shape"),
+                 (json.dumps(verdict(claims=[{"id": "c1", "supported": "yes", "supporting_hit_ids": []}])), "bad_claims_shape")]
+        for text, code in cases:
+            self.assertEqual(mj.parse_judge_reply_ex(text), (None, code), text[:40])
 
 
 class VerdictMatchingTests(unittest.TestCase):

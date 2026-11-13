@@ -105,7 +105,18 @@ class ResultsShapeTests(unittest.TestCase):
         pid = PROJ
         m_owner = ACTOR
         snapshot = None if ev is None else (ev[0], ev[1], ev[2], ev[3], pid, m_owner, list(summary), list(rows))
-        c.execute.return_value.fetchone.return_value = snapshot
+
+        def execute(sql, params=None):
+            res = MagicMock()
+            if "metric_name = 'correctness'" in sql:                  # the judge summary: nothing was judged here
+                res.fetchone.return_value = (0, 0, None, None, None)
+            elif "FROM evaluations WHERE run_id" in sql:              # the latest evaluation of the run
+                res.fetchone.return_value = (EV,)
+            else:
+                res.fetchone.return_value = snapshot
+                res.fetchall.return_value = []
+            return res
+        c.execute.side_effect = execute
         return c
 
     def results(self, c, **q):

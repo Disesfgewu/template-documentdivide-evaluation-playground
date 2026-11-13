@@ -104,6 +104,8 @@ for i, c in enumerate(inp["calls"]):
         claims = [(m[0], [h for h in m[1].split(",") if h]) for m in _re.findall(r'<claim id="([^"]+)" cites="([^"]*)"', c["user"])]
         verdict = {"facts": [{"id": f, "verdict": "stated"} for f in fact_ids],
                    "claims": [{"id": cid, "supported": True, "supporting_hit_ids": ids} for cid, ids in claims]}
+        if mode == "judge_contradicted":              # every call: the first fact is contradicted, the claims are supported
+            verdict["facts"][0]["verdict"] = "contradicted"
         if mode == "judge_mixed":
             if i % 2 == 1:
                 verdict["facts"][0]["verdict"] = "contradicted"
@@ -111,6 +113,8 @@ for i, c in enumerate(inp["calls"]):
         text = json.dumps(verdict)
         if mode == "judge_bad_json":
             text = "Looks right to me."
+        elif mode == "judge_prose":                   # a harmless deviation: prose and a fence around the verdict
+            text = "Here is my grading:\n```json\n" + text + "\n```\nLet me know if you want more detail."
         elif mode == "judge_invented_fact":
             text = json.dumps({**verdict, "facts": verdict["facts"] + [{"id": "f99", "verdict": "stated"}]})
         elif mode == "judge_omitted_claim":

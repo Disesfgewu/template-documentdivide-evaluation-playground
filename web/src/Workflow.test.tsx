@@ -538,8 +538,8 @@ describe("Workflow Component", () => {
   it("所有會花錢的步驟皆有『會呼叫真實模型、會花錢』警示標記", () => {
     render(<Workflow />);
     const warnings = screen.getAllByText("會呼叫真實模型、會花錢");
-    // Step 5 (Generate), Step 6 (Validate), Step 8 (Method Run)
-    expect(warnings.length).toBe(3);
+    // Step 5 (Generate), Step 6 (Validate), Step 8 (Method Run), Step 9 (Judge)
+    expect(warnings.length).toBe(4);
   });
 
   it("App 支援分頁切換 (App switches between the workflow and operator tabs)", () => {

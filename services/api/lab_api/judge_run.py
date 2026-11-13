@@ -30,7 +30,7 @@ from lab_db.storage import LocalArtifactStore
 from lab_api import baseline_eval as be
 from lab_api.generate_worker import CallSpec
 from lab_api.method_judge import (JUDGE_GRADER_SUFFIX, JUDGE_LIMITATION, JUDGE_PROMPT_REVISION, JUDGE_PROMPT_SHA256, MAX_JUDGED_CLAIMS,
-                                  build_judge_call, check_verdict, parse_judge_reply)
+                                  build_judge_call, check_verdict, parse_judge_reply_ex)
 from lab_scoring import rules
 
 ACTION = "register_method_and_submit"
@@ -163,7 +163,11 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         supported = {cid: (ok, set(hids)) for cid, ok, hids in verdict.claims}
         citations = [(cit.claim_id, frozenset({cit.hit_id}), cit.hit_id in supported[cit.claim_id][1]) for cit in it["response"].citations]
         fully = sum(1 for ok, hids in supported.values() if ok and hids)
-        return [rules.correctness(qkey, facts, False, grader),
+        correctness = rules.correctness(qkey, facts, False, grader)
+        contradicted = sum(1 for _, v in verdict.facts if v == "contradicted")
+        if contradicted:          # the rule scores a contradicted fact as 0 like a missing one; the row says it was contradicted
+            correctness = correctness.model_copy(update={"reason_codes": ["contradicted_fact"]})
+        return [correctness,
                 rules.faithfulness(qkey, len(supported), sum(1 for ok, _ in supported.values() if ok), grader),
                 rules.citation_precision(qkey, citations, True, grader),
                 rules.citation_completeness(qkey, len(supported), fully, grader)]
@@ -203,7 +207,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                     results += [rules._na(qkey, m, grader, ["abstained"]) for m in JUDGED_METRICS[1:]]
             else:
                 judged = True
-                code, results = None, None
+                code, detail, results = None, None, None
                 call = by_call.get(it["call_id"])
                 if it["facts"] is None:
                     code, judged = "gold_facts_missing", False
@@ -218,15 +222,19 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                 elif call["status"] != "ok":
                     code = "outcome_unknown"
                 else:
-                    obj = parse_judge_reply(call.get("text", ""))
-                    verdict, why = check_verdict(obj, len(it["facts"]), it["claims"]) if obj is not None else (None, "invalid_judge_reply")
-                    if verdict is None:
-                        code = why
+                    obj, parse_code = parse_judge_reply_ex(call.get("text", ""))
+                    if obj is None:
+                        code, detail = "invalid_judge_reply", parse_code        # the generic code plus WHY, never any model text
                     else:
-                        results = derive(it, verdict, grader)
+                        verdict, why = check_verdict(obj, len(it["facts"]), it["claims"])
+                        if verdict is None:
+                            code = why
+                        else:
+                            results = derive(it, verdict, grader)
                 if results is None:
-                    results = [rules._error(qkey, m, grader, [code]) for m in JUDGED_METRICS]
-                    counts[code] = counts.get(code, 0) + 1
+                    results = [rules._error(qkey, m, grader, [code] + ([detail] if detail else [])) for m in JUDGED_METRICS]
+                    key = code + (":" + detail if detail else "")
+                    counts[key] = counts.get(key, 0) + 1
             for r in results:
                 _store_score(conn, evaluation_id, run_id, benchmark_id, it["qid"], it["sid"], r, judged, model)
         return {"evaluation_id": str(evaluation_id), "failures": counts}
