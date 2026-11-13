@@ -169,7 +169,7 @@ APPEND_ONLY_TABLES = ("audit_events", "operation_results", "benchmark_transition
                       "log_events", "submissions", "retrieved_hits", "citations",
                       "visual_observations", "evidence_verifications",
                       "embedding_spaces", "vector_items", "vector_item_regions", "vector_index_revisions",
-                      "vector_queries", "parse_jobs", "parse_results", "parse_page_results", "generate_jobs", "llm_calls", "gold_answers", "question_validations",
+                      "vector_queries", "parse_jobs", "parse_results", "parse_page_results", "generate_jobs", "llm_calls", "gold_answers", "question_validations", "question_exclusions",
                       "evidence_unit_sources", "benchmark_parse_sources")
 READ_ONLY_TABLES = ("schema_migrations", "benchmark_transitions_allowed", "job_transitions_allowed")
 
@@ -191,6 +191,7 @@ def grant_app_privileges(conn: psycopg.Connection, role: str) -> None:
             else:
                 privs = "SELECT, INSERT, UPDATE"
             conn.execute(sql.SQL("GRANT {} ON {} TO {}").format(sql.SQL(privs), sql.Identifier(t), ident))
+        conn.execute(sql.SQL("GRANT SELECT ON active_questions TO {}").format(ident))   # a view: not in pg_tables
         conn.execute(sql.SQL("GRANT DELETE ON artifacts TO {}").format(ident))  # staged clean-up only (trigger-guarded)
         conn.execute(sql.SQL("GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO {}").format(ident))
 

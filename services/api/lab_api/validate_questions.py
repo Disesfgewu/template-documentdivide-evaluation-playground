@@ -128,7 +128,7 @@ def _question_rows(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id
         "SELECT q.id, q.ordinal, q.question_text, "
         "(SELECT ga.payload FROM gold_answers ga WHERE ga.question_id = q.id AND ga.kind = 'semantic'), "
         "(SELECT ga.payload FROM gold_answers ga WHERE ga.question_id = q.id AND ga.kind = 'source') "
-        "FROM questions q WHERE q.benchmark_id = %s AND NOT EXISTS ("
+        "FROM active_questions q WHERE q.benchmark_id = %s AND NOT EXISTS ("
         "SELECT 1 FROM question_validations v WHERE v.question_id = q.id AND v.verdict IN ('pass', 'fail')) ORDER BY q.ordinal",
         (benchmark_id,)).fetchall()
     doc = conn.execute("SELECT document_version_id FROM benchmark_revisions WHERE id = %s", (benchmark_id,)).fetchone()[0]
