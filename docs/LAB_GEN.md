@@ -193,3 +193,13 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   `load_gen_config` 與 `lab-gen` 也各自拒絕這種 key（`lab-gen` 回 `refused`，不送任何呼叫、不留預留）。
 - **沒送出的請求不是「結果未知」**：HTTP client 在送出前就拒絕的請求（例如 header 值不合法）是 `failed`，預留釋放、不計費；同一批後面的呼叫標為 `skipped_after_stop`。
 - **`scripts/demo.sh up` 每次都重建 migrate image**，並且在跑 demo 之前確認資料庫的 migration 版本等於 repo 的最新版（不一致就 BLOCKED，不再讓 API 回 503）。
+
+## 凍結前排除題目（migration 0019；Refs #10、Issue #7 的 PM 決定）
+
+真實輸出裡 10 題有 3 題沒過驗題，而「每一題都要過才能凍結」的規則下，除了重新出題沒有別的辦法。現在 **owner** 可以在凍結前**排除**題目：
+
+- `GET  /api/v1/benchmarks/{id}/revisions/{rev}/questions/review`（owner／maintainer）：每一題（含已排除的）、最新的自動驗題結論與理由、是否被排除、`can_freeze`。
+- `POST /api/v1/benchmarks/{id}/revisions/{rev}/questions/{question_id}/exclusion`，body `{"excluded": true|false, "reason": "…"}`（只有 owner，且 benchmark 要在 `validating`）。
+- 排除是**一筆有理由的紀錄，不是刪除**：`question_exclusions` 只能新增（最新一筆為準，`restore` 就是再新增一筆），也寫入 audit。資料庫自己也檢查：只有 owner 寫得進去、凍結後寫不進去。
+- 被排除的題目**不凍結、不作答、不計分**：所有讀「benchmark 的題目」的地方都改讀 view `active_questions`。凍結的回應列出 `excluded_questions`，`GET /runs/{id}/results` 也有 `excluded_questions`，進度（`GET …/generate`）的 `questions`／`validation` 是「未被排除」的那些，另有 `excluded` 數量。
+- 凍結的條件變成：**每一題「未被排除」的題目的最新驗題都是 pass，而且至少剩一題**（資料庫的 freeze gate 同步改了）。其他規則不變（owner、compliance 只能是 partial）。

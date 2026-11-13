@@ -4,10 +4,10 @@
 (the caller must say the word: the freeze is NOT a full-compliance release):
 
 * only the project OWNER (SPEC 5.1/5.3); maintainers, reviewers and participants get 403, non-members 404;
-* the benchmark must be in ``validating`` and EVERY question's latest automated validation must be ``pass``. A question
-  with a fail, needs_review or no validation BLOCKS the freeze (409 with the counts): nothing is excluded or deleted, because a
-  frozen set is immutable and children are never removed. The owner has to resolve it (validate again, or start a new
-  revision) before freezing;
+* the benchmark must be in ``validating`` and EVERY NON-EXCLUDED question's latest automated validation must be ``pass`` (and at
+  least one question must remain). A question with a fail, needs_review or no validation BLOCKS the freeze (409 with the
+  counts). The owner can EXCLUDE a question first (``benchmark_review``: a recorded decision with a reason, never a delete);
+  the freeze response lists the excluded ones;
 * compliance is ``partial``: human review was skipped by the owner's scope (D6) and the quota buckets are incomplete
   (chart_table is not generated, the other buckets may be short); ``compliant`` is refused.
 The database gate (migration 0017) enforces the same rules for every writer; this endpoint reports them as clean 409/403s.
@@ -64,19 +64,25 @@ def _freeze(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID
                 raise ApiError(409, "conflict", "a generation or validation job is still active for this benchmark; "
                                                 "wait for it to finish (or cancel it) before freezing")
             conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))   # question_validations is gold-RLS
-            totals = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
+            totals = dict(conn.execute("SELECT quota_bucket, count(*) FROM active_questions WHERE benchmark_id = %s GROUP BY 1",
                                        (benchmark_id,)).fetchall())
             verdicts = dict(conn.execute(
-                "SELECT COALESCE(latest.verdict, 'unvalidated'), count(*) FROM questions q LEFT JOIN LATERAL ("
+                "SELECT COALESCE(latest.verdict, 'unvalidated'), count(*) FROM active_questions q LEFT JOIN LATERAL ("
                 "SELECT verdict FROM question_validations v WHERE v.question_id = q.id ORDER BY v.created_at DESC, v.id DESC LIMIT 1) latest ON true "
                 "WHERE q.benchmark_id = %s GROUP BY 1", (benchmark_id,)).fetchall())
             n_questions = sum(int(v) for v in totals.values())
             counts = {k: int(verdicts.get(k, 0)) for k in ("pass", "fail", "needs_review", "unvalidated")}
+            excluded = [{"id": str(i), "ordinal": int(o), "reason": r} for i, o, r in conn.execute(
+                "SELECT q.id, q.ordinal, e.reason FROM questions q JOIN LATERAL (SELECT kind, reason FROM question_exclusions x "
+                "WHERE x.question_id = q.id ORDER BY x.seq DESC LIMIT 1) e ON e.kind = 'exclude' WHERE q.benchmark_id = %s "
+                "ORDER BY q.ordinal", (benchmark_id,)).fetchall()]
             if n_questions == 0:
-                raise ApiError(409, "conflict", "the benchmark has no questions to freeze")
+                raise ApiError(409, "conflict", "the benchmark has no questions to freeze" + (
+                    f" ({len(excluded)} excluded)" if excluded else ""))
             if counts["pass"] != n_questions:
-                raise ApiError(409, "conflict", "every question needs a passing automated validation before the freeze; "
-                               f"verdicts: {counts}. Nothing is excluded or deleted: resolve them (validate again) first.")
+                raise ApiError(409, "conflict", "every non-excluded question needs a passing automated validation before the freeze; "
+                               f"verdicts of the non-excluded questions: {counts}. Nothing is deleted: exclude a question (recorded, "
+                               "with a reason) or validate again.")
             row = conn.execute("SELECT row_version, n_target, q_min FROM benchmark_revisions WHERE id = %s", (benchmark_id,)).fetchone()
             version, n_target, q_min = row
             version = transition_benchmark(conn, project_id, benchmark_id, version, "ready_to_freeze",
@@ -99,7 +105,7 @@ def _freeze(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID
     return {"benchmark_revision_id": str(benchmark_id), "logical_id": logical_id, "revision": revision, "status": "frozen",
             "compliance": "partial", "frozen_at": frozen_at.isoformat(), "questions": n_questions, "by_bucket": by_bucket,
             "n_target": n_target, "q_min": q_min, "shortfall": shortfall, "validation": counts,
-            "human_review": "skipped", "limits": LIMITS}
+            "excluded_questions": excluded, "human_review": "skipped", "limits": LIMITS}
 
 
 async def freeze_handler(logical_id: str, revision: int, request: Request, conn: psycopg.Connection = Depends(get_db),

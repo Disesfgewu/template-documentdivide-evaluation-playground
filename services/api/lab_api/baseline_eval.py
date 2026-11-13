@@ -77,7 +77,7 @@ def run_local_baseline(conn: psycopg.Connection, store: LocalArtifactStore, proj
         if bench[0] != "frozen":
             raise BaselineError("benchmark_is_not_frozen")
         doc_id = bench[1]
-        n_questions = conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0]
+        n_questions = conn.execute("SELECT count(*) FROM active_questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0]
         if n_questions > MAX_QUESTIONS:
             raise BaselineError(f"benchmark_has_more_than_{MAX_QUESTIONS}_questions_for_a_synchronous_run")
         row = conn.execute(
@@ -109,7 +109,7 @@ def run_local_baseline(conn: psycopg.Connection, store: LocalArtifactStore, proj
         _transition(conn, run_id, "preparing", "local baseline: indexing the original PDF")
         _transition(conn, run_id, "running", "local baseline: querying every question")
 
-        questions = conn.execute("SELECT id, question_key, question_text FROM questions WHERE benchmark_id = %s ORDER BY ordinal",
+        questions = conn.execute("SELECT id, question_key, question_text FROM active_questions WHERE benchmark_id = %s ORDER BY ordinal",
                                  (benchmark_id,)).fetchall()
         conn.execute("INSERT INTO evaluations (id, run_id, benchmark_id, grader_revision, status) VALUES (%s, %s, %s, %s, 'provisional')",
                      (evaluation_id, run_id, benchmark_id, GRADER_REVISION))
