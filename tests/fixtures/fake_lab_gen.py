@@ -10,6 +10,8 @@ import time
 mode = os.environ.get("FAKE_LAB_GEN_MODE", "ok")
 inp = json.load(sys.stdin)
 m, cap = inp["model"], inp["model"]["max_output_tokens"]
+if os.environ.get("FAKE_LAB_GEN_DELAY"):
+    time.sleep(float(os.environ["FAKE_LAB_GEN_DELAY"]))       # a call that takes a while, so the worker's heartbeat runs meanwhile
 if mode == "crash":
     sys.exit(3)
 if mode == "sleep":
