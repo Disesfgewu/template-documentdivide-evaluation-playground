@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { QuestionsPanel } from "./QuestionsPanel";
 import {
   cancelJob,
   createBenchmark,
@@ -58,12 +59,19 @@ export function getStatusStyle(state: StepState): React.CSSProperties {
 
 export type WorkflowProps = {
   fetchFn?: typeof fetch;
+  /** Local development session written by `scripts/demo.sh ui` (web/.env.local, git-ignored). */
+  devToken?: string;
+  devProjectId?: string;
 };
 
-export function Workflow({ fetchFn = fetch }: WorkflowProps) {
+const ENV_TOKEN = (import.meta.env.VITE_LAB_DEV_TOKEN as string | undefined) ?? "";
+const ENV_PROJECT = (import.meta.env.VITE_LAB_DEV_PROJECT_ID as string | undefined) ?? "";
+
+export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId = ENV_PROJECT }: WorkflowProps) {
   // Security invariant: Token held strictly in memory
-  const [token, setToken] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const autoLogin = Boolean(devToken.trim() && validateUuid(devProjectId.trim()));
+  const [token, setToken] = useState(autoLogin ? devToken.trim() : "");
+  const [projectId, setProjectId] = useState(autoLogin ? devProjectId.trim() : "");
 
   const isAuthValid = Boolean(token.trim() && validateUuid(projectId.trim()));
 
@@ -653,12 +661,53 @@ export function Workflow({ fetchFn = fetch }: WorkflowProps) {
     }
   };
 
+  const done = (st: StepState) => st === "success";
+  const steps: { key: string; label: string; state: StepState }[] = [
+    { key: "auth", label: "登入", state: isAuthValid ? "success" : "idle" },
+    { key: "upload", label: "上傳", state: uploadStatus },
+    { key: "parse", label: "解析", state: parseStatus },
+    { key: "plan", label: "建題庫", state: planStatus },
+    { key: "generate", label: "出題", state: genStatus },
+    { key: "validate", label: "驗題", state: valStatus },
+    { key: "freeze", label: "凍結", state: freezeStatus },
+    { key: "method", label: "作答", state: methodStatus },
+    { key: "results", label: "結果", state: resultsStatus },
+  ];
+  const firstOpen = steps.find((st) => !(done(st.state) || (st.key === "freeze" && st.state === "conflict_409")));
+  const failed = steps.find((st) => st.state === "error");
+  const nextStepKey = failed?.key ?? firstOpen?.key ?? "done";
+  const NEXT_HINTS: Record<string, string> = {
+    auth: "在步驟 1 貼上 Token 與 Project ID。",
+    upload: "在步驟 2 選一份 PDF 並上傳。",
+    parse: "在步驟 3 按「開始解析」（通常幾十秒）。",
+    plan: "在步驟 4 輸入一個 Benchmark 名稱，建立題庫與素材計畫。",
+    generate: "在步驟 5 按「開始生成題目」。這一步會呼叫真實模型、會花一點錢（幾分錢美金）。",
+    validate: "在步驟 6 按「開始自動驗題」，讓模型檢查每一題是否有根據。",
+    freeze: "在步驟 7 凍結題庫。只有每一題都通過驗題才會成功；沒過的不會被刪掉。",
+    method: "在步驟 8 讓一個方法回答所有題目（詞彙 baseline 不花錢；模型回答方法會花錢）。",
+    results: "在步驟 9 看評分結果。",
+    done: "下面的結果與逐題得分就是這次評測。分數都是暫定的（provisional），人工審查尚未進行。",
+  };
+  const nextHint = failed ? `「${failed.label}」這一步失敗了，請看該步驟的錯誤訊息後重試。` : NEXT_HINTS[nextStepKey];
+
   return (
-    <section aria-label="工作流程頁面" style={{ marginTop: "1.5rem" }}>
-      <h2>評測工作流程 (Pipeline Workflow)</h2>
-      <p style={{ color: "#555", fontSize: "0.95rem" }}>
-        引導您依序完成 PDF 上傳、解析、題庫生成、自動驗題、凍結與方法評測結果。
+    <section aria-label="工作流程頁面" style={{ marginTop: "1rem" }}>
+      <h2 className="page-title">評測工作流程</h2>
+      <p className="muted">
+        依序完成：上傳 PDF → 解析 → 出題 → 驗題 → 凍結 → 讓方法作答 → 看分數。每一步完成後，下一步才會開放。
       </p>
+
+      <ol className="stepper" aria-label="進度">
+        {steps.map((st, i) => (
+          <li key={st.label} className={`stepper-item stepper-${st.state}`} aria-current={st.key === nextStepKey ? "step" : undefined}>
+            <span className="stepper-dot">{st.state === "success" ? "✓" : i + 1}</span>
+            <span className="stepper-label">{st.label}</span>
+          </li>
+        ))}
+      </ol>
+      <div className="next-hint" role="note" data-testid="next-hint">
+        <strong>{nextStepKey === "done" ? "全部完成" : "現在該做："}</strong> {nextHint}
+      </div>
 
       {/* Step 1 Card: Credentials and Project */}
       <div style={cardStyle}>
@@ -668,41 +717,48 @@ export function Workflow({ fetchFn = fetch }: WorkflowProps) {
             {getStatusLabel(isAuthValid ? "success" : "idle")}
           </span>
         </div>
-        <div style={{ marginTop: "0.75rem" }}>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <label htmlFor="workflow-token" style={{ display: "block", fontWeight: "bold" }}>
-              認證 Token (Bearer Token) *
-            </label>
-            <input
-              id="workflow-token"
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="lab_act_<actor_uuid>_<hmac_sha256>"
-              style={{ width: "100%", maxWidth: "500px", padding: "0.25rem" }}
-              autoComplete="off"
-            />
-          </div>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <label htmlFor="workflow-project-id" style={{ display: "block", fontWeight: "bold" }}>
-              Project ID (UUID) *
-            </label>
-            <input
-              id="workflow-project-id"
-              type="text"
-              value={projectId}
-              onChange={(e) => setProjectId(e.target.value)}
-              placeholder="00000000-0000-0000-0000-000000000000"
-              style={{ width: "100%", maxWidth: "500px", padding: "0.25rem" }}
-            />
-            {projectId.trim() && !validateUuid(projectId.trim()) && (
-              <span style={{ color: "#c00", fontSize: "0.85rem" }}>Project ID 格式必須為有效 UUID</span>
-            )}
-          </div>
-          <p style={{ fontSize: "0.85rem", color: "#666", margin: "0.25rem 0 0 0" }}>
-            此 Token 僅暫存於記憶體中，絕不上傳 Storage、Cookie 亦不記錄於 Log。
+        {autoLogin ? (
+          <p data-testid="workflow-autologin" style={{ marginTop: "0.75rem" }}>
+            本機開發模式：已自動登入（專案 {projectId}）。不需要輸入任何 Token。
           </p>
+        ) : (
+        <div style={{ marginTop: "0.75rem" }}>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <label htmlFor="workflow-token" style={{ display: "block", fontWeight: "bold" }}>
+                認證 Token (Bearer Token) *
+              </label>
+              <input
+                id="workflow-token"
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="lab_act_<actor_uuid>_<hmac_sha256>"
+                style={{ width: "100%", maxWidth: "500px", padding: "0.25rem" }}
+                autoComplete="off"
+              />
+            </div>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <label htmlFor="workflow-project-id" style={{ display: "block", fontWeight: "bold" }}>
+                Project ID (UUID) *
+              </label>
+              <input
+                id="workflow-project-id"
+                type="text"
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value)}
+                placeholder="00000000-0000-0000-0000-000000000000"
+                style={{ width: "100%", maxWidth: "500px", padding: "0.25rem" }}
+              />
+              {projectId.trim() && !validateUuid(projectId.trim()) && (
+                <span style={{ color: "#c00", fontSize: "0.85rem" }}>Project ID 格式必須為有效 UUID</span>
+              )}
+            </div>
+            <p className="help">
+              不知道填什麼？在專案資料夾執行 <code>scripts/demo.sh ui</code>，會自動登入；或把終端機印出的 <code>PROJECT_ID</code> 與 <code>TOKEN</code> 貼到這裡。
+              Token 只放在這個分頁的記憶體裡，不會存到瀏覽器、也不會寫進紀錄。
+            </p>
         </div>
+        )}
       </div>
 
       {/* Step 2 Card: Upload PDF */}
@@ -1039,6 +1095,27 @@ export function Workflow({ fetchFn = fetch }: WorkflowProps) {
         </div>
       </div>
 
+      {/* Questions list: appears as soon as questions exist */}
+      {(genProgress?.questions ?? 0) > 0 && benchLogicalId && (
+        <div style={cardStyle} data-testid="questions-card">
+          <div style={headerStyle}>
+            <h3 style={{ margin: 0 }}>題目一覽</h3>
+            <span style={{ ...badgeStyle, ...getStatusStyle("success") }}>{genProgress?.questions} 題</span>
+          </div>
+          <div style={{ marginTop: "0.75rem" }}>
+            <QuestionsPanel
+              fetchFn={fetchFn}
+              token={token}
+              projectId={projectId}
+              logicalId={benchLogicalId}
+              reloadKey={`${genStatus}-${valStatus}-${freezeStatus}-${genProgress?.questions ?? 0}-${activeRunId ?? ""}-${resultsStatus}`}
+              runId={activeRunId}
+              evaluationId={activeEvalId}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Step 7 Card: Freeze */}
       <div style={cardStyle}>
         <div style={headerStyle}>
@@ -1210,7 +1287,8 @@ export function Workflow({ fetchFn = fetch }: WorkflowProps) {
           {resultsData && (
             <div style={{ marginTop: "0.5rem" }}>
               <p style={{ margin: "0 0 0.5rem 0", fontSize: "0.9rem" }}>
-                Evaluation 狀態：<strong>{resultsData.evaluation_status || "—"}</strong> ｜ Grader: {resultsData.grader_revision || "—"}
+                Evaluation 狀態：<strong>{resultsData.evaluation?.status ?? resultsData.evaluation_status ?? "—"}</strong>
+                {resultsData.provisional !== false ? "（暫定，不是正式成績）" : ""} ｜ Grader: {resultsData.evaluation?.grader_revision ?? resultsData.grader_revision ?? "—"}
               </p>
 
               {resultsData.submissions && (
@@ -1238,7 +1316,12 @@ export function Workflow({ fetchFn = fetch }: WorkflowProps) {
                       const isPending = m.pending > 0;
                       return (
                         <tr key={m.metric_name} style={{ borderBottom: "1px solid #eee" }}>
-                          <td style={{ padding: "0.5rem", fontWeight: "bold" }}>{m.metric_name || "—"}</td>
+                          <td style={{ padding: "0.5rem", fontWeight: "bold" }}>
+                            {m.metric_name || "—"}
+                            {METRIC_HELP[m.metric_name] && (
+                              <div style={{ fontWeight: "normal", fontSize: "0.8rem", color: "#5f6368" }}>{METRIC_HELP[m.metric_name]}</div>
+                            )}
+                          </td>
                           <td style={{ padding: "0.5rem" }}>{m.scored !== undefined ? m.scored : "—"}</td>
                           <td style={{ padding: "0.5rem" }}>{m.error !== undefined ? m.error : "—"}</td>
                           <td style={{ padding: "0.5rem", color: isPending ? "#b06000" : "inherit" }}>
@@ -1284,33 +1367,52 @@ export function Workflow({ fetchFn = fetch }: WorkflowProps) {
 // -----------------------------------------------------------------------------
 // Styles
 // -----------------------------------------------------------------------------
+const METRIC_HELP: Record<string, string> = {
+  recall_at_k: "檢索命中：標準答案需要的證據，有沒有被找回來（0–100）",
+  complete_at_k: "完整命中：需要的證據是否全部找回來",
+  localization_precision: "定位精準度：回傳的區域有多少落在正確位置（整頁檢索天生偏低）",
+  textual_consistency: "文字一致性（這批題目不適用）",
+  correctness: "答案正確性：答案是否包含標準答案的事實（需要評分模型）",
+  citation_precision: "引用精準度：引用的段落是否真的支持該論述（需要評分模型）",
+  citation_completeness: "引用完整度：每個論述是否都有被支持的引用（需要評分模型）",
+  faithfulness: "忠實度：答案有多少論述被引用的文字支持（需要評分模型）",
+};
+
 const cardStyle: React.CSSProperties = {
-  marginBottom: "1.25rem",
-  padding: "1rem",
-  border: "1px solid #ddd",
-  borderRadius: "4px",
-  backgroundColor: "#fff",
+  marginBottom: "1rem",
+  padding: "1.1rem 1.25rem",
+  border: "1px solid var(--border)",
+  borderRadius: "10px",
+  backgroundColor: "var(--surface)",
+  boxShadow: "0 1px 2px rgba(60, 64, 67, 0.08)",
 };
 
 const headerStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
-  borderBottom: "1px solid #eee",
-  paddingBottom: "0.5rem",
+  borderBottom: "1px solid var(--border)",
+  paddingBottom: "0.6rem",
+  gap: "0.75rem",
 };
 
 const badgeStyle: React.CSSProperties = {
-  fontSize: "0.8rem",
-  padding: "0.2rem 0.5rem",
-  borderRadius: "3px",
-  fontWeight: "bold",
+  fontSize: "0.78rem",
+  padding: "0.2rem 0.65rem",
+  borderRadius: "999px",
+  fontWeight: 600,
+  whiteSpace: "nowrap",
 };
 
 const buttonStyle: React.CSSProperties = {
-  padding: "0.4rem 0.9rem",
+  padding: "0.5rem 1.1rem",
   cursor: "pointer",
-  fontSize: "0.9rem",
+  fontSize: "0.92rem",
+  borderRadius: "8px",
+  border: "1px solid var(--primary)",
+  backgroundColor: "var(--primary)",
+  color: "#fff",
+  fontWeight: 600,
 };
 
 const moneyWarningStyle: React.CSSProperties = {

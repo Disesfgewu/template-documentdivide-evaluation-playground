@@ -542,11 +542,37 @@ describe("Workflow Component", () => {
     expect(warnings.length).toBe(3);
   });
 
-  it("App 支援分頁切換至工作流程 (App switches tab to Workflow)", () => {
+  it("App 支援分頁切換 (App switches between the workflow and operator tabs)", () => {
     render(<App />);
-    expect(screen.getByRole("region", { name: "文件操作員介面" })).toBeTruthy();
-    const workflowTabBtn = screen.getByRole("button", { name: "工作流程" });
-    fireEvent.click(workflowTabBtn);
     expect(screen.getByRole("region", { name: "工作流程頁面" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "文件操作員" }));
+    expect(screen.getByRole("region", { name: "文件操作員介面" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "工作流程頁面" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "工作流程" }));
+    expect(screen.getByRole("region", { name: "工作流程頁面" })).toBeTruthy();
+  });
+
+  it("進度列與「現在該做」提示：一開始指向登入，填好 Token 與 Project ID 後指向上傳", () => {
+    render(<Workflow />);
+    expect(screen.getByTestId("next-hint").textContent).toContain("貼上 Token 與 Project ID");
+    expect(screen.getByRole("list", { name: "進度" }).querySelectorAll("li").length).toBe(9);
+    fireEvent.change(screen.getByLabelText(/認證 Token/i), { target: { value: MOCK_TOKEN } });
+    fireEvent.change(screen.getByLabelText(/Project ID/i), { target: { value: VALID_UUID_1 } });
+    expect(screen.getByTestId("next-hint").textContent).toContain("上傳");
+    expect(screen.getByRole("list", { name: "進度" }).querySelector('[aria-current="step"]')?.textContent).toContain("上傳");
+  });
+});
+
+describe("Workflow local auto-login", () => {
+  it("hides the token fields and enables upload when a dev session is provided", () => {
+    render(<Workflow fetchFn={vi.fn()} devToken="lab_act_dev" devProjectId="11111111-1111-4111-8111-111111111111" />);
+    expect(screen.getByTestId("workflow-autologin").textContent).toContain("11111111-1111-4111-8111-111111111111");
+    expect(screen.queryByLabelText(/認證 Token/)).toBeNull();
+  });
+
+  it("asks for credentials when no dev session is provided", () => {
+    render(<Workflow fetchFn={vi.fn()} devToken="" devProjectId="" />);
+    expect(screen.queryByTestId("workflow-autologin")).toBeNull();
+    expect(screen.getByLabelText(/認證 Token/)).toBeTruthy();
   });
 });
