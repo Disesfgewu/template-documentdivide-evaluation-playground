@@ -86,7 +86,7 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertGreater(corr["mean"], 0.0)
         self.assertLess(faith["mean"], 100.0)
 
-    def _all_errors(self, mode, code):
+    def _all_errors(self, mode, code, why=None):
         project, owner, run = self.answered()
         n = self.api("get", owner, self.GEN, project).json()["questions"]
         _, body = self.judge(project, owner, run, mode)
@@ -96,10 +96,37 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         with self.connect() as c:
             reasons = c.execute("SELECT DISTINCT reason_codes FROM question_scores WHERE evaluation_id = %s AND metric_name = 'correctness'",
                                 (body["evaluation"]["id"],)).fetchall()
-            self.assertEqual([r[0] for r in reasons], [[code]])
+            self.assertEqual([r[0] for r in reasons], [[code] + ([why] if why else [])])
 
     def test_an_unparseable_verdict_is_an_error_never_a_guessed_number(self):
-        self._all_errors("judge_bad_json", "invalid_judge_reply")
+        self._all_errors("judge_bad_json", "invalid_judge_reply", "not_json")                # the generic code plus WHY, no model text
+
+    def test_prose_and_a_fence_around_the_verdict_are_tolerated(self):
+        project, owner, run = self.answered()
+        n = self.api("get", owner, self.GEN, project).json()["questions"]
+        _, body = self.judge(project, owner, run, "judge_prose")
+        for name in JUDGED:
+            m = self.metric(body, name)
+            self.assertEqual((m["scored"], m["error"], m["mean"]), (n, 0, 100.0), name)
+
+    def test_a_contradicted_fact_is_scored_like_a_missing_one_but_is_marked_and_counted_in_the_results(self):
+        project, owner, run = self.answered()
+        n = self.api("get", owner, self.GEN, project).json()["questions"]
+        _, body = self.judge(project, owner, run, "judge_contradicted")
+        self.assertEqual(self.metric(body, "correctness")["scored"], n)
+        with self.connect() as c:
+            reasons = c.execute("SELECT DISTINCT reason_codes FROM question_scores WHERE evaluation_id = %s AND metric_name = 'correctness'",
+                                (body["evaluation"]["id"],)).fetchall()
+        self.assertEqual([r[0] for r in reasons], [["contradicted_fact"]])
+        self.assertEqual(body["judge"]["questions_with_a_contradicted_fact"], n)
+        self.assertEqual(body["judge"]["judged_questions"], n)
+        self.assertEqual(body["judge"]["prompt_revision"], method_judge.JUDGE_PROMPT_REVISION)
+        self.assertIn("same provider/model family", body["judge"]["limitation"])
+
+    def test_results_without_a_judged_evaluation_have_no_judge_summary(self):
+        project, owner, run = self.answered()
+        out = self.client.get(f"/api/v1/runs/{run['run_id']}/results", headers=self.headers(owner)).json()
+        self.assertIsNone(out["judge"])
 
     def test_an_invented_fact_is_an_error_for_the_question(self):
         self._all_errors("judge_invented_fact", "judge_fact_mismatch")

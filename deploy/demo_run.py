@@ -377,6 +377,7 @@ def main() -> int:
                     if not ok:
                         failures.append("baseline")
 
+    method_run_id = None
     banner("10. Run the answering method local-retrieval-answer-1 (a real model answers from the retrieved passages)")
     if os.environ.get("DEMO_GENERATE") != "1" or no_key or path or not was_frozen:
         print("SKIPPED (no API key, or the benchmark was not frozen, so there is nothing to answer). A skipped step is not a pass.")
@@ -399,13 +400,14 @@ def main() -> int:
                     break
                 time.sleep(3)
             _, mres = api.call("GET", f"/api/v1/runs/{mrun['run_id']}/results")
+            method_run_id = mrun["run_id"] if mjob.get("status") in ("succeeded", "failed") else None
             sub = mres.get("submissions") or {}
             print(f"job {mjob.get('status')}, evaluation {(mres.get('evaluation') or {}).get('status')}; submissions: answered {sub.get('answered')}, "
                   f"abstained_by_model {sub.get('abstained_by_model')}, method_failures {sub.get('method_failures')}")
             for m in mres.get("metrics", []):
                 print(f"  {m['metric_name']:<22} scored {m['scored']:>3}  error {m.get('error', 0):>3}  pending {m['pending']:>3}  "
                       f"mean {m['mean'] if m['mean'] is not None else '-'}")
-            print("  (answer-quality metrics stay pending: the semantic judge is not built; method failures are not model abstentions; "
+            print("  (answer-quality metrics stay pending until the judge runs in step 11; method failures are not model abstentions; "
                   "the evaluation is provisional)")
             total = (sub.get("answered") or 0) + (sub.get("abstained_by_model") or 0) + sum((sub.get("method_failures") or {}).values())
             checks = [
@@ -416,6 +418,48 @@ def main() -> int:
                 print(f"[{'ok' if ok else 'FAIL'}] {meaning}")
                 if not ok:
                     failures.append("method run")
+
+    banner("11. Judge the answers (a real model grades each answered question; same model family as the generator, provisional)")
+    if os.environ.get("DEMO_GENERATE") != "1" or no_key or path or method_run_id is None:
+        print("SKIPPED (no API key, or step 10 did not produce a finished run to judge). A skipped step is not a pass.")
+    else:
+        jcap = int(os.environ.get("DEMO_JUDGE_BUDGET_MICROS", "200000"))
+        code, jrun = api.call("POST", f"/api/v1/runs/{method_run_id}/judge-runs?project_id={project}",
+                              json.dumps({"model": os.environ.get("DEMO_GEN_MODEL", "claude-haiku-4-5-20251001"),
+                                          "budget_cap_micros": jcap}).encode(), "application/json")
+        print(f"POST .../judge-runs -> {code}; budget {jcap} micro-USD, one call per ANSWERED question, at most 500 output tokens each")
+        if code != 202:
+            print(json.dumps(jrun))
+            print("NOT JUDGED: a run needs at least one answered question and to be finished; that is an honest outcome of the model's answers.")
+        else:
+            deadline = time.monotonic() + float(os.environ.get("DEMO_GEN_TIMEOUT", "900"))
+            jjob = {}
+            while time.monotonic() < deadline:
+                _, jprog = api.call("GET", f"/api/v1/benchmarks/{bench_name}/revisions/1/generate?project_id={project}")
+                jjob = jprog.get("job") or {}
+                if jjob.get("phase") == "judge" and jjob.get("status") in ("succeeded", "failed", "cancelled"):
+                    break
+                time.sleep(3)
+            _, jres = api.call("GET", f"/api/v1/runs/{method_run_id}/results")
+            print(f"judge job {jjob.get('status')}; evaluation {(jres.get('evaluation') or {}).get('status')} ({(jres.get('evaluation') or {}).get('grader_revision')})")
+            for m in jres.get("metrics", []):
+                print(f"  {m['metric_name']:<22} scored {m['scored']:>3}  not_applicable {m.get('not_applicable', 0):>3}  error {m.get('error', 0):>3}  "
+                      f"pending {m['pending']:>3}  mean {m['mean'] if m['mean'] is not None else '-'}")
+            judge = jres.get("judge") or {}
+            if judge:
+                print(f"  judged questions {judge.get('judged_questions')}, with a contradicted fact {judge.get('questions_with_a_contradicted_fact')}; "
+                      f"model {judge.get('model')}, prompt {judge.get('prompt_revision')}")
+                print(f"  LIMITATION: {judge.get('limitation')}")
+            names = {m["metric_name"]: m for m in jres.get("metrics", [])}
+            checks = [
+                (jjob.get("status") == "succeeded", "the judge job succeeded"),
+                (bool(judge) and judge.get("judged_questions", 0) > 0, "judged rows carry the model, the prompt revision and the limitation"),
+                (names.get("correctness", {}).get("pending", 1) == 0, "no answer-quality metric is left pending (each is scored, not applicable or an error with a reason)"),
+            ]
+            for ok, meaning in checks:
+                print(f"[{'ok' if ok else 'FAIL'}] {meaning}")
+                if not ok:
+                    failures.append("judge")
 
     banner("Try it yourself")
     print(f"export TOKEN={token}")

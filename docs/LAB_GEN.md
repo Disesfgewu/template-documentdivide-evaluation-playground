@@ -199,6 +199,11 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **紀錄**：judge 寫的是一個**新的 evaluation**（`provisional`，grader `rule-based-scorer-1+llm-judge-1`），舊 evaluation 的列完全不動；規則式指標（recall、complete、localization、textual）從上一個 evaluation 原樣複製。
   由 judge 回覆產生的列都帶 `judge_model`、`judge_prompt_revision`（`judge-v1`）、`judge_prompt_sha256`（固定 prompt 的 sha256）與 `judge_limitation`（同一個 provider／模型家族出題、未用人工標註校準、provisional）——
   四個欄位要嘛全有要嘛全空（CHECK），所以沒有限制說明就不可能存下 judge 的分數。再評一次就是再一個新 evaluation。
+- **回覆的解析**（PM 後續項目）：judge 回覆的「外殼」和出題回覆一樣寬容（JSON 前後有說明文字、任何位置的 code fence、外面多包一層陣列、無關的多餘頂層欄位都可以），但**內容仍然嚴格**：每個 fact／claim 的鍵與值都必須正確，不修、不猜。
+  解析失敗的題目，四個指標都是 `error`，`reason_codes` 是 `["invalid_judge_reply", "<為什麼>"]`（`empty`／`reply_too_long`／`not_json`／`bad_keys`／`bad_facts_shape`／`bad_claims_shape`），不含任何模型文字；job 的失敗計數也帶同樣的代碼。
+- **「相反」不等於「沒提到」**：fact 被判 `contradicted`（答案說了相反或不同的值）時，規則仍照 `missing` 計 0 分（規則只有 0／0.5／1），但那一題 correctness 那一列的 `reason_codes` 會是 `["contradicted_fact"]`，
+  而且 `GET /runs/{id}/results` 多一個 `judge` 摘要：`judged_questions`、`questions_with_a_contradicted_fact`、`model`、`prompt_revision`、`limitation`（沒有被評過分時是 `null`）。
+- **demo 與網頁**：`scripts/demo.sh generate` 的 step 11 對 step 10 的 run 做 judge（沒有 key 或 step 10 沒跑成就 SKIPPED，不會 PASS）；網頁步驟 9 有「用評分模型評分」按鈕（只有模型回答方法的 run 能評；會花錢）。
 - **仍然成立**：同模型、未校準，所以分數是 provisional；人工審查仍是 skipped；evaluation 不會被 published；release verdict 不變。
 
 ## 第一次真模型 run 找到的問題（#174，已修）

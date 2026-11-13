@@ -11,6 +11,7 @@ import {
   parseDocument,
   planBenchmark,
   runBaseline,
+  startJudgeRun,
   startMethodRun,
   startQuestionGeneration,
   startQuestionValidation,
@@ -124,11 +125,14 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
   const [methodBudget, setMethodBudget] = useState(200000);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeEvalId, setActiveEvalId] = useState<string | null>(null);
+  const [activeRunKind, setActiveRunKind] = useState<"baseline" | "model" | null>(null);
 
-  // Step 9: Results
+  // Step 9: Results & Judge
   const [resultsStatus, setResultsStatus] = useState<StepState>("idle");
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [resultsData, setResultsData] = useState<RunResultsResponse | null>(null);
+  const [judgeStatus, setJudgeStatus] = useState<StepState>("idle");
+  const [judgeError, setJudgeError] = useState<string | null>(null);
 
   // Active polling controller ref for clean cancellation & unmount cleanup
   const activeAbortControllerRef = useRef<AbortController | null>(null);
@@ -516,7 +520,10 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     setMethodError(null);
     setActiveRunId(null);
     setActiveEvalId(null);
+    setActiveRunKind(null);
     setMethodJobDetail(null);
+    setJudgeStatus("idle");
+    setJudgeError(null);
 
     const controller = new AbortController();
     activeAbortControllerRef.current = controller;
@@ -533,6 +540,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
 
       if (res.ok) {
         setMethodStatus("success");
+        setActiveRunKind("baseline");
         setActiveRunId(res.data.run_id);
         setActiveEvalId(res.data.evaluation_id);
         // Automatically fetch results
@@ -555,7 +563,10 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     setMethodError(null);
     setActiveRunId(null);
     setActiveEvalId(null);
+    setActiveRunKind(null);
     setMethodJobDetail(null);
+    setJudgeStatus("idle");
+    setJudgeError(null);
 
     const controller = new AbortController();
     activeAbortControllerRef.current = controller;
@@ -579,6 +590,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
       }
 
       setActiveRunId(res.data.run_id);
+      setActiveRunKind("model");
       const jobId = res.data.job_id;
 
       // Poll answer job
@@ -623,6 +635,95 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
       if (Date.now() >= deadline) {
         setMethodStatus("error");
         setMethodError("模型回答任務逾時");
+      }
+    } finally {
+      if (activeAbortControllerRef.current === controller) {
+        activeAbortControllerRef.current = null;
+      }
+    }
+  };
+
+  // Step 9: Judge Run
+  const handleJudge = async () => {
+    if (
+      activeRunKind !== "model" ||
+      (methodStatus !== "success" && methodStatus !== "error") ||
+      judgeStatus === "running" ||
+      !activeRunId
+    ) {
+      return;
+    }
+    const runId = activeRunId;
+    setJudgeStatus("running");
+    setJudgeError(null);
+
+    const controller = new AbortController();
+    activeAbortControllerRef.current = controller;
+
+    try {
+      const res = await startJudgeRun({
+        projectId: projectId.trim(),
+        runId,
+        model: methodModel.trim(),
+        budgetCapMicros: Number(methodBudget),
+        token: token.trim(),
+        fetchFn,
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        setJudgeStatus(res.status === 409 ? "conflict_409" : "error");
+        setJudgeError(res.error.message);
+        return;
+      }
+
+      const jobId = res.data.job_id;
+
+      // Poll judge job every 3s up to 600s
+      const deadline = Date.now() + 600_000;
+      while (Date.now() < deadline) {
+        if (controller.signal.aborted) break;
+
+        const jobRes = await getJobStatus({
+          jobId,
+          token: token.trim(),
+          fetchFn,
+          signal: controller.signal,
+        });
+
+        if (!jobRes.ok) {
+          setJudgeStatus("error");
+          setJudgeError(jobRes.error.message);
+          return;
+        }
+
+        const s = jobRes.data.status;
+        if (s === "succeeded") {
+          setJudgeStatus("success");
+          setActiveEvalId(null);
+          void fetchResults(runId);
+          return;
+        }
+        if (s === "failed") {
+          // e.g. the budget ran out for some questions: the job still wrote an evaluation (those questions are errors with a reason)
+          setJudgeStatus("error");
+          setJudgeError("評分任務沒有全部成功（例如預算用完）：沒評到的題目在結果裡是「錯誤」並附原因，不是 0 分。");
+          setActiveEvalId(null);
+          void fetchResults(runId);
+          return;
+        }
+        if (s === "cancelled") {
+          setJudgeStatus("error");
+          setJudgeError("評分任務已取消");
+          return;
+        }
+
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+
+      if (Date.now() >= deadline) {
+        setJudgeStatus("error");
+        setJudgeError("評分任務逾時");
       }
     } finally {
       if (activeAbortControllerRef.current === controller) {
@@ -1277,6 +1378,32 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
           </span>
         </div>
         <div style={{ marginTop: "0.75rem" }}>
+          <div data-testid="judge-block" style={{ marginBottom: "0.75rem" }}>
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={handleJudge}
+                disabled={activeRunKind !== "model" || (methodStatus !== "success" && methodStatus !== "error") || judgeStatus === "running"}
+                style={buttonStyle}
+              >
+                用評分模型評分
+              </button>
+              <span style={moneyWarningStyle}>會呼叫真實模型、會花錢</span>
+            </div>
+            <p className="help" data-testid="judge-help">
+              {activeRunKind === "baseline"
+                ? "目前這個 run 是詞彙 baseline，沒有模型答案，不能評分。要評分請在步驟 8 執行「模型回答方法」。"
+                : activeRunKind !== "model" || (methodStatus !== "success" && methodStatus !== "error")
+                  ? "先在步驟 8 執行「模型回答方法」，答完才能評分。"
+                  : "評分模型和答題模型是同一家（同模型家族），沒有用人工標註校準，所以分數是暫定的。沒有作答的題目（棄答、失敗）不會呼叫評分模型。"}
+            </p>
+            {judgeStatus === "running" && <p role="status" style={{ color: "#0066cc" }}>評分中…（每個作答的題目一次呼叫）</p>}
+            {judgeError && (
+              <div role="alert" style={judgeStatus === "conflict_409" ? warningBoxStyle : errorBoxStyle}>
+                <strong>{judgeStatus === "conflict_409" ? "目前不能評分：" : "評分失敗："}</strong> {judgeError}
+              </div>
+            )}
+          </div>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.75rem" }}>
             <button
               type="button"
@@ -1302,6 +1429,20 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 {resultsData.provisional !== false ? "（暫定，不是正式成績）" : ""} ｜ Grader: {resultsData.evaluation?.grader_revision ?? resultsData.grader_revision ?? "—"}
               </p>
 
+              {resultsData.judge && (
+                <div data-testid="judge-summary" style={infoBoxStyle}>
+                  <p style={{ margin: 0 }}>
+                    評分模型 {resultsData.judge.model}（prompt {resultsData.judge.prompt_revision}）：評了 {resultsData.judge.judged_questions} 題，
+                    其中 {resultsData.judge.questions_with_a_contradicted_fact} 題有被判定為與標準答案相反的事實。
+                  </p>
+                  <p style={{ margin: "0.25rem 0 0 0" }} className="muted small">限制：{resultsData.judge.limitation}</p>
+                </div>
+              )}
+              {resultsData.excluded_questions && resultsData.excluded_questions.length > 0 && (
+                <p data-testid="excluded-note" className="muted small" style={{ margin: "0.25rem 0" }}>
+                  已排除 {resultsData.excluded_questions.length} 題（凍結前由 owner 排除，不評分）
+                </p>
+              )}
               {resultsData.submissions && (
                 <p style={{ margin: "0 0 0.5rem 0", fontSize: "0.85rem", color: "#555" }}>
                   提交統計：回答 {resultsData.submissions.answered ?? "—"} 筆 ｜ 模型棄權 {resultsData.submissions.abstained_by_model ?? "—"} 筆 ｜ 方法失敗 {Object.keys(resultsData.submissions.method_failures || {}).length} 筆

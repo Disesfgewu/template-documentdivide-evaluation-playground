@@ -19,7 +19,7 @@ from typing import Optional, Sequence
 from lab_api.generate_worker import CallSpec
 
 __all__ = ["JUDGE_PROMPT_REVISION", "JUDGE_PROMPT_SHA256", "JUDGE_LIMITATION", "JUDGE_GRADER_SUFFIX", "MAX_JUDGED_CLAIMS",
-           "JudgeVerdict", "build_judge_call", "parse_judge_reply", "check_verdict"]
+           "JudgeVerdict", "build_judge_call", "parse_judge_reply", "parse_judge_reply_ex", "check_verdict"]
 
 JUDGE_PROMPT_REVISION = "judge-v1"
 JUDGE_GRADER_SUFFIX = "+llm-judge-1"
@@ -70,30 +70,32 @@ def build_judge_call(call_id: str, fact_statements: Sequence[str], answer_text: 
     return CallSpec(id=call_id, system=SYSTEM, user=user)
 
 
-def parse_judge_reply(text: str) -> Optional[dict]:
-    """The model's JSON as a plain dict, or ``None`` when it is not exactly the expected shape. Structure only; whether the ids
-    match the question is ``check_verdict``'s job."""
-    t = (text or "").strip()
-    m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", t, re.S)
-    if m:
-        t = m.group(1)
-    try:
-        obj = json.loads(t)
-    except Exception:
-        return None
-    if not isinstance(obj, dict) or set(obj) != {"facts", "claims"} or not isinstance(obj["facts"], list) \
-            or not isinstance(obj["claims"], list):
-        return None
+def parse_judge_reply_ex(text: str) -> tuple[Optional[dict], str]:
+    """(verdict as a plain dict, "") or (None, code). The ENVELOPE is read like the question generator's replies (prose before or after the
+    JSON, a code fence anywhere; see ``generate_prompts.read_json_object``); the CONTENT stays strict: exactly the fact and claim entries with
+    exactly their keys and values, nothing repaired or guessed. Whether the ids match the question is ``check_verdict``'s job.
+    Codes: empty, reply_too_long, not_json, bad_keys, bad_facts_shape, bad_claims_shape."""
+    from lab_api.generate_prompts import read_json_object
+    obj, code = read_json_object(text, {"facts", "claims"})
+    if obj is None:
+        return None, code
+    if not isinstance(obj["facts"], list) or not isinstance(obj["claims"], list):
+        return None, "bad_keys"
     for f in obj["facts"]:
         if not isinstance(f, dict) or set(f) != {"id", "verdict"} or not isinstance(f["id"], str) \
                 or f["verdict"] not in ("stated", "missing", "contradicted"):
-            return None
+            return None, "bad_facts_shape"
     for c in obj["claims"]:
         if not isinstance(c, dict) or set(c) != {"id", "supported", "supporting_hit_ids"} or not isinstance(c["id"], str) \
                 or not isinstance(c["supported"], bool) or not isinstance(c["supporting_hit_ids"], list) \
                 or not all(isinstance(h, str) for h in c["supporting_hit_ids"]):
-            return None
-    return obj
+            return None, "bad_claims_shape"
+    return {"facts": obj["facts"], "claims": obj["claims"]}, ""
+
+
+def parse_judge_reply(text: str) -> Optional[dict]:
+    """The verdict as a plain dict or ``None`` (see ``parse_judge_reply_ex`` for the reason)."""
+    return parse_judge_reply_ex(text)[0]
 
 
 def check_verdict(obj: dict, n_facts: int, claims: Sequence[tuple[str, str, Sequence[str]]]) -> tuple[Optional[JudgeVerdict], Optional[str]]:

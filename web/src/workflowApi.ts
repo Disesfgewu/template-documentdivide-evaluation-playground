@@ -987,6 +987,76 @@ export async function startMethodRun({
   );
 }
 
+export type JudgeRunResponse = {
+  job_id: string;
+  run_id: string;
+  status: string;
+  answered_submissions?: number;
+};
+
+export type JudgeSummary = {
+  judged_questions: number;
+  questions_with_a_contradicted_fact: number;
+  model: string;
+  prompt_revision: string;
+  limitation: string;
+};
+
+export async function startJudgeRun({
+  projectId,
+  runId,
+  model = "claude-haiku-4-5-20251001",
+  budgetCapMicros = 200000,
+  token,
+  fetchFn = fetch,
+  signal,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  baseUrl = "",
+}: {
+  projectId: string;
+  runId: string;
+  model?: string;
+  budgetCapMicros?: number;
+  token: string;
+  fetchFn?: typeof fetch;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  baseUrl?: string;
+}): Promise<ApiResult<JudgeRunResponse>> {
+  const cleanToken = token.trim();
+  if (!cleanToken) {
+    return { ok: false, error: { message: "未提供認證 Token", status: 401, code: "unauthorized" } };
+  }
+  const cleanProjId = projectId.trim();
+  if (!validateUuid(cleanProjId)) {
+    return { ok: false, error: { message: "Project ID 格式錯誤（須為 UUID）", status: 400, code: "bad_request" } };
+  }
+  const cleanRunId = runId.trim();
+  if (!validateUuid(cleanRunId)) {
+    return { ok: false, error: { message: "Run ID 格式錯誤（須為 UUID）", status: 400, code: "bad_request" } };
+  }
+
+  const endpoint = `${baseUrl}/api/v1/runs/${encodeURIComponent(cleanRunId)}/judge-runs?project_id=${encodeURIComponent(cleanProjId)}`;
+  return executeFetch<JudgeRunResponse>(
+    endpoint,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cleanToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model.trim(),
+        budget_cap_micros: Math.floor(budgetCapMicros),
+      }),
+    },
+    cleanToken,
+    timeoutMs,
+    fetchFn,
+    signal,
+  );
+}
+
 // -----------------------------------------------------------------------------
 // Step 9: Results
 // -----------------------------------------------------------------------------
@@ -1024,6 +1094,8 @@ export type RunResultsResponse = {
     abstained_by_model: number;
     method_failures: Record<string, number>;
   };
+  judge?: JudgeSummary | null;
+  excluded_questions?: { ordinal: number; reason: string }[];
 };
 
 export async function getRunResults({
