@@ -43,6 +43,9 @@ def load_gen_config(env) -> tuple[GenModelConfig | None, str | None, str]:
     missing = [k for k in _REQUIRED if not env.get(k)]
     if missing:
         return None, None, "blocked: missing " + ", ".join(missing)
+    if not all(33 <= ord(ch) <= 126 for ch in env["LAB_GEN_API_KEY"]):
+        # a CR from a Windows .env, a space or any control character would make every request fail before it is sent (#174)
+        return None, None, "blocked: LAB_GEN_API_KEY contains a space, a control character or a non-ASCII character (check line endings)"
     if not os.path.isfile(env["LAB_GEN_BIN"]) or not os.access(env["LAB_GEN_BIN"], os.X_OK):
         return None, None, "blocked: LAB_GEN_BIN is not an executable file"
     try:
@@ -54,6 +57,14 @@ def load_gen_config(env) -> tuple[GenModelConfig | None, str | None, str]:
     cfg = GenModelConfig(protocol=env.get("LAB_GEN_PROTOCOL", "anthropic"), base_url=env["LAB_GEN_BASE_URL"],
                          allowed_host=env["LAB_GEN_ALLOWED_HOST"], input_micros_per_mtok=p_in, output_micros_per_mtok=p_out)
     return cfg, env["LAB_GEN_API_KEY"], ""
+
+
+def connect_factory(url: str):
+    """The worker's connection factory. AUTOCOMMIT is required (#174): the job is claimed and its budget reserved on one connection while
+    the heartbeat uses a second one. With autocommit off, the claim and the reservation stay in one open transaction that holds the job
+    row lock, the heartbeat then waits on it forever and the job never runs. Every write that must be atomic uses an explicit
+    ``conn.transaction()`` block, so nothing relies on the implicit transaction."""
+    return lambda: psycopg.connect(url, connect_timeout=5, autocommit=True)
 
 
 class GenerateWorker(Worker):
@@ -116,7 +127,7 @@ def main(argv: list[str] | None = None, env=None) -> int:
         signal.signal(sig, on_signal)
     from lab_db.storage import LocalArtifactStore
     store = LocalArtifactStore(settings.artifact_root)
-    worker = GenerateWorker(lambda: psycopg.connect(url, connect_timeout=5), lab_gen_cmd=[(env or os.environ)["LAB_GEN_BIN"]], store=store,
+    worker = GenerateWorker(connect_factory(url), lab_gen_cmd=[(env or os.environ)["LAB_GEN_BIN"]], store=store,
                             cfg=cfg, api_key=key, child_timeout=args.child_timeout, name=f"generate-worker-{uuid.uuid4().hex[:8]}",
                             concurrency=1, interval=args.interval, grace=args.grace, backoff=args.backoff, stop=stop,
                             once_timeout=args.once_timeout, heartbeat_file=args.heartbeat_file)

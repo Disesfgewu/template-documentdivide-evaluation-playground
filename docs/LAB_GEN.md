@@ -184,3 +184,12 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   **不是** pending、也不是 0、也不是棄答。`GET /api/v1/runs/{id}/results` 的 `submissions` 分別數：`answered`、`abstained_by_model`、`method_failures{代碼: 數量}`。
   run 狀態：全部有效作答 `completed`，否則 `completed_with_errors`；整批都不能送出（預算）時 job 以 `budget_exhausted` 失敗，但每一題仍然有記錄、run 仍然結束。
 - **限制**：不用 pgvector（這把 key 只有聊天模型，沒有 embedding 模型）；答案指標需要語意 judge（尚未做）；沒有任何人用真實模型跑過這個方法，測試只用假的 lab-gen。
+
+## 第一次真模型 run 找到的問題（#174，已修）
+
+- **generate worker 的連線必須是 autocommit**（`generate_worker_main.connect_factory`）：否則「領取 job + 預留預算」留在同一個沒結束的交易裡，鎖住 job 那一列，
+  另一條連線（heartbeat）永遠等它，job 一直是 `queued`。測試現在用 `main()` 實際使用的 factory 對真 PostgreSQL 跑，並有一個「舊 factory 會失敗」的對照。
+- **API key 的換行**：`scripts/demo.sh` 讀 `./.env` 時去掉 Windows 的 CR 與前後空白；含空白、控制字元或非 ASCII 的 key 被拒絕（`BLOCKED`，不顯示 key）。
+  `load_gen_config` 與 `lab-gen` 也各自拒絕這種 key（`lab-gen` 回 `refused`，不送任何呼叫、不留預留）。
+- **沒送出的請求不是「結果未知」**：HTTP client 在送出前就拒絕的請求（例如 header 值不合法）是 `failed`，預留釋放、不計費；同一批後面的呼叫標為 `skipped_after_stop`。
+- **`scripts/demo.sh up` 每次都重建 migrate image**，並且在跑 demo 之前確認資料庫的 migration 版本等於 repo 的最新版（不一致就 BLOCKED，不再讓 API 回 503）。

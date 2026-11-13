@@ -441,3 +441,34 @@ func TestModelConfigIntegerBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// #174: a header value the HTTP client refuses (a CR from a Windows .env) fails BEFORE any byte is sent: a plain failure with
+// the reservation released, never an unknown outcome that keeps the hold.
+func TestARequestRejectedBeforeTransportIsAFailureNotAnUnknownOutcome(t *testing.T) {
+	ctx := audited(t)
+	p := &provider{handler: answer("42", true)}
+	c := goodConfig("primary", p.start(t))
+	c.APIKeyEnv = "LAB_TEST_BAD_KEY"
+	t.Setenv("LAB_TEST_BAD_KEY", "sk-test-key\r")
+	hc, err := model.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := newChat(t, model.Router{Entries: []model.Entry{{Config: c, Client: hc}}}, "primary")
+	_, err = env.node(ctx, graph.State{})
+	if !errors.Is(err, ErrNotSent) || errors.Is(err, ErrOutcomeUnknown) || errors.Is(err, ErrResponseLost) {
+		t.Fatalf("err %v", err)
+	}
+	if strings.Contains(err.Error(), "sk-test-key") {
+		t.Fatalf("the key leaked into the error: %v", err)
+	}
+	if op := env.op(t); op.Status != OpFailed {
+		t.Fatalf("op %+v", op)
+	}
+	if s := env.budget.Snapshot(); s.Reserved != 0 || s.Unknown != 0 || s.Spent != 0 {
+		t.Fatalf("the reservation must be released: %+v", s)
+	}
+	if p.hits.Load() != 0 {
+		t.Fatalf("hits %d", p.hits.Load())
+	}
+}

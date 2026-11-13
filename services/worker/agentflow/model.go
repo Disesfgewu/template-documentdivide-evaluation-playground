@@ -28,6 +28,7 @@ var (
 	ErrModelSwapped  = errors.New("model pin not honoured: response came from another model")
 	ErrModelConfig   = errors.New("model config cannot express the LAB profile")
 	statusErrPattern = regexp.MustCompile(`HTTP (\d{3}) after \d+ retries`)
+	notSentPattern   = regexp.MustCompile(`net/http: (invalid header field (name|value)|invalid method|nil Context)|unsupported protocol scheme|no Host in request URL|invalid URL escape|invalid control character in URL`)
 )
 
 // ProviderStatusError is a provider answer with an HTTP error status after
@@ -162,6 +163,11 @@ func (c ChatCall) effect(ctx context.Context, s graph.State, _ Call) (graph.Stat
 		if m := statusErrPattern.FindStringSubmatch(err.Error()); m != nil {
 			code, _ := strconv.Atoi(m[1])
 			return nil, 0, &ProviderStatusError{Status: code, Err: err}
+		}
+		// The HTTP client refuses some requests BEFORE sending anything (a header value with a CR or a space, a bad URL): nothing
+		// reached the provider, so this is a plain failure with the reservation released, not an unknown outcome (#174).
+		if notSentPattern.MatchString(err.Error()) {
+			return nil, 0, fmt.Errorf("%w: %v", ErrNotSent, err)
 		}
 		// Transport failure after the request may have been sent (timeout,
 		// reset): the provider may have billed it, so the outcome is unknown.
