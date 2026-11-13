@@ -4,6 +4,6 @@ import { App } from "./App";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App initialTab="workflow" />
+    <App initialTab={import.meta.env.VITE_LAB_DEV_TOKEN ? "workflow" : "operator"} />
   </StrictMode>,
 );
