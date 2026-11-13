@@ -47,7 +47,10 @@ describe("fetchApiStatus", () => {
 describe("App", () => {
   it("states plainly which features are not connected yet", () => {
     render(<App load={() => new Promise<ApiStatus>(() => {})} />);
-    expect(screen.getByRole("region", { name: "尚未接入的功能" }).textContent).toContain("還沒有實作");
+    const note = screen.getByRole("region", { name: "尚未接入的功能" }).textContent ?? "";
+    expect(note).toContain("還沒有實作");
+    expect(note).toContain("暫定");
+    expect(note).toContain("人工審查尚未進行");
   });
   it("shows loading first", () => {
     render(<App load={() => new Promise<ApiStatus>(() => {})} />);
@@ -67,8 +70,14 @@ describe("App", () => {
     expect(s.textContent).toContain("非真模型");
     expect(screen.getByText(/database：失敗/)).toBeTruthy();
   });
-  it("renders DocumentOperator section and system limits notice without PR or issue numbers in UI", () => {
+  it("opens on the workflow tab, the way a person actually uses it", () => {
     render(<App load={() => new Promise<ApiStatus>(() => {})} />);
+    expect(screen.getByRole("region", { name: "工作流程頁面" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "文件操作員介面" })).toBeNull();
+    expect(screen.getByTestId("next-hint").textContent).toContain("Token");
+  });
+  it("renders DocumentOperator section and system limits notice without PR or issue numbers in UI", () => {
+    render(<App initialTab="operator" load={() => new Promise<ApiStatus>(() => {})} />);
     expect(screen.getByRole("region", { name: "文件操作員介面" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "系統限制與功能說明" }).textContent).toContain("後端服務可用性");
     expect(document.body.textContent).not.toMatch(/PR\s*#\d+/i);
