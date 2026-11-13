@@ -69,8 +69,14 @@ generate() {
 ui() {
   up
   generate_up || { code=$?; [[ $code == 3 ]] || return $code; echo "no API key: upload/parse/benchmark work in the page, model steps will fail (not a pass)" >&2; }
-  "${compose[@]}" --profile demo exec -T api python - < deploy/ui_session.py
-  echo "paste PROJECT_ID and TOKEN into the page; then: cd web && npm ci && npm run dev   (stop the stack with: scripts/demo.sh down)"
+  session="$("${compose[@]}" --profile demo exec -T api python - < deploy/ui_session.py)"
+  {
+    echo "# written by scripts/demo.sh ui: local development session (git-ignored, do not share)"
+    echo "VITE_LAB_DEV_PROJECT_ID=$(sed -n 's/^PROJECT_ID=//p' <<<"$session")"
+    echo "VITE_LAB_DEV_TOKEN=$(sed -n 's/^TOKEN=//p' <<<"$session")"
+  } > web/.env.local
+  echo "logged in automatically (web/.env.local). Next: cd web && npm ci && npm run dev, then open http://localhost:5173/"
+  echo "stop the backend with: scripts/demo.sh down"
 }
 
 down() { "${compose[@]}" --profile demo --profile tools --profile generate down -v; }
