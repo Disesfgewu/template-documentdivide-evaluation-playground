@@ -35,7 +35,7 @@ from lab_contracts.benchmark import (Distractor, EvidenceSet, EvidenceUnit, Fact
 from lab_api.generate_prompts import (CONFUSABLE_PROMPT_VERSION, CROSS_PAGE_PROMPT_VERSION, DEFAULT_PAGE_CHARS, ConfusableReply, PROMPT_VERSION, CrossReply, ParsedReply,
                                       build_confusable_call, build_cross_page_call, build_page_call, detect_language, page_reference,
                                       parse_confusable_reply_ex, parse_cross_page_reply_ex, parse_model_reply_ex, select_page_pairs,
-                                      select_pages, shown_pieces)
+                                      select_pages, shown_pieces, reply_shape)
 from lab_api.generate_worker import CallSpec
 from lab_api.validate_questions import code_checks
 
@@ -56,9 +56,15 @@ class GenerationStats:
     written: int = 0
     # why replies were dropped: fixed codes and counts only, never any model text (parse:<code>, check:<code>, ...)
     reasons: dict = field(default_factory=dict)
+    # the SHAPE (never the content) of every reply that could not be parsed: start/end character class, length bucket, fence, braces
+    shapes: dict = field(default_factory=dict)
 
     def drop(self, code: str) -> None:
         self.reasons[code] = self.reasons.get(code, 0) + 1
+
+    def shape(self, bucket: str, text: str) -> None:
+        key = f"{bucket}:{reply_shape(text)}"
+        self.shapes[key] = self.shapes.get(key, 0) + 1
 
 
 def question_hash(text: str) -> str:
@@ -319,6 +325,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 if reply is None:
                     stats.unparseable += 1
                     stats.drop("confusable:parse:" + why)
+                    stats.shape("confusable", row["text"])
                     continue
                 if not a_units or not d_units:
                     stats.unparseable += 1
@@ -362,6 +369,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 if reply is None:
                     stats.unparseable += 1
                     stats.drop("cross_page:parse:" + why)
+                    stats.shape("cross_page", row["text"])
                     continue
                 if not a_units or not b_units:
                     stats.unparseable += 1
@@ -395,6 +403,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 if reply is None:
                     stats.unparseable += 1
                     stats.drop("general:parse:" + why)
+                    stats.shape("general", row["text"])
                     continue
                 if not units:
                     stats.unparseable += 1
@@ -440,7 +449,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             (uuid.uuid4(), project_id, actor, resource,
              f"prompt={PROMPT_VERSION}+{CROSS_PAGE_PROMPT_VERSION}+{CONFUSABLE_PROMPT_VERSION} replies={stats.replies} "
              f"written={stats.written} cross_written={stats.cross_written} confusable_written={stats.confusable_written} unparseable={stats.unparseable} invalid={stats.invalid} "
-             f"duplicate={stats.duplicate} reasons={json.dumps(stats.reasons, sort_keys=True)} total={total} target={target} shortfall={max(0, target - total)} "
+             f"duplicate={stats.duplicate} reasons={json.dumps(stats.reasons, sort_keys=True)} parse_shapes={json.dumps(stats.shapes, sort_keys=True)} total={total} target={target} shortfall={max(0, target - total)} "
              f"cross_total={cross_total} cross_target={cross_target} cross_shortfall={max(0, cross_target - cross_total)} "
              f"confusable_total={conf_total} confusable_target={conf_target} confusable_shortfall={max(0, conf_target - conf_total)}", op_id))
         if all_total > 0:

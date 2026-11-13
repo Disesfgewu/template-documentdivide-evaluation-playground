@@ -101,7 +101,7 @@ class AnswerRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         project, owner = self.frozen()
         run, counts, body = self.run_method(project, owner, "answer_ok", cap=5)
         n = self.api("get", owner, self.GEN, project).json()["questions"]
-        self.assertEqual(body["submissions"], {"answered": 0, "abstained_by_model": 0, "method_failures": {"budget_exhausted": n}})
+        self.assertEqual(body["submissions"], {"answered": 0, "abstained_by_model": 0, "no_answer_retrieval_only": 0, "method_failures": {"budget_exhausted": n}})
         with self.connect() as c:
             self.assertEqual(c.execute("SELECT status::text FROM runs WHERE id = %s", (run["run_id"],)).fetchone()[0], "completed_with_errors")
             self.assertEqual(c.execute("SELECT status::text FROM jobs WHERE id = %s", (run["job_id"],)).fetchone()[0], "failed")
@@ -147,7 +147,7 @@ class AnswerRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         with mock.patch.object(answer_run.local_methods, "query", drifting):
             run, counts, body = self.run_method(project, owner, "answer_ok")
         n = self.api("get", owner, self.GEN, project).json()["questions"]
-        self.assertEqual(body["submissions"], {"answered": 0, "abstained_by_model": 0, "method_failures": {"outcome_unknown": n}})
+        self.assertEqual(body["submissions"], {"answered": 0, "abstained_by_model": 0, "no_answer_retrieval_only": 0, "method_failures": {"outcome_unknown": n}})
 
     def test_the_participant_phase_never_touches_gold_or_system_parse_tables(self):
         project, owner = self.frozen()

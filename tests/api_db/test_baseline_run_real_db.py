@@ -47,6 +47,9 @@ class BaselineRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertEqual(metrics["complete_at_k"]["scored"], n)
         self.assertEqual(metrics["recall_at_k"]["mean"], 100.0)
         self.assertEqual(metrics["complete_at_k"]["mean"], 100.0)
+        # no model is behind the lexical baseline: its pages-only submissions are "no answer", not a model's abstention
+        self.assertEqual(body["submissions"], {"answered": 0, "abstained_by_model": 0, "no_answer_retrieval_only": n, "method_failures": {}})
+        self.assertIn("0-100", body["scale"])
         lp = metrics["localization_precision"]["mean"]
         self.assertTrue(0 < lp < 50, lp)                                          # coarse whole-page regions: low by construction
         self.assertEqual((metrics["textual_consistency"]["scored"], metrics["textual_consistency"]["not_applicable"]), (0, n))

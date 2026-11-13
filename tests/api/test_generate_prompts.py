@@ -87,9 +87,25 @@ class ParseReplyTests(unittest.TestCase):
                            ("x" * 30_000, "reply_too_long")):
             self.assertEqual(parse_model_reply_ex(text), (None, code), text[:40])
 
+    def test_the_shape_of_a_reply_says_why_it_failed_without_showing_any_content(self):
+        from lab_api.generate_prompts import reply_shape
+        secret = "SECRET-CONTENT-12345"
+        cases = {
+            "": "start=none;end=none;len=0;fence=no;balanced=yes",
+            "{" + secret: "start={;end=digit;len=1-199;fence=no;balanced=no",                  # cut off: braces do not balance
+            "Sure! Here it is: {\"a\": 1}": "start=letter;end=};len=1-199;fence=no;balanced=yes",   # prose before the JSON
+            "```json\n{\"a\": 1}\n```": "start=`;end=`;len=1-199;fence=yes;balanced=yes",
+            "題目是什麼？": "start=cjk;end=other;len=1-199;fence=no;balanced=yes",
+            "x" * 700: "start=letter;end=letter;len=500-999;fence=no;balanced=yes",
+            "{" + "y" * 2500 + "}": "start={;end=};len=2000+;fence=no;balanced=yes",
+        }
+        for text, shape in cases.items():
+            self.assertEqual(reply_shape(text), shape, text[:20])
+            self.assertNotIn(secret, reply_shape(text))
+
     def test_a_question_that_names_a_page_number_is_recognised(self):
         from lab_api.generate_prompts import page_reference
-        for q in ("What content appears on page 5?", "What does page 12 say about fees?", "請問第5頁寫了什麼？", "第五頁的內容是什麼", "see p. 7 for the fee",
+        for q in ("第５頁寫了什麼？", "What is on page ５?", "第１２頁有哪些條件？", "What content appears on page 5?", "What does page 12 say about fees?", "請問第5頁寫了什麼？", "第五頁的內容是什麼", "see p. 7 for the fee",
                   "第 12 頁有哪些條件？"):
             self.assertTrue(page_reference(q), q)
         for q in ("What is the annual fee for the premium plan?", "申請費用是多少？", "Which page layout does the template use?"):

@@ -110,6 +110,8 @@ class ResultsShapeTests(unittest.TestCase):
             res = MagicMock()
             if "metric_name = 'correctness'" in sql:                  # the judge summary: nothing was judged here
                 res.fetchone.return_value = (0, 0, None, None, None)
+            elif "FROM generate_jobs WHERE run_id" in sql:            # does an answering job back this run?
+                res.fetchone.return_value = (True,)
             elif "FROM evaluations WHERE run_id" in sql:              # the latest evaluation of the run
                 res.fetchone.return_value = (EV,)
             else:

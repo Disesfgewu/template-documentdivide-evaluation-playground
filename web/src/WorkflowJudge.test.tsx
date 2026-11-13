@@ -15,7 +15,7 @@ const SHA = "a".repeat(64);
 const TOKEN = `lab_act_${U1}_${SHA}`;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-type Opts = { judgeStatus?: number; judgeJob?: string; judged?: boolean };
+type Opts = { judgeStatus?: number; judgeJob?: string; judged?: boolean; submissions?: Record<string, unknown> };
 
 function backend(opts: Opts = {}) {
   const calls: { url: string; method: string; body?: string }[] = [];
@@ -55,7 +55,7 @@ function backend(opts: Opts = {}) {
       return json({
         run_id: RUN, evaluation: { id: U4, grader_revision: judged ? "rule-based-scorer-1+llm-judge-1" : "rule-based-scorer-1", status: "provisional" }, provisional: true,
         metrics: [{ metric_name: "correctness", scored: judged ? 5 : 0, not_applicable: 0, pending: judged ? 0 : 5, error: 0, mean: judged ? 80 : null }],
-        submissions: { answered: 5, abstained_by_model: 0, method_failures: {} },
+        submissions: opts.submissions ?? { answered: 5, abstained_by_model: 0, method_failures: {} },
         excluded_questions: [{ ordinal: 3, reason: "不合格" }],
         judge: judged ? { judged_questions: 5, questions_with_a_contradicted_fact: 1, model: "claude-haiku-4-5-20251001", prompt_revision: "judge-v1",
           limitation: "Judged by the same provider/model family that generated the questions; uncalibrated; provisional." } : null,
@@ -151,5 +151,34 @@ describe("Workflow: the judge step", () => {
     fireEvent.click(judgeButton());
     await screen.findByText(/目前不能評分/);
     expect(document.body.textContent).not.toContain(TOKEN);
+  }, 20000);
+});
+
+describe("Workflow: how the submissions of a run are described", () => {
+  it("a retrieval-only run says it produced no answers instead of blaming a model's abstention", async () => {
+    const { f } = backend({ submissions: { answered: 0, abstained_by_model: 0, no_answer_retrieval_only: 9, method_failures: {} } });
+    await runUntilFrozen(f);
+    fireEvent.click(screen.getByRole("button", { name: "詞彙 baseline" }));
+    await waitFor(() => expect(screen.getByTestId("no-answer-note")).toBeTruthy());
+    expect(screen.getByTestId("no-answer-note").textContent).toContain("無答案");
+    expect(screen.getByTestId("no-answer-note").textContent).toContain("9 筆");
+    expect(screen.getByTestId("results-table").parentElement?.textContent).toContain("模型棄權 0 筆");
+  }, 20000);
+
+  it("counts failed SUBMISSIONS, not the number of failure codes", async () => {
+    const { f } = backend({ submissions: { answered: 4, abstained_by_model: 1, no_answer_retrieval_only: 0, method_failures: { budget_exhausted: 3, provider_error: 2 } } });
+    await runUntilFrozen(f);
+    fireEvent.click(screen.getByRole("button", { name: "模型回答方法" }));
+    await waitFor(() => expect(screen.getByTestId("results-table")).toBeTruthy());
+    expect(screen.getByTestId("results-table").parentElement?.textContent).toContain("方法失敗 5 筆");
+    expect(screen.queryByTestId("no-answer-note")).toBeNull();
+  }, 20000);
+
+  it("the results header says the unit of the means", async () => {
+    const { f } = backend();
+    await runUntilFrozen(f);
+    fireEvent.click(screen.getByRole("button", { name: "詞彙 baseline" }));
+    await waitFor(() => expect(screen.getByTestId("results-table")).toBeTruthy());
+    expect(screen.getByTestId("results-table").textContent).toContain("0–100");
   }, 20000);
 });

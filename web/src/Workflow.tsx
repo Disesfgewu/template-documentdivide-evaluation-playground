@@ -1445,7 +1445,11 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
               )}
               {resultsData.submissions && (
                 <p style={{ margin: "0 0 0.5rem 0", fontSize: "0.85rem", color: "#555" }}>
-                  提交統計：回答 {resultsData.submissions.answered ?? "—"} 筆 ｜ 模型棄權 {resultsData.submissions.abstained_by_model ?? "—"} 筆 ｜ 方法失敗 {Object.keys(resultsData.submissions.method_failures || {}).length} 筆
+                  提交統計：回答 {resultsData.submissions.answered ?? "—"} 筆 ｜ 模型棄權 {resultsData.submissions.abstained_by_model ?? "—"} 筆 ｜ 方法失敗{" "}
+                  {Object.values(resultsData.submissions.method_failures || {}).reduce((a, b) => a + b, 0)} 筆
+                  {(resultsData.submissions.no_answer_retrieval_only ?? 0) > 0 && (
+                    <span data-testid="no-answer-note"> ｜ 無答案（這個方法只做檢索、不產生答案）{resultsData.submissions.no_answer_retrieval_only} 筆</span>
+                  )}
                 </p>
               )}
 
@@ -1459,7 +1463,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                     <th style={{ padding: "0.5rem" }}>已評分題數 (Scored)</th>
                     <th style={{ padding: "0.5rem" }}>錯誤題數 (Error)</th>
                     <th style={{ padding: "0.5rem" }}>待評分題數 (Pending)</th>
-                    <th style={{ padding: "0.5rem" }}>平均得分 (Mean)</th>
+                    <th style={{ padding: "0.5rem" }}>平均得分 (Mean，0–100)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1522,7 +1526,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
 const METRIC_HELP: Record<string, string> = {
   recall_at_k: "檢索命中：標準答案需要的證據，有沒有被找回來（0–100）",
   complete_at_k: "完整命中：需要的證據是否全部找回來",
-  localization_precision: "定位精準度：回傳的區域有多少落在正確位置（整頁檢索天生偏低）",
+  localization_precision: "定位精準度（0–100，和其他分數同一個尺度）：回傳的區域有多少落在正確位置。整頁檢索天生偏低：0.8 代表 0.8%，不是 80%",
   textual_consistency: "文字一致性（這批題目不適用）",
   correctness: "答案正確性：答案是否包含標準答案的事實（需要評分模型）",
   citation_precision: "引用精準度：引用的段落是否真的支持該論述（需要評分模型）",

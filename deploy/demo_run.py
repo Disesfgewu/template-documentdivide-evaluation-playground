@@ -339,17 +339,41 @@ def main() -> int:
     if os.environ.get("DEMO_GENERATE") != "1" or no_key or path or any(f in failures for f in ("generation", "generation start", "validation", "validation start")):
         print("SKIPPED (generation and validation did not complete, so there is nothing to freeze). A skipped step is not a pass.")
     else:
+        if os.environ.get("DEMO_EXCLUDE_FAILED") == "1":
+            # OPT-IN (the owner's decision, not the demo's): exclude every question whose automated validation did not pass, with a
+            # recorded reason. Nothing is deleted; an excluded question is not frozen, answered or scored, and the freeze lists it.
+            print("DEMO_EXCLUDE_FAILED=1: excluding the questions that did not pass the automated validation (recorded with a reason, not deleted)")
+            code, review = api.call("GET", f"/api/v1/benchmarks/{bench_name}/revisions/1/questions/review?project_id={project}")
+            if code != 200:
+                print(f"GET .../questions/review -> {code}: {json.dumps(review)[:300]}")
+                failures.append("exclusion")
+            else:
+                to_exclude = [i for i in review.get("items", []) if not i.get("excluded") and i.get("verdict") != "pass"]
+                if not to_exclude:
+                    print("  every question passed: nothing to exclude")
+                for item in to_exclude:
+                    reason = f"demo DEMO_EXCLUDE_FAILED=1: automated validation verdict {item.get('verdict')}"
+                    xcode, xres = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/questions/{item['id']}/exclusion?project_id={project}",
+                                           json.dumps({"excluded": True, "reason": reason}).encode(), "application/json")
+                    print(f"  question {item.get('ordinal', 0) + 1} ({item.get('verdict')}): excluded -> {xcode}; "
+                          f"validator said: {str(item.get('verdict_reason'))[:160]}")
+                    if xcode != 200:
+                        print("   ", json.dumps(xres)[:300])
+                        failures.append("exclusion")
         code, frozen = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/freeze?project_id={project}",
                                 json.dumps({"compliance": "partial"}).encode(), "application/json")
         if code != 200:
             print(f"POST .../freeze -> {code}: {(frozen.get('error') or {}).get('message', frozen)}")
-            print("NOT FROZEN: a freeze needs a passing automated validation for EVERY question; nothing is excluded or deleted. "
+            print("NOT FROZEN: a freeze needs a passing automated validation for EVERY non-excluded question; nothing is deleted. "
+                  "Exclude the failed ones in the web page, or rerun with DEMO_EXCLUDE_FAILED=1. "
                   "The baseline run needs a frozen benchmark, so it is skipped. This is an honest outcome of the model's output, "
                   "not a demo failure.")
         else:
             was_frozen = True
             print(f"frozen as {frozen['compliance'].upper()}: {frozen['questions']} questions (N target {frozen['n_target']}), "
                   f"shortfall {frozen['shortfall']}; human review {frozen['human_review']}")
+            for ex in frozen.get("excluded_questions") or []:
+                print(f"  - excluded before the freeze (recorded, not deleted, not scored): question {ex['ordinal'] + 1}: {ex['reason']}")
             for line in frozen["limits"]:
                 print(f"  - {line}")
             code, run = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/baseline-run?project_id={project}", b"{}", "application/json")

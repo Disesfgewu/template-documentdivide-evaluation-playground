@@ -18,12 +18,12 @@ __all__ = ["CONFUSABLE_PROMPT_VERSION", "ConfusableReply", "build_confusable_cal
            "CROSS_PAGE_PROMPT_VERSION", "CrossReply", "MAX_FACTS", "PROMPT_VERSION", "build_cross_page_call", "parse_cross_page_reply",
            "select_page_pairs", "shown_by_page", "ParsedReply", "build_page_call", "detect_language", "parse_model_reply",
            "select_pages", "shown_pieces", "page_reference", "parse_cross_page_reply_ex", "parse_confusable_reply_ex",
-           "parse_model_reply_ex", "read_json_object"]
+           "parse_model_reply_ex", "read_json_object", "reply_shape"]
 
 MAX_FACTS = 3
-PROMPT_VERSION = "general-page-v2"   # recorded with every generation batch (PM-DECISION 2026-11-12)
-CROSS_PAGE_PROMPT_VERSION = "cross-page-v2"
-CONFUSABLE_PROMPT_VERSION = "confusable-v2"
+PROMPT_VERSION = "general-page-v3"   # recorded with every generation batch (PM-DECISION 2026-11-12)
+CROSS_PAGE_PROMPT_VERSION = "cross-page-v3"
+CONFUSABLE_PROMPT_VERSION = "confusable-v3"
 MAX_QUESTION_CHARS, MAX_ANSWER_CHARS, MAX_FACT_CHARS = 500, 600, 400
 DEFAULT_PAGE_CHARS = 6000
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S)
@@ -54,6 +54,31 @@ def read_json_object(text: str, required: set) -> tuple[Optional[dict], str]:
                 return obj, ""
         i = t.find("{", end)
     return None, "bad_keys" if seen_object else "not_json"
+
+
+def _char_class(ch: str) -> str:
+    if ch == "":
+        return "none"
+    if ch in "{}[]`":
+        return ch
+    if "一" <= ch <= "鿿":
+        return "cjk"
+    if ch.isalpha():
+        return "letter"
+    if ch.isdigit():
+        return "digit"
+    return "other"
+
+
+def reply_shape(text: str) -> str:
+    """The SHAPE of a reply, never its content (Issue #7 item 4: find out why replies are not JSON): the class of its first and last
+    character, a length bucket, whether it has a code fence, and whether its braces balance (an unbalanced reply is usually one cut off
+    at the output cap). Example: ``start={;end=letter;len=500-999;fence=no;balanced=no``."""
+    t = (text or "").strip()
+    n = len(t)
+    bucket = "0" if n == 0 else "1-199" if n < 200 else "200-499" if n < 500 else "500-999" if n < 1000 else "1000-1999" if n < 2000 else "2000+"
+    return (f"start={_char_class(t[:1])};end={_char_class(t[-1:])};len={bucket};fence={'yes' if '```' in t else 'no'};"
+            f"balanced={'yes' if t.count('{') == t.count('}') else 'no'}")
 
 
 def _normalise_facts(raw, lo: int, *, sources: bool) -> tuple[Optional[list], str]:
@@ -123,6 +148,8 @@ SYSTEM = (
     "CONTENT only.\n"
     "- Give a short reference answer and 1 to 3 facts that a correct answer must contain (each fact one short "
     "statement taken from the evidence).\n"
+    "- Your reply must START with the character { and END with the character }: no sentence before it, no code fence, nothing after it. "
+    "Keep every field short so the whole reply fits.\n"
     "- Reply with ONE JSON object and nothing else: "
     '{"question": "...", "reference_answer": "...", "facts": [{"statement": "..."}]}'
 )
@@ -222,6 +249,8 @@ SYSTEM_CROSS = (
     "- Give a short reference answer and 2 or 3 facts that a correct answer must contain, each one short statement taken "
     "from the evidence, with \"source\": \"A\" or \"B\" saying which passage it comes from. At least one fact must come "
     "from A and at least one from B.\n"
+    "- Your reply must START with the character { and END with the character }: no sentence before it, no code fence, nothing after it. "
+    "Keep every field short so the whole reply fits.\n"
     "- Reply with ONE JSON object and nothing else: "
     '{"question": "...", "reference_answer": "...", "facts": [{"statement": "...", "source": "A"}, {"statement": "...", "source": "B"}]}'
 )
@@ -304,6 +333,8 @@ SYSTEM_CONFUSABLE = (
     "- Give a short reference answer and 1 to 3 facts taken from passage A.\n"
     "- Also say why passage B is confusable (\"confusion_reason\": what in B looks like the answer but is not) and which "
     "detail tells them apart (\"disambiguating_condition\": the detail in the question or in A that selects A and not B).\n"
+    "- Your reply must START with the character { and END with the character }: no sentence before it, no code fence, nothing after it. "
+    "Keep every field short so the whole reply fits.\n"
     "- Reply with ONE JSON object and nothing else: "
     '{"question": "...", "reference_answer": "...", "facts": [{"statement": "..."}], '
     '"confusion_reason": "...", "disambiguating_condition": "..."}'

@@ -46,6 +46,21 @@ class DemoKeyTests(unittest.TestCase):
         self.assertIn("code=4", out.stdout)
         self.assertNotIn("secret", out.stdout + out.stderr)
 
+    def run_generate(self, env):
+        # docker is replaced by echo: what the script WOULD pass to the demo container is what we check
+        code = 'compose=(echo COMPOSE); up() { :; }; generate_up() { return 0; }; generate'
+        return bash(code, env=env)
+
+    def test_the_opt_in_exclusion_is_forwarded_to_the_demo_only_when_asked_for(self):
+        on = self.run_generate({"DEMO_EXCLUDE_FAILED": "1"})
+        self.assertEqual(on.returncode, 0, on.stderr)
+        self.assertIn("-e DEMO_EXCLUDE_FAILED=1", on.stdout)
+        self.assertIn("-e DEMO_GENERATE=1", on.stdout)
+        for value in ("", "0", "yes"):                         # only the exact opt-in counts
+            off = self.run_generate({"DEMO_EXCLUDE_FAILED": value})
+            self.assertEqual(off.returncode, 0, off.stderr)
+            self.assertNotIn("DEMO_EXCLUDE_FAILED", off.stdout, value)
+
     def test_the_repo_head_helper_finds_the_newest_migration(self):
         head = bash("repo_head").stdout.strip()
         versions = sorted(p.name[:4] for p in (SCRIPT.parents[1] / "db" / "lab_db" / "schema" / "versions").glob("[0-9]*.py"))

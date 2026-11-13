@@ -79,7 +79,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertIn("confusable_shortfall=0", reason[0][0])
         self.assertIn("shortfall=0", reason[0][0])
         self.assertIn("cross_shortfall=0", reason[0][0])
-        self.assertIn("prompt=general-page-v2", reason[0][0])
+        self.assertIn("prompt=general-page-v3", reason[0][0])
         self.assertEqual(self.bench_status(bench), "validating")                     # generating -> validating, never frozen
 
     def test_unparseable_replies_write_nothing_and_are_counted(self):
@@ -93,9 +93,18 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
     def test_every_dropped_reply_has_a_fixed_reason_code_and_no_content(self):
         project, owner, bench, job, out = self.run_batch("badjson")
         reason = self.audit_reason(project)[0][0]
-        reasons = json.loads(reason.split("reasons=")[1].split(" total=")[0])
+        reasons = json.loads(reason.split("reasons=")[1].split(" parse_shapes=")[0])
         self.assertEqual(reasons, {"general:parse:not_json": general_target(3), "cross_page:parse:not_json": cross_page_target(3),
                                    "confusable:parse:not_json": confusable_target(3)})
+        self.assertNotIn("I cannot comply", reason)
+
+    def test_the_shape_of_every_unparseable_reply_is_recorded_and_never_its_content(self):
+        project, owner, bench, job, out = self.run_batch("badjson")
+        reason = self.audit_reason(project)[0][0]
+        shapes = json.loads(reason.split("parse_shapes=")[1].split(" total=")[0])
+        want = "start=letter;end=other;len=1-199;fence=no;balanced=yes"                 # "I cannot comply."
+        self.assertEqual(shapes, {f"general:{want}": general_target(3), f"cross_page:{want}": cross_page_target(3),
+                                  f"confusable:{want}": confusable_target(3)})
         self.assertNotIn("I cannot comply", reason)
 
     def test_prose_and_a_fence_around_the_json_are_tolerated(self):
@@ -107,7 +116,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
     def test_a_question_that_names_a_page_number_is_dropped_with_its_reason(self):
         project, owner, bench, job, out = self.run_batch("questions_pagerefs")
         self.assertEqual(self.count("questions", bench), 0)
-        reasons = json.loads(self.audit_reason(project)[0][0].split("reasons=")[1].split(" total=")[0])
+        reasons = json.loads(self.audit_reason(project)[0][0].split("reasons=")[1].split(" parse_shapes=")[0])
         self.assertEqual(reasons, {"general:check:page_reference": general_target(3), "cross_page:check:page_reference": cross_page_target(3),
                                    "confusable:check:page_reference": confusable_target(3)})
 

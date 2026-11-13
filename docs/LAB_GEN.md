@@ -62,7 +62,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **`build_calls`**（`lab_api/generate_questions.py`）：只讀 benchmark **釘住的 parse**（P-A）裡通過 G8 硬規則的頁、只取其文字證據單位；每題一個呼叫，
   頁面輪流（round-robin），同一頁重複時用程式產生的「第 k 個敘述」提示避免重複。目標數 = N − 3Q（其餘三個 bucket 各至少 Q）。
   **不送**檔名、document／project／actor id、diagnostics、其他頁、其他題的 gold、key。system prompt 固定在程式裡（版本
-  `general-page-v2`，寫進稽核事件），證據用 `<evidence>` 框起來並明說裡面的指令一律忽略。
+  `general-page-v3`，寫進稽核事件），證據用 `<evidence>` 框起來並明說裡面的指令一律忽略。
 - **模型只寫三樣東西**（≤ 500 token）：題目、參考答案、1..3 個 fact。其餘契約欄位全由程式導出：language（粗略 zh／en）、tags `[]`、
   modality `text`、reasoning_type `value_lookup`、SourceAnswer（該頁被送出的文字單位，不含干擾項）、TextualAnswer `checks: []`、
   calculation `null`、每個 fact 平均權重、固定的評分敘述（無部分給分）。
@@ -138,7 +138,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 
 - **何時生成**：同一個生成 job 的同一批呼叫裡，在一般題之後加上 Q 題（Q = ceil(0.10·N)，和 plan 的 cross_page 下限相同）的 cross_page 呼叫；
   乾淨且有文字的頁面少於兩頁時**不產生任何配對、不呼叫**（缺額如實記錄，不湊數）。頁面配對是兩個不同的頁，最近的頁優先，輪流使用。沒有新的 migration。
-- **prompt**（版本 `cross-page-v2`，固定在程式裡）：兩個頁面各自框成資料區塊 A 與 B（不含 evidence id 等識別碼），**每頁各自套用字元上限**（6000），
+- **prompt**（版本 `cross-page-v3`，固定在程式裡）：兩個頁面各自框成資料區塊 A 與 B（不含 evidence id 等識別碼），**每頁各自套用字元上限**（6000），
   標籤中和同一般題；模型回 ≤ 500 token 的 JSON：題目、參考答案、2–3 個 fact，每個 fact 標明 `source`（A 或 B），兩邊都至少要有一個。
 - **程式導出與檢查**：source answer 的證據組 = A、B 兩頁**實際送出**的單位；每個 fact 的支持組只有它被標到的那一頁的單位。因此契約的檢查是真的在檢查：
   證據組必須跨 ≥ 2 頁、且不能有任何單一頁就支持所有 fact（否則 `cross_page_single_page` 而被丟棄）。模型「這個 fact 在哪一頁」的宣稱還會用程式對照該頁送出的文字
@@ -151,7 +151,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 
 - **何時生成**：同一批呼叫裡，在 general 與 cross_page 之後再加 Q 題 confusable；需要兩個不同的乾淨文字頁（頁 A 回答、頁 B 是看起來相似的干擾來源，兩頁輪流當 A）。
   少於兩頁就沒有配對、不呼叫，缺額如實記錄。沒有新的 migration（`distractors` 表早已存在，與 facts 同一套 gold RLS）。
-- **prompt**（`confusable-v2`，固定在程式裡）：A、B 各自框成資料並各自套字元上限、不送任何識別碼；模型回 ≤ 500 token 的 JSON：題目（必須只靠 A 就能答）、參考答案、1–3 個 fact、
+- **prompt**（`confusable-v3`，固定在程式裡）：A、B 各自框成資料並各自套字元上限、不送任何識別碼；模型回 ≤ 500 token 的 JSON：題目（必須只靠 A 就能答）、參考答案、1–3 個 fact、
   `confusion_reason`（B 裡什麼看起來像答案但不是）、`disambiguating_condition`（區分 A 與 B 的細節）。
 - **程式導出與檢查**：gold 證據組 = 頁 A 實際送出的單位；頁 B 實際送出的每個單位都成為 distractor（附同一組 reason 與 condition），所以契約的檢查成立：
   `confusable_without_distractor`（至少一個干擾項）、`distractor_is_gold`（干擾項不能是 gold）。程式再檢查三件事，不過就丟棄並計入 invalid：
@@ -226,7 +226,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   `<桶>:no_shown_units`、`<桶>:check:<page_reference|answer_or_fact_not_grounded|condition_not_grounded|b_supports_a_fact|reason_not_in_b|no_overlapping_distractor_unit|fact_not_in_its_page|derive_error|contract_invalid|unit_not_stored>`、`duplicate_question`。
   下一次真實 run 就能看出易混淆題為什麼是 0。
 - **題目不能提到頁碼**：`page 5`、`p. 5`、`第5頁`、`第五頁` 這類（問的是版面、不是內容，而且頁碼可能是印出來的而不是 PDF 的頁序）→ `check:page_reference`，題目丟掉。
-  三個 prompt 也加了這條規則，版本升到 `general-page-v2`／`cross-page-v2`／`confusable-v2`。
+  三個 prompt 也加了這條規則，版本升到 `general-page-v3`／`cross-page-v3`／`confusable-v3`。
 
 ## 凍結前排除題目（migration 0019；Refs #10、Issue #7 的 PM 決定）
 
@@ -237,3 +237,14 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - 排除是**一筆有理由的紀錄，不是刪除**：`question_exclusions` 只能新增（最新一筆為準，`restore` 就是再新增一筆），也寫入 audit。資料庫自己也檢查：只有 owner 寫得進去、凍結後寫不進去。
 - 被排除的題目**不凍結、不作答、不計分**：所有讀「benchmark 的題目」的地方都改讀 view `active_questions`。凍結的回應列出 `excluded_questions`，`GET /runs/{id}/results` 也有 `excluded_questions`，進度（`GET …/generate`）的 `questions`／`validation` 是「未被排除」的那些，另有 `excluded` 數量。
 - 凍結的條件變成：**每一題「未被排除」的題目的最新驗題都是 pass，而且至少剩一題**（資料庫的 freeze gate 同步改了）。其他規則不變（owner、compliance 只能是 partial）。
+
+## 完整真實 run 之後的小修（Refs #12、Issue #7）
+
+- **baseline 不是「模型棄權」**：詞彙 baseline 只回傳頁面、沒有模型。`GET /runs/{id}/results` 的 `submissions` 現在有 `no_answer_retrieval_only`（沒有 `answer` job 的 run 的無答案提交）；
+  `abstained_by_model` 只數真的有模型的方法。網頁寫成「無答案（這個方法只做檢索、不產生答案）N 筆」。網頁的「方法失敗」也改成加總失敗的**提交數**（原本數的是失敗代碼的種類數）。
+- **單位一致，只是沒標**：所有指標的值與平均都是 0–100（資料表 `raw_value` 就是 `100 × 分子／分母`，平均是它的平均）。`localization_precision` 的 0.82 是 0.82%（整頁區域天生偏低），不是 0–1 的尺度。
+  結果回應多了 `scale` 說明，網頁表頭寫「0–100」，並在該指標說明「0.8 代表 0.8%，不是 80%」。
+- **demo 的選用排除步驟**：`DEMO_EXCLUDE_FAILED=1 scripts/demo.sh generate` 在凍結前把驗題沒通過的題目排除（記錄理由、不刪除，輸出會逐題列出並說明這是選用的），凍結的輸出也列出被排除的題目。沒設定就和以前一樣：有題目沒過就停在凍結。
+- **出題回覆解析失敗的原因診斷**：每個解析不了的回覆，稽核事件多一個 `parse_shapes={…}`：只記**形狀**，不記內容（第一個與最後一個字元的類別 `{ } [ ] ` letter cjk digit other none`、長度區間、有沒有 code fence、大括號是否成對；
+  括號不成對通常是被 500 token 上限截斷）。三個 prompt 升到 v3，多一條「回覆必須以 { 開頭、以 } 結尾，不要前言、不要 code fence，每個欄位寫短一點」。
+  **還沒做 assistant prefill（預填 `{`）**：它要改 lab-gen 的請求格式（最後一則 assistant 訊息）而且不是每個模型都支援，先看形狀資料再決定。

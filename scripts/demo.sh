@@ -6,6 +6,7 @@
 #   scripts/demo.sh all    up, run, then down (exit status is the demo's)
 #   scripts/demo.sh generate  up, run INCLUDING question generation with the real model, then leave the stack up
 #                          (needs LAB_GEN_API_KEY in the environment; costs a few cents; without a key the step is SKIPPED, never passed)
+# Optional: DEMO_EXCLUDE_FAILED=1 scripts/demo.sh generate   excludes the questions that failed the automated validation (recorded with a reason, not deleted) so the freeze can go ahead
 # Optional: DEMO_PDF=/path/to/your.pdf scripts/demo.sh run   (streamed into the container; your own file, parsed locally, never uploaded anywhere else)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -88,6 +89,9 @@ generate_up() {
 generate() {
   up
   extra=(-e DEMO_GENERATE=1)
+  if [[ "${DEMO_EXCLUDE_FAILED:-}" == "1" ]]; then
+    extra+=(-e DEMO_EXCLUDE_FAILED=1)       # opt-in: exclude (record, never delete) the questions whose automated validation failed
+  fi
   if generate_up; then
     echo "prices used for the cost figures are UNVERIFIED list prices (LAB_GEN_PRICE_IN/OUT_MICROS_PER_MTOK override them)"
   else
