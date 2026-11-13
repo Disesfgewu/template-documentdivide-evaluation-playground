@@ -46,7 +46,7 @@ curl -s localhost:8081/healthz
 
 服務的啟動參數與設定細節，請見各服務目錄下的 `README.md`（`services/api/`、`services/parser/`、`services/worker/`、`web/`）。容器化執行（API 與 parser service 的非 root Docker runtime 映像）請見 [Docker 執行映像說明](../deploy/README.md)。
 
-`LAB_PROVIDER_MODE=mock` 是本機開發用的路徑，畫面會標示「本機假資料，非真模型」。`real` 模式目前會被拒絕（沒有真 provider adapter，T84 還沒做），不會偷偷退回 mock。
+`LAB_PROVIDER_MODE=mock` 是 API 服務自己的舊設定（本機開發用）；**出題、驗題、作答走的是另一條路（出題 worker → lab-gen → 真實模型），不用這個設定**。畫面上「題目生成」那一行讀的是出題 worker 自己回報的狀態（`/readyz` 的 `generation`），不是這個設定。`real` 模式目前會被拒絕（沒有真 provider adapter，T84 還沒做），不會偷偷退回 mock。
 
 ## 清除重來
 

@@ -37,10 +37,26 @@ class ReadyzCheckResult(ResponseModel):
     detail: Optional[Any] = Field(None, description="Check details or failure message")
 
 
+class ReadyzLastRealCall(ResponseModel):
+    model: str = Field(..., description="Model of the newest call the provider reported token usage for")
+    at: str = Field(..., description="When that call was recorded (ISO 8601)")
+
+
+class ReadyzGeneration(ResponseModel):
+    state: Literal["worker_running", "no_worker", "unknown"] = Field(
+        ..., description="worker_running: a question-generation worker reported itself in the last 90 s; no_worker: none did (it only starts "
+                         "with an API key); unknown: this could not be determined")
+    provider_host: Optional[str] = Field(None, description="Host the worker calls (never a key)")
+    protocol: Optional[str] = Field(None, description="Provider protocol the worker uses")
+    last_real_call: Optional[ReadyzLastRealCall] = Field(None, description="Evidence of real use, from the call ledger")
+    detail: Optional[str] = Field(None, description="Why the state is no_worker or unknown")
+
+
 class ReadyzResponse(ResponseModel):
     status: str = Field(..., description="Overall readiness: ready or not_ready")
     env: str = Field(..., description="Configured environment (e.g. dev, test, staging, prod)")
-    provider_mode: str = Field(..., description="Configured provider mode (mock or real)")
+    provider_mode: str = Field(..., description="Legacy provider setting of THIS service (mock or real). Question generation does not use it: see `generation`")
+    generation: ReadyzGeneration = Field(..., description="What is true about the model path of question generation")
     checks: dict[str, ReadyzCheckResult] = Field(..., description="Results of individual dependency checks")
 
 

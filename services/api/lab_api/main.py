@@ -4,6 +4,8 @@ Run: ``uvicorn --factory lab_api.main:create_app`` (from services/api).
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -26,13 +28,16 @@ from .jobs import router as jobs_router
 from .parse_jobs import router as parse_jobs_router
 from .parse_results import router as parse_results_router
 from .lineage import router as lineage_router
-from .readiness import Check, default_checks, run_checks
+from .readiness import Check, default_checks, generation_status, run_checks
 
 API_VERSION = "0.1.0"
 
 
-def create_app(settings: Settings | None = None, checks: dict[str, Check] | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, checks: dict[str, Check] | None = None,
+               generation: Callable[[], dict] | None = None) -> FastAPI:
     settings = settings or load_settings()
+    if generation is None:      # injected checks (tests) never reach for a database on their own
+        generation = (lambda: generation_status(settings)) if checks is None else (lambda: {"state": "unknown"})
     checks = checks if checks is not None else default_checks(settings)
 
     app = FastAPI(title="document-seperater-playground LAB API", version=API_VERSION)
@@ -55,7 +60,8 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
         body = {
             "status": "ready" if ready else "not_ready",
             "env": settings.env.value,
-            "provider_mode": settings.provider_mode.value,
+            "provider_mode": settings.provider_mode.value,     # legacy setting of THIS service; question generation does not use it
+            "generation": generation(),                        # what is true about the model path (Issue #181)
             "checks": results,
         }
         return JSONResponse(body, status_code=200 if ready else 503)
