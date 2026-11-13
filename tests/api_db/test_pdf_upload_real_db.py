@@ -659,7 +659,9 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         first = self.client.post(url, headers={**headers, "X-Request-Id": "req-first"}, content=enc)
         self.assertEqual(first.status_code, 422)
         original = first.json()["error"]
-        self.assertEqual((original["code"], original["request_id"]), ("unsupported_encryption", "req-first"))
+        self.assertEqual(original["code"], "unsupported_encryption")
+        self.assertEqual(original["request_id"], first.headers["x-request-id"])
+        self.assertNotEqual(original["request_id"], "req-first")
 
         with self.connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -682,7 +684,9 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         self.assertEqual(
             {k: v for k, v in replay.json()["error"].items() if k != "request_id"}, stored
         )
-        self.assertEqual(replay.json()["error"]["request_id"], "req-replay")
+        self.assertEqual(replay.json()["error"]["request_id"], replay.headers["x-request-id"])
+        self.assertNotEqual(replay.json()["error"]["request_id"], original["request_id"])
+        self.assertNotEqual(replay.json()["error"]["request_id"], "req-replay")
 
         # 2. Even if today's parser would accept the file, the original stands.
         accepting = types.SimpleNamespace(
@@ -1249,7 +1253,12 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             content=empty_pdf,
         )
         self.assertEqual(res_rej2.status_code, 422)
-        self.assertEqual(res_rej2.json(), res_rej1.json())
+        first_error, replay_error = res_rej1.json()["error"], res_rej2.json()["error"]
+        self.assertEqual({k: v for k, v in replay_error.items() if k != "request_id"},
+                         {k: v for k, v in first_error.items() if k != "request_id"})
+        self.assertEqual(first_error["request_id"], res_rej1.headers["x-request-id"])
+        self.assertEqual(replay_error["request_id"], res_rej2.headers["x-request-id"])
+        self.assertNotEqual(first_error["request_id"], replay_error["request_id"])
 
         with self.connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
