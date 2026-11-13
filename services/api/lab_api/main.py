@@ -26,17 +26,28 @@ from .parse_jobs import router as parse_jobs_router
 from .parse_results import router as parse_results_router
 from .lineage import router as lineage_router
 from .readiness import Check, default_checks, run_checks
+from .request_logging import RequestLogSink, RequestLoggingMiddleware
 
 API_VERSION = "0.1.0"
 
 
-def create_app(settings: Settings | None = None, checks: dict[str, Check] | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    checks: dict[str, Check] | None = None,
+    log_sink: RequestLogSink | None = None,
+) -> FastAPI:
     settings = settings or load_settings()
     checks = checks if checks is not None else default_checks(settings)
 
     app = FastAPI(title="document-seperater-playground LAB API", version=API_VERSION)
     app.add_middleware(DownloadAdmissionMiddleware)
     app.state.settings = settings
+    app.add_middleware(
+        RequestLoggingMiddleware,
+        env=settings.env,
+        provider_mode=settings.provider_mode,
+        sink=log_sink,
+    )
 
     @app.exception_handler(ApiError)
     async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
