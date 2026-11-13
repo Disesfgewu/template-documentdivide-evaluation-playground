@@ -334,6 +334,7 @@ def main() -> int:
             print(json.dumps(vstarted))
             failures.append("validation start")
 
+    was_frozen = False
     banner("8. Freeze (owner only, honestly PARTIAL) and 9. run the local lexical baseline on the frozen benchmark")
     if os.environ.get("DEMO_GENERATE") != "1" or no_key or path or any(f in failures for f in ("generation", "generation start", "validation", "validation start")):
         print("SKIPPED (generation and validation did not complete, so there is nothing to freeze). A skipped step is not a pass.")
@@ -346,6 +347,7 @@ def main() -> int:
                   "The baseline run needs a frozen benchmark, so it is skipped. This is an honest outcome of the model's output, "
                   "not a demo failure.")
         else:
+            was_frozen = True
             print(f"frozen as {frozen['compliance'].upper()}: {frozen['questions']} questions (N target {frozen['n_target']}), "
                   f"shortfall {frozen['shortfall']}; human review {frozen['human_review']}")
             for line in frozen["limits"]:
@@ -374,6 +376,46 @@ def main() -> int:
                     print(f"[{'ok' if ok else 'FAIL'}] {meaning}")
                     if not ok:
                         failures.append("baseline")
+
+    banner("10. Run the answering method local-retrieval-answer-1 (a real model answers from the retrieved passages)")
+    if os.environ.get("DEMO_GENERATE") != "1" or no_key or path or not was_frozen:
+        print("SKIPPED (no API key, or the benchmark was not frozen, so there is nothing to answer). A skipped step is not a pass.")
+    else:
+        mcap = int(os.environ.get("DEMO_METHOD_BUDGET_MICROS", "200000"))
+        code, mrun = api.call("POST", f"/api/v1/benchmarks/{bench_name}/revisions/1/method-runs?project_id={project}",
+                              json.dumps({"model": os.environ.get("DEMO_GEN_MODEL", "claude-haiku-4-5-20251001"),
+                                          "budget_cap_micros": mcap}).encode(), "application/json")
+        print(f"POST .../method-runs -> {code}; budget {mcap} micro-USD, one call per question, at most 500 output tokens each")
+        if code != 202:
+            print(json.dumps(mrun))
+            failures.append("method run start")
+        else:
+            deadline = time.monotonic() + float(os.environ.get("DEMO_GEN_TIMEOUT", "900"))
+            mjob = {}
+            while time.monotonic() < deadline:
+                _, mprog = api.call("GET", f"/api/v1/benchmarks/{bench_name}/revisions/1/generate?project_id={project}")
+                mjob = mprog.get("job") or {}
+                if mjob.get("phase") == "answer" and mjob.get("status") in ("succeeded", "failed", "cancelled"):
+                    break
+                time.sleep(3)
+            _, mres = api.call("GET", f"/api/v1/runs/{mrun['run_id']}/results")
+            sub = mres.get("submissions") or {}
+            print(f"job {mjob.get('status')}, evaluation {(mres.get('evaluation') or {}).get('status')}; submissions: answered {sub.get('answered')}, "
+                  f"abstained_by_model {sub.get('abstained_by_model')}, method_failures {sub.get('method_failures')}")
+            for m in mres.get("metrics", []):
+                print(f"  {m['metric_name']:<22} scored {m['scored']:>3}  error {m.get('error', 0):>3}  pending {m['pending']:>3}  "
+                      f"mean {m['mean'] if m['mean'] is not None else '-'}")
+            print("  (answer-quality metrics stay pending: the semantic judge is not built; method failures are not model abstentions; "
+                  "the evaluation is provisional)")
+            total = (sub.get("answered") or 0) + (sub.get("abstained_by_model") or 0) + sum((sub.get("method_failures") or {}).values())
+            checks = [
+                (total > 0, "every question has a recorded submission (answered, abstained or a named failure)"),
+                ({m["metric_name"]: m for m in mres.get("metrics", [])}.get("recall_at_k", {}).get("scored", 0) > 0, "recall_at_k was scored from the real retrieved hits"),
+            ]
+            for ok, meaning in checks:
+                print(f"[{'ok' if ok else 'FAIL'}] {meaning}")
+                if not ok:
+                    failures.append("method run")
 
     banner("Try it yourself")
     print(f"export TOKEN={token}")

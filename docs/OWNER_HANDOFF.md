@@ -5,7 +5,7 @@
 
 ## 流程（全在 main 上，CI 用假模型測過）
 
-`上傳 PDF` → `解析（Unstructured fast）` → `建立 benchmark、釘住解析、素材計畫` → `生成題目（模型）` → `自動驗題（模型＋程式檢查）` → `owner 凍結（partial）` → `在凍結的 benchmark 上跑一個 baseline 並評分`
+`上傳 PDF` → `解析（Unstructured fast）` → `建立 benchmark、釘住解析、素材計畫` → `生成題目（模型）` → `自動驗題（模型＋程式檢查）` → `owner 凍結（partial）` → `在凍結的 benchmark 上跑一個 baseline 並評分` → `（step 10）第二個方法 local-retrieval-answer-1：模型依檢索段落作答`
 
 | 階段 | 做了什麼 | 看哪裡 |
 |---|---|---|
