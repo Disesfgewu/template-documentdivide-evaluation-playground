@@ -251,7 +251,11 @@ FROM target_eval te
 """
     # How the method's submissions ended (PM Q3): answered, a MODEL abstention (its own reason) and a METHOD failure (budget,
     # provider, contract, unknown outcome: a fixed code) are three different things and are counted separately.
-    counts = {"answered": 0, "abstained_by_model": 0}
+    # A run with no model behind it (the lexical baseline only returns pages) answers nothing: its submissions are reported as
+    # "no_answer_retrieval_only", never as a model's abstention (Issue #7: the baseline showed 'abstained_by_model: 9').
+    answering = conn.execute("SELECT EXISTS (SELECT 1 FROM generate_jobs WHERE run_id = %s AND phase = 'answer')", (run_id,)).fetchone()
+    retrieval_only = answering is not None and answering[0] is False
+    counts = {"answered": 0, "abstained_by_model": 0, "no_answer_retrieval_only": 0}
     method_failures: dict[str, int] = {}
     for status, failure, n in conn.execute(
             "SELECT answer_status, failure_reason, count(*) FROM submissions WHERE run_id = %s AND status = 'accepted' "
@@ -261,7 +265,7 @@ FROM target_eval te
         elif status == "answered":
             counts["answered"] += int(n)
         elif status == "abstained":
-            counts["abstained_by_model"] += int(n)
+            counts["no_answer_retrieval_only" if retrieval_only else "abstained_by_model"] += int(n)
     # questions the owner excluded before the freeze: recorded with a reason, not frozen, not scored (read before the snapshot query)
     excluded_questions = [{"ordinal": int(o), "reason": r} for o, r in conn.execute(
         "SELECT q.ordinal, e.reason FROM questions q JOIN LATERAL (SELECT kind, reason FROM question_exclusions x "
@@ -349,6 +353,7 @@ FROM target_eval te
         # denominator. Even a completed evaluation is only a provisional
         # scored-subset statistic through this partial endpoint.
         "summary_scope": "scored_rows_only",
+        "scale": "every metric value and mean is on a 0-100 scale (percent); localization_precision of a whole-page method is low by construction",
         "provisional": True,
         "filters": query_filters,
         "metrics": metrics_list,

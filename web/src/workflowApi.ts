@@ -1087,11 +1087,15 @@ export type RunResultsResponse = {
   grader_revision?: string;
   evaluation_status?: string;
   provisional?: boolean;
+  /** Every metric value and mean is on this 0-100 scale. */
+  scale?: string;
   items?: ResultItem[];
   metrics: MetricSummary[];
   submissions?: {
     answered: number;
     abstained_by_model: number;
+    /** Submissions of a method with no model behind it (the lexical baseline only returns pages): no answer, not a model's abstention. */
+    no_answer_retrieval_only?: number;
     method_failures: Record<string, number>;
   };
   judge?: JudgeSummary | null;
