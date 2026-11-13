@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/Disesfgewu/agentkit/graph"
@@ -199,6 +200,15 @@ func checkEndpoint(base, allowed string, allowLoopback bool) (host, reason strin
 	return host, ""
 }
 
+func validKey(k string) bool {
+	for _, r := range k {
+		if r < 33 || r > 126 {
+			return false
+		}
+	}
+	return true
+}
+
 func sum(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
@@ -210,6 +220,10 @@ func Run(ctx context.Context, in Input, opt Options) Output {
 		return Output{Status: "refused", Reason: err.Error(), Calls: []CallResult{}}
 	}
 	m := in.Model
+	if k := os.Getenv(KeyEnv); k != "" && !validKey(k) {
+		// A CR from a Windows .env, a space or a control character would make every request fail before it is sent (#174).
+		return Output{Status: "refused", Reason: "api key has a space, control or non-ASCII character (check its line endings)", Calls: []CallResult{}}
+	}
 	cfg := config(m)
 	client, err := model.NewContext(ctx, cfg)
 	if err != nil {
@@ -280,6 +294,11 @@ func Run(ctx context.Context, in Input, opt Options) Output {
 				stopped = "cancelled"
 			case errors.As(err, &pe):
 				res.Status, res.Reason = "failed", fmt.Sprintf("provider status %d", pe.Status)
+			case errors.Is(err, agentflow.ErrNotSent):
+				// never sent (for example an invalid header value): nothing was billed and the reservation is released; every
+				// later call would fail the same way, so the rest of the batch is skipped, not tried
+				res.Status, res.Reason = "failed", "request was never sent (rejected before transport); nothing was billed"
+				stopped = "the request could not be sent"
 			case errors.Is(err, agentflow.ErrResponseLost), errors.Is(err, agentflow.ErrOutcomeUnknown):
 				res.Status, res.Reason = "outcome_unknown", "response lost; the reservation is kept, not settled as zero"
 				res.HeldMicros = worst

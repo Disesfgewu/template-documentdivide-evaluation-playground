@@ -259,3 +259,18 @@ func TestInputRules(t *testing.T) {
 		t.Fatalf("%d call(s) were made for refused inputs", f.hits.Load())
 	}
 }
+
+// #174: a key with a CR (a Windows .env) is refused before any call: no reservation kept, nothing sent, no key in the output.
+func TestAKeyWithAControlCharacterIsRefusedBeforeAnyCall(t *testing.T) {
+	for _, bad := range []string{secretKey + "\r", secretKey + "\n", "sk with space", "sk-é"} {
+		t.Setenv(KeyEnv, bad)
+		f := &fake{handler: reply("x", 1, 1, true)}
+		out := Run(audited(t), input(f.start(t), "q"), loop)
+		if out.Status != "refused" || len(out.Calls) != 0 || f.hits.Load() != 0 {
+			t.Fatalf("%q: %+v hits=%d", bad, out, f.hits.Load())
+		}
+		if b, _ := json.Marshal(out); strings.Contains(string(b), "sk-test") {
+			t.Fatalf("the key leaked: %s", b)
+		}
+	}
+}

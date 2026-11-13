@@ -22,7 +22,8 @@ const (
 var (
 	ErrAccountingPending = errors.New("accounting_pending: saved result requires reconciliation before publication")
 	ErrOutcomeUnknown    = errors.New("outcome_unknown: external call may have happened; reconcile before continuing")
-	ErrResponseLost      = errors.New("response lost") // an Effect returns an error wrapping this when the request was sent but no response/result arrived
+	ErrNotSent           = errors.New("request was never sent") // the HTTP client refused the request before any byte left (invalid header, URL ...): nothing was billed, the reservation is released
+	ErrResponseLost      = errors.New("response lost")          // an Effect returns an error wrapping this when the request was sent but no response/result arrived
 )
 
 type OpKey struct {
