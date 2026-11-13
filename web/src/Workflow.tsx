@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { QuestionsPanel } from "./QuestionsPanel";
+import { QuestionReview } from "./QuestionReview";
 import {
   cancelJob,
   createBenchmark,
@@ -1103,15 +1104,25 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
             <span style={{ ...badgeStyle, ...getStatusStyle("success") }}>{genProgress?.questions} 題</span>
           </div>
           <div style={{ marginTop: "0.75rem" }}>
-            <QuestionsPanel
-              fetchFn={fetchFn}
-              token={token}
-              projectId={projectId}
-              logicalId={benchLogicalId}
-              reloadKey={`${genStatus}-${valStatus}-${freezeStatus}-${genProgress?.questions ?? 0}-${activeRunId ?? ""}-${resultsStatus}`}
-              runId={activeRunId}
-              evaluationId={activeEvalId}
-            />
+            {genProgress?.benchmark_status === "validating" && freezeStatus !== "success" ? (
+              <QuestionReview
+                fetchFn={fetchFn}
+                token={token}
+                projectId={projectId}
+                logicalId={benchLogicalId}
+                reloadKey={`${genStatus}-${valStatus}-${freezeStatus}-${genProgress?.questions ?? 0}`}
+              />
+            ) : (
+              <QuestionsPanel
+                fetchFn={fetchFn}
+                token={token}
+                projectId={projectId}
+                logicalId={benchLogicalId}
+                reloadKey={`${genStatus}-${valStatus}-${freezeStatus}-${genProgress?.questions ?? 0}-${activeRunId ?? ""}-${resultsStatus}`}
+                runId={activeRunId}
+                evaluationId={activeEvalId}
+              />
+            )}
           </div>
         </div>
       )}
@@ -1126,7 +1137,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         </div>
         <div style={{ marginTop: "0.75rem" }}>
           <p style={{ margin: "0 0 0.5rem 0", fontSize: "0.9rem", color: "#555" }}>
-            合規性固定為 partial。所有題目必須皆通過驗證方可凍結。若有未通過題目，後端回傳 409 為誠實結果，非系統錯誤。
+            合規性固定為 partial。每一題「未被排除」的題目都必須通過驗證才能凍結（至少要剩一題）；沒過的題目可以在上方「題目一覽」排除（會記錄理由、不會刪除）。若仍有未通過的題目，後端回傳 409 為誠實結果，非系統錯誤。
           </p>
           <button
             type="button"
