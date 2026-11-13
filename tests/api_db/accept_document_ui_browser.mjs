@@ -238,6 +238,16 @@ async function run() {
     };
   `);
 
+  // The page opens on the workflow tab; this acceptance flow drives the document operator tab, so switch to it explicitly.
+  await waitForSelector("nav[aria-label='主要分頁'] button");
+  await evaluate(`
+    (() => {
+      const tab = [...document.querySelectorAll("nav[aria-label='主要分頁'] button")].find((b) => b.textContent.trim() === "文件操作員");
+      if (!tab) throw new Error("operator tab not found");
+      tab.click();
+    })()
+  `);
+
   // 1. Fill auth token and project ID using React-safe setter
   await waitForSelector("#auth-token");
   await evaluate(`

@@ -60,7 +60,7 @@ def start_answer_run(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_
             raise NotFound("benchmark")
         if bench[0] != "frozen":
             raise AnswerRunError("benchmark_is_not_frozen")
-        if conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0] > MAX_QUESTIONS:
+        if conn.execute("SELECT count(*) FROM active_questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0] > MAX_QUESTIONS:
             raise AnswerRunError(f"benchmark_has_more_than_{MAX_QUESTIONS}_questions")
         active = conn.execute(
             "SELECT 1 FROM generate_jobs g JOIN jobs j ON j.project_id = g.project_id AND j.id = g.job_id "
@@ -117,7 +117,7 @@ def make_answer_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Cal
         if hashlib.sha256(data).hexdigest() != sha:
             raise AnswerRunError("document_bytes_do_not_match")
         index = local_methods.prepare(data, document_id=str(doc_id), expected_sha256=sha, config=local_methods.MethodConfig(strategy="page"))
-        questions = conn.execute("SELECT id, question_key, question_text, ordinal FROM questions WHERE benchmark_id = %s ORDER BY ordinal",
+        questions = conn.execute("SELECT id, question_key, question_text, ordinal FROM active_questions WHERE benchmark_id = %s ORDER BY ordinal",
                                  (benchmark_id,)).fetchall()
         return doc_id, index, questions
 

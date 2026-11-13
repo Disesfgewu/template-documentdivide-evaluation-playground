@@ -86,9 +86,10 @@ def _progress(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UU
                "human_review": "skipped", "limits": ["The general, cross_page and confusable buckets are generated; chart_table is "
                                                      "not guessed (no material proof in this parse).",
                                                      "A question answerable without the page is not detected yet."]}
-        counts = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
+        counts = dict(conn.execute("SELECT quota_bucket, count(*) FROM active_questions WHERE benchmark_id = %s GROUP BY 1",
                                    (benchmark_id,)).fetchall())
-        out["questions"] = sum(int(v) for v in counts.values())
+        out["questions"] = sum(int(v) for v in counts.values())          # the questions that would be frozen (not excluded)
+        out["excluded"] = conn.execute("SELECT (SELECT count(*) FROM questions WHERE benchmark_id = %s) - %s", (benchmark_id, out["questions"])).fetchone()[0]
         out["by_bucket"] = {"general": int(counts.get("general", 0)), "cross_page": int(counts.get("cross_page", 0)),
                             "confusable": int(counts.get("confusable", 0))}
         out["shortfall"] = (max(0, out["general_target"] - out["by_bucket"]["general"])
@@ -110,7 +111,8 @@ def _progress(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UU
             "ORDER BY a.occurred_at DESC LIMIT 1", (project_id, benchmark_id)).fetchone()
         verdicts = dict(conn.execute(
             "SELECT verdict, count(*) FROM (SELECT DISTINCT ON (question_id) verdict FROM question_validations "
-            "WHERE benchmark_id = %s ORDER BY question_id, created_at DESC, id DESC) v GROUP BY verdict", (benchmark_id,)).fetchall())
+            "WHERE benchmark_id = %s AND question_id IN (SELECT id FROM active_questions WHERE benchmark_id = %s) "
+            "ORDER BY question_id, created_at DESC, id DESC) v GROUP BY verdict", (benchmark_id, benchmark_id)).fetchall())
         validated = sum(int(n) for n in verdicts.values())
         out["validation"] = {"pass": int(verdicts.get("pass", 0)), "fail": int(verdicts.get("fail", 0)),
                              "needs_review": int(verdicts.get("needs_review", 0)),

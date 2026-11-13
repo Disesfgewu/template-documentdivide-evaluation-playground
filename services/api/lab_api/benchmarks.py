@@ -118,7 +118,7 @@ def _resolve_visible(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: 
 def _get_benchmark(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
                    logical_id: str, revision: int) -> dict:
     bid, status, n_target, q_min, compliance, frozen_at, sees_gold = _resolve_visible(conn, actor_id, project_id, logical_id, revision)
-    counts = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
+    counts = dict(conn.execute("SELECT quota_bucket, count(*) FROM active_questions WHERE benchmark_id = %s GROUP BY 1",
                                (bid,)).fetchall())
     buckets = {k: int(counts.get(k, 0)) for k in QUOTA_BUCKETS}
     result = {
@@ -138,7 +138,7 @@ def _list_public_questions(conn: psycopg.Connection, actor_id: uuid.UUID, projec
     after = decode_cursor(cursor, benchmark_id) if cursor is not None else -1
 
     rows = conn.execute(
-        "SELECT id, question_key, ordinal, question_text, question_hash, quota_bucket, payload FROM questions "
+        "SELECT id, question_key, ordinal, question_text, question_hash, quota_bucket, payload FROM active_questions "
         "WHERE benchmark_id = %s AND ordinal > %s ORDER BY ordinal LIMIT %s",
         (benchmark_id, after, limit + 1)).fetchall()
     page = rows[:limit]

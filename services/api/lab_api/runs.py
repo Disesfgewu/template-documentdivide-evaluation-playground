@@ -55,7 +55,7 @@ def _get_run(conn: psycopg.Connection, actor_id: uuid.UUID, run_id: uuid.UUID) -
     snapshot = conn.execute(
         "SELECT r.project_id, r.status::text, r.budget_profile, r.finalized_at, r.benchmark_id, "
         "r.method_revision_id, m.owner_actor_id, rv.logical_id, rv.revision, "
-        "(SELECT count(*) FROM questions q WHERE q.benchmark_id = r.benchmark_id), "
+        "(SELECT count(*) FROM active_questions q WHERE q.benchmark_id = r.benchmark_id), "
         "(SELECT count(*) FROM attempts a WHERE a.run_id = r.id), "
         "(SELECT count(*) FROM submissions s WHERE s.run_id = r.id AND s.status = 'accepted' AND s.answer_status = 'answered'), "
         "(SELECT count(*) FROM submissions s WHERE s.run_id = r.id AND s.status = 'accepted' AND s.answer_status = 'abstained'), "

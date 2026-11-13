@@ -999,11 +999,25 @@ export type MetricSummary = {
   mean: number | null;
 };
 
+export type ResultItem = {
+  question_id: string;
+  ordinal: number;
+  quota_bucket: string;
+  metric_name: string;
+  status: string;
+  raw_value: number | null;
+  reason_codes: string[];
+};
+
 export type RunResultsResponse = {
   run_id: string;
-  evaluation_id: string;
-  grader_revision: string;
-  evaluation_status: string;
+  // The API nests these under "evaluation"; the flat fields are kept optional for older callers.
+  evaluation?: { id: string; grader_revision: string; status: string; created_at?: string };
+  evaluation_id?: string;
+  grader_revision?: string;
+  evaluation_status?: string;
+  provisional?: boolean;
+  items?: ResultItem[];
   metrics: MetricSummary[];
   submissions?: {
     answered: number;
@@ -1015,6 +1029,8 @@ export type RunResultsResponse = {
 export async function getRunResults({
   runId,
   evaluationId,
+  metricName,
+  limit,
   token,
   fetchFn = fetch,
   signal,
@@ -1023,6 +1039,8 @@ export async function getRunResults({
 }: {
   runId: string;
   evaluationId?: string;
+  metricName?: string;
+  limit?: number;
   token: string;
   fetchFn?: typeof fetch;
   signal?: AbortSignal;
@@ -1042,6 +1060,8 @@ export async function getRunResults({
   if (evaluationId && evaluationId.trim()) {
     queryParams.set("evaluation_id", evaluationId.trim());
   }
+  if (metricName) queryParams.set("metric_name", metricName);
+  if (limit) queryParams.set("limit", String(limit));
   const qs = queryParams.toString();
   const endpoint = `${baseUrl}/api/v1/runs/${encodeURIComponent(cleanRunId)}/results${qs ? `?${qs}` : ""}`;
 
@@ -1053,6 +1073,60 @@ export async function getRunResults({
         Authorization: `Bearer ${cleanToken}`,
       },
     },
+    cleanToken,
+    timeoutMs,
+    fetchFn,
+    signal,
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Question list (public view: no gold, no answers)
+// -----------------------------------------------------------------------------
+export type PublicQuestion = { id: string; question_text: string; language?: string };
+
+export type QuestionListResponse = {
+  benchmark_revision_id: string;
+  status: string;
+  items: PublicQuestion[];
+  next_cursor: string | null;
+};
+
+export async function listQuestions({
+  projectId,
+  logicalId,
+  revision = 1,
+  cursor,
+  token,
+  fetchFn = fetch,
+  signal,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  baseUrl = "",
+}: {
+  projectId: string;
+  logicalId: string;
+  revision?: number;
+  cursor?: string | null;
+  token: string;
+  fetchFn?: typeof fetch;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  baseUrl?: string;
+}): Promise<ApiResult<QuestionListResponse>> {
+  const cleanToken = token.trim();
+  if (!cleanToken) {
+    return { ok: false, error: { message: "未提供認證 Token", status: 401, code: "unauthorized" } };
+  }
+  const cleanProjId = projectId.trim();
+  if (!validateUuid(cleanProjId)) {
+    return { ok: false, error: { message: "Project ID 格式錯誤（須為 UUID）", status: 400, code: "bad_request" } };
+  }
+  const qs = new URLSearchParams({ project_id: cleanProjId, limit: "100" });
+  if (cursor) qs.set("cursor", cursor);
+  const endpoint = `${baseUrl}/api/v1/benchmarks/${encodeURIComponent(logicalId.trim())}/revisions/${revision}/questions?${qs.toString()}`;
+  return executeFetch<QuestionListResponse>(
+    endpoint,
+    { method: "GET", headers: { Authorization: `Bearer ${cleanToken}` } },
     cleanToken,
     timeoutMs,
     fetchFn,
