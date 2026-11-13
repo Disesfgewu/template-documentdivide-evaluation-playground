@@ -60,14 +60,40 @@ class ParseReplyTests(unittest.TestCase):
 
     def test_anything_else_is_dropped_never_repaired(self):
         bad = [
-            "", "not json", "[]", "Sure! " + reply(), reply(extra=1), json.dumps({"question": "q"}),
+            "", "not json", "[]", "Sure! no object here", json.dumps({"question": "q"}),
             reply(question=""), reply(question="x" * 501), reply(reference_answer=" "), reply(facts=[]),
-            reply(facts=[{"statement": "a"}] * 2), reply(facts=[{"statement": f"s{i}"} for i in range(4)]),
-            reply(facts=[{"statement": "a", "weight": 1}]), reply(facts=["a"]), reply(facts=[{"statement": 5}]),
-            reply(question=5),
+            reply(facts=[{"statement": f"s{i}"} for i in range(4)]), reply(facts=[{"statement": 5}]), reply(facts=[5]),
+            reply(facts=[{"statement": " "}]), reply(facts=[{"statement": "x" * 401}]), reply(facts="a"),
+            reply(question=5), reply(reference_answer=None),
         ]
         for text in bad:
             self.assertIsNone(parse_model_reply(text), text[:60])
+
+    def test_harmless_deviations_seen_in_real_output_are_tolerated_but_the_content_is_still_checked(self):
+        from lab_api.generate_prompts import parse_model_reply_ex
+        good = parse_model_reply(reply())
+        self.assertIsNotNone(good)
+        for text in ("Sure! Here is the question:\n" + reply(), reply() + "\nHope this helps.", "```json\n" + reply() + "\n```\nDone",
+                     "[" + reply() + "]", reply(extra=1), reply(facts=[{"statement": "a", "weight": 1}]), reply(facts=["a"])):
+            got = parse_model_reply(text)
+            self.assertIsNotNone(got, text[:60])
+        self.assertEqual(parse_model_reply(reply(facts=[{"statement": "a"}] * 2)).facts, ("a",))      # a repeated fact is dropped
+        # the first object with the right keys wins; an unrelated object before it is skipped, never merged
+        self.assertEqual(parse_model_reply('{"note": 1} ' + reply()), good)
+        # reasons are fixed codes
+        for text, code in (("", "empty"), ("not json", "not_json"), ('{"question": "q"}', "bad_keys"), (reply(question=""), "empty_field"),
+                           (reply(question="x" * 501), "field_too_long"), (reply(question=5), "bad_types"), (reply(facts=[]), "bad_facts_count"),
+                           (reply(facts=[5]), "bad_fact_shape"), (reply(facts=[{"statement": "x" * 401}]), "fact_too_long"),
+                           ("x" * 30_000, "reply_too_long")):
+            self.assertEqual(parse_model_reply_ex(text), (None, code), text[:40])
+
+    def test_a_question_that_names_a_page_number_is_recognised(self):
+        from lab_api.generate_prompts import page_reference
+        for q in ("What content appears on page 5?", "What does page 12 say about fees?", "請問第5頁寫了什麼？", "第五頁的內容是什麼", "see p. 7 for the fee",
+                  "第 12 頁有哪些條件？"):
+            self.assertTrue(page_reference(q), q)
+        for q in ("What is the annual fee for the premium plan?", "申請費用是多少？", "Which page layout does the template use?"):
+            self.assertFalse(page_reference(q), q)
 
 
 class FenceInjectionTests(unittest.TestCase):
@@ -111,10 +137,15 @@ class CrossPageTests(unittest.TestCase):
                     {**ok, "facts": [{"statement": "s1", "source": "A"}]},
                     {**ok, "facts": [{"statement": "s1", "source": "C"}, {"statement": "s2", "source": "B"}]},
                     {**ok, "facts": [{"statement": "s1"}, {"statement": "s2", "source": "B"}]},
-                    {**ok, "facts": [{"statement": "s", "source": "A"}, {"statement": "s", "source": "B"}]},
-                    {**ok, "extra": 1}, {**ok, "question": ""}):
+                    {**ok, "facts": ["s1", "s2"]},                                       # a source is mandatory: no plain strings
+                    {**ok, "facts": [{"statement": "s", "source": "A"}, {"statement": "s", "source": "B"}]},   # one fact once repeats are dropped
+                    {**ok, "question": ""}):
             self.assertIsNone(parse_cross_page_reply(json.dumps(bad)), bad)
         self.assertIsNone(parse_cross_page_reply("not json"))
+        # tolerated: prose around the JSON, a lower-case source, extra keys
+        for text in ("Here: " + json.dumps(ok) + " ok", json.dumps({**ok, "extra": 1}),
+                     json.dumps({**ok, "facts": [{"statement": "s1", "source": "a"}, {"statement": "s2", "source": "b"}]})):
+            self.assertEqual(parse_cross_page_reply(text).facts, (("s1", "A"), ("s2", "B")), text[:50])
 
 
 if __name__ == "__main__":

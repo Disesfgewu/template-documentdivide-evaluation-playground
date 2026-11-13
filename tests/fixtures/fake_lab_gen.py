@@ -8,6 +8,14 @@ import sys
 import time
 
 mode = os.environ.get("FAKE_LAB_GEN_MODE", "ok")
+
+
+def nopage(t):
+    """The generator drops questions that name a page number; the fixture evidence says 'Text on page 1', so quote it as 'pg'."""
+    import re
+    return re.sub(r"(?i)\bpage\b", "pg", t)
+
+
 inp = json.load(sys.stdin)
 m, cap = inp["model"], inp["model"]["max_output_tokens"]
 if os.environ.get("FAKE_LAB_GEN_DELAY"):
@@ -35,7 +43,7 @@ for i, c in enumerate(inp["calls"]):
     r = {"id": c["id"], "status": "ok", "usage_known": True, "input_tokens": 5, "output_tokens": 20, "charged_micros": cost(5, 20),
          "held_micros": 0, "transport_attempts": 1, "request_sha256": req}
     text = f"reply {i}"
-    if mode in ("questions", "questions_ungrounded", "dupes", "badjson", "partial_questions"):
+    if mode in ("questions", "questions_ungrounded", "dupes", "badjson", "partial_questions", "questions_prose", "questions_pagerefs"):
         if mode == "badjson":
             text = "I cannot comply."
         else:
@@ -46,7 +54,7 @@ for i, c in enumerate(inp["calls"]):
                 a_line, b_line = (blocks + ["", ""])[:2]
                 if mode == "questions_ungrounded":
                     a_line = f"item {n} of the document"
-                text = json.dumps({"question": f"Which statement says {a_line} (variant {n})?",
+                text = json.dumps({"question": f"Which statement says {nopage(a_line)} (variant {n})?",
                                    "reference_answer": a_line, "facts": [{"statement": a_line}],
                                    "confusion_reason": f"The other passage says {b_line}, which looks similar.",
                                    "disambiguating_condition": a_line})
@@ -55,7 +63,7 @@ for i, c in enumerate(inp["calls"]):
                 a_line, b_line = (blocks + ["", ""])[:2]
                 if mode == "questions_ungrounded":
                     a_line, b_line = f"item {n} of the document", f"other item {n} of the document"
-                text = json.dumps({"question": f"How does statement number {n} of the first part relate to the second part ({a_line} / {b_line})?",
+                text = json.dumps({"question": f"How does statement number {n} of the first part relate to the second part ({nopage(a_line)} / {nopage(b_line)})?",
                                    "reference_answer": f"{a_line} and {b_line}",
                                    "facts": [{"statement": a_line, "source": "A"}, {"statement": b_line, "source": "B"}]})
                 answer = None
@@ -64,8 +72,14 @@ for i, c in enumerate(inp["calls"]):
             else:                                   # grounded: the answer and the fact are the first line of the shown page
                 answer, fact = body, body
             if answer is not None:
-                text = json.dumps({"question": f"What does statement number {n} of the document say about {body}?",
+                text = json.dumps({"question": f"What does statement number {n} of the document say about {nopage(body)}?",
                                    "reference_answer": answer, "facts": [{"statement": fact}]})
+    if mode == "questions_prose":                 # a harmless deviation seen in real output: prose and a fence around the JSON
+        text = "Here is the question you asked for:\n```json\n" + text + "\n```\nLet me know if you need another."
+    if mode == "questions_pagerefs":              # the model names a page number in the question
+        obj = json.loads(text)
+        obj["question"] = f"What content appears on page {i + 5}? ({obj['question']})"
+        text = json.dumps(obj)
     if mode.startswith("answer") and c["id"].startswith("a"):
         import re as _re
         hit_ids = _re.findall(r'<hit id="([^"]+)"', c["user"])

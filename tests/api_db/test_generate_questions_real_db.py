@@ -79,7 +79,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertIn("confusable_shortfall=0", reason[0][0])
         self.assertIn("shortfall=0", reason[0][0])
         self.assertIn("cross_shortfall=0", reason[0][0])
-        self.assertIn("prompt=general-page-v1", reason[0][0])
+        self.assertIn("prompt=general-page-v2", reason[0][0])
         self.assertEqual(self.bench_status(bench), "validating")                     # generating -> validating, never frozen
 
     def test_unparseable_replies_write_nothing_and_are_counted(self):
@@ -89,6 +89,27 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertEqual(self.bench_status(bench), "generating")                     # nothing was written: no validating
         self.assertIn(f"unparseable={general_target(3) + cross_page_target(3) + confusable_target(3)}", self.audit_reason(project)[0][0])
         self.assertIn(f"shortfall={general_target(3)}", self.audit_reason(project)[0][0])    # recorded, never padded
+
+    def test_every_dropped_reply_has_a_fixed_reason_code_and_no_content(self):
+        project, owner, bench, job, out = self.run_batch("badjson")
+        reason = self.audit_reason(project)[0][0]
+        reasons = json.loads(reason.split("reasons=")[1].split(" total=")[0])
+        self.assertEqual(reasons, {"general:parse:not_json": general_target(3), "cross_page:parse:not_json": cross_page_target(3),
+                                   "confusable:parse:not_json": confusable_target(3)})
+        self.assertNotIn("I cannot comply", reason)
+
+    def test_prose_and_a_fence_around_the_json_are_tolerated(self):
+        project, owner, bench, job, out = self.run_batch("questions_prose")
+        n, x, f = general_target(3), cross_page_target(3), confusable_target(3)
+        self.assertEqual(self.count("questions", bench), n + x + f)                 # the same questions as the clean run
+        self.assertIn("reasons={}", self.audit_reason(project)[0][0])
+
+    def test_a_question_that_names_a_page_number_is_dropped_with_its_reason(self):
+        project, owner, bench, job, out = self.run_batch("questions_pagerefs")
+        self.assertEqual(self.count("questions", bench), 0)
+        reasons = json.loads(self.audit_reason(project)[0][0].split("reasons=")[1].split(" total=")[0])
+        self.assertEqual(reasons, {"general:check:page_reference": general_target(3), "cross_page:check:page_reference": cross_page_target(3),
+                                   "confusable:check:page_reference": confusable_target(3)})
 
     def test_duplicate_questions_are_dropped_by_hash(self):
         project, owner, bench, job, out = self.run_batch("dupes")
@@ -215,9 +236,11 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         import json
         ok = {"question": "q?", "reference_answer": "a", "facts": [{"statement": "s"}], "confusion_reason": "r", "disambiguating_condition": "c"}
         self.assertIsNotNone(parse_confusable_reply(json.dumps(ok)))
-        for bad in ({**ok, "confusion_reason": ""}, {**ok, "disambiguating_condition": " "}, {**ok, "facts": []}, {**ok, "x": 1},
-                    {k: v for k, v in ok.items() if k != "confusion_reason"}, {**ok, "facts": [{"statement": "s", "w": 1}]}):
+        for bad in ({**ok, "confusion_reason": ""}, {**ok, "disambiguating_condition": " "}, {**ok, "facts": []},
+                    {k: v for k, v in ok.items() if k != "confusion_reason"}, {**ok, "facts": [{"statement": 5}]}):
             self.assertIsNone(parse_confusable_reply(json.dumps(bad)), bad)
+        for tolerated in ({**ok, "x": 1}, {**ok, "facts": [{"statement": "s", "w": 1}]}, {**ok, "facts": ["s"]}):      # harmless extras
+            self.assertIsNotNone(parse_confusable_reply(json.dumps(tolerated)), tolerated)
 
     def test_confusable_checks_reject_when_b_supports_any_fact_or_the_reason_is_unrelated_to_b(self):
         from unittest.mock import patch
@@ -228,8 +251,8 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         import json as _json
 
         def run(reply_for):
-            orig = gq.parse_confusable_reply
-            with patch.object(gq, "parse_confusable_reply", lambda text: orig(_json.dumps(reply_for(_json.loads(text))))):
+            orig = gq.parse_confusable_reply_ex
+            with patch.object(gq, "parse_confusable_reply_ex", lambda text: orig(_json.dumps(reply_for(_json.loads(text))))):
                 return self.process(project, job, "questions", build_calls=make_build_calls(), on_results=make_on_results())
         # an unrelated reason (shares no word with passage B) and a condition that is fine: the confusable questions are dropped
         out = run(lambda r: {**r, "confusion_reason": "zzzz qqqq unrelated"})

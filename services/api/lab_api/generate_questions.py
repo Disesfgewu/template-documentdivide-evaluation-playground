@@ -23,7 +23,7 @@ import json
 import re
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 import psycopg
@@ -33,8 +33,9 @@ from lab_contracts.benchmark import (Distractor, EvidenceSet, EvidenceUnit, Fact
                                      ReasoningType, ScoringRule, SemanticAnswer, SourceAnswer, TextualAnswer,
                                      target_counts, validate_bundle)
 from lab_api.generate_prompts import (CONFUSABLE_PROMPT_VERSION, CROSS_PAGE_PROMPT_VERSION, DEFAULT_PAGE_CHARS, ConfusableReply, PROMPT_VERSION, CrossReply, ParsedReply,
-                                      build_confusable_call, build_cross_page_call, build_page_call, parse_confusable_reply, detect_language, parse_cross_page_reply,
-                                      parse_model_reply, select_page_pairs, select_pages, shown_pieces)
+                                      build_confusable_call, build_cross_page_call, build_page_call, detect_language, page_reference,
+                                      parse_confusable_reply_ex, parse_cross_page_reply_ex, parse_model_reply_ex, select_page_pairs,
+                                      select_pages, shown_pieces)
 from lab_api.generate_worker import CallSpec
 from lab_api.validate_questions import code_checks
 
@@ -53,6 +54,11 @@ class GenerationStats:
     invalid: int = 0
     duplicate: int = 0
     written: int = 0
+    # why replies were dropped: fixed codes and counts only, never any model text (parse:<code>, check:<code>, ...)
+    reasons: dict = field(default_factory=dict)
+
+    def drop(self, code: str) -> None:
+        self.reasons[code] = self.reasons.get(code, 0) + 1
 
 
 def question_hash(text: str) -> str:
@@ -278,16 +284,19 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
         stats = GenerationStats()
 
         def accept(question, semantic, textual, source, units) -> str:
-            """Validate and write one derived question: 'written', 'duplicate' or 'invalid' (never raises on bad input)."""
+            """Validate and write one derived question: 'written', 'duplicate' or 'invalid' (never raises on bad input); the reason of an
+            invalid one is recorded in ``stats.reasons``."""
             nonlocal ordinal
             if question.question_hash in existing:
                 return "duplicate"
             if validate_bundle([question], [semantic], [textual], [source], {u.evidence_id: u for u in units}, {}):
+                stats.drop("check:contract_invalid")
                 return "invalid"
             ids = [u.evidence_id for u in units]
             unit_rows = dict(conn.execute("SELECT evidence_key, id FROM evidence_units WHERE document_version_id = %s "
                                           "AND evidence_key = ANY(%s)", (doc_id, ids)).fetchall())
             if len(unit_rows) != len(ids):          # a unit that is not stored: skip and count, never raise and roll everything back
+                stats.drop("check:unit_not_stored")
                 return "invalid"
             _write(conn, project_id, benchmark_id, unit_rows, question, semantic, textual, source)
             existing.add(question.question_hash)
@@ -305,10 +314,19 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             conf_pages = parse_confusable_id(row["call_id"])
             cross_pages = parse_cross_id(row["call_id"])
             if conf_pages is not None:
-                reply = parse_confusable_reply(row["text"])
+                reply, why = parse_confusable_reply_ex(row["text"])
                 a_units, d_units = shown_units(pages.get(conf_pages[0], [])), shown_units(pages.get(conf_pages[1], []))
-                if reply is None or not a_units or not d_units:
+                if reply is None:
                     stats.unparseable += 1
+                    stats.drop("confusable:parse:" + why)
+                    continue
+                if not a_units or not d_units:
+                    stats.unparseable += 1
+                    stats.drop("confusable:no_shown_units")
+                    continue
+                if page_reference(reply.question):
+                    stats.invalid += 1
+                    stats.drop("confusable:check:page_reference")
                     continue
                 join = lambda us: "\n\n".join(piece for _, piece in shown_pieces([(u.evidence_id, u.normalized_content) for u in us], page_chars))  # noqa: E731
                 text_a, text_b = join(a_units), join(d_units)
@@ -323,20 +341,35 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 d_units = select_distractors(d_units, reply.question, reply.facts)
                 if not grounded or not condition_ok or b_also_supports or not reason_ok or not d_units:
                     stats.invalid += 1
+                    for failed, code in ((not grounded, "answer_or_fact_not_grounded"), (not condition_ok, "condition_not_grounded"),
+                                         (b_also_supports, "b_supports_a_fact"), (not reason_ok, "reason_not_in_b"),
+                                         (not d_units, "no_overlapping_distractor_unit")):
+                        if failed:
+                            stats.drop("confusable:check:" + code)
                     continue
                 try:
                     derived = _derive_confusable(reply, a_units, d_units, ordinal)
                 except Exception:
                     stats.invalid += 1
+                    stats.drop("confusable:check:derive_error")
                     continue
                 outcome = accept(*derived, a_units + d_units)
                 if outcome == "written":
                     stats.confusable_written += 1
             elif cross_pages is not None:
-                reply = parse_cross_page_reply(row["text"])
+                reply, why = parse_cross_page_reply_ex(row["text"])
                 a_units, b_units = shown_units(pages.get(cross_pages[0], [])), shown_units(pages.get(cross_pages[1], []))
-                if reply is None or not a_units or not b_units:
+                if reply is None:
                     stats.unparseable += 1
+                    stats.drop("cross_page:parse:" + why)
+                    continue
+                if not a_units or not b_units:
+                    stats.unparseable += 1
+                    stats.drop("cross_page:no_shown_units")
+                    continue
+                if page_reference(reply.question):
+                    stats.invalid += 1
+                    stats.drop("cross_page:check:page_reference")
                     continue
                 shown = {"A": a_units, "B": b_units}
                 texts = {label: "\n\n".join(piece for _, piece in shown_pieces([(u.evidence_id, u.normalized_content) for u in us], page_chars))
@@ -344,36 +377,50 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 # The model's claim of WHICH page a fact comes from is checked by code against the text of that page.
                 if not all(code_checks(texts[src], "", [st])["passed"] for st, src in reply.facts):
                     stats.invalid += 1
+                    stats.drop("cross_page:check:fact_not_in_its_page")
                     continue
                 try:
                     derived = _derive_cross(reply, shown, ordinal)
                 except Exception:
                     stats.invalid += 1
+                    stats.drop("cross_page:check:derive_error")
                     continue
                 outcome = accept(*derived, a_units + b_units)
                 if outcome == "written":
                     stats.cross_written += 1
             else:
-                reply = parse_model_reply(row["text"])
+                reply, why = parse_model_reply_ex(row["text"])
                 _, page = parse_call_id(row["call_id"])
                 units = pages.get(page)
-                if reply is None or not units:
+                if reply is None:
                     stats.unparseable += 1
+                    stats.drop("general:parse:" + why)
+                    continue
+                if not units:
+                    stats.unparseable += 1
+                    stats.drop("general:no_shown_units")
                     continue
                 units = shown_units(units)         # only the units the model was ACTUALLY shown can be the source
                 if not units:
                     stats.unparseable += 1
+                    stats.drop("general:no_shown_units")
+                    continue
+                if page_reference(reply.question):
+                    stats.invalid += 1
+                    stats.drop("general:check:page_reference")
                     continue
                 try:
                     derived = _derive(reply, units, ordinal)
                 except Exception:
                     stats.invalid += 1
+                    stats.drop("general:check:derive_error")
                     continue
                 outcome = accept(*derived, units)
                 if outcome == "written":
                     stats.written += 1
             if outcome == "duplicate":
                 stats.duplicate += 1
+                stats.drop("duplicate_question")
             elif outcome == "invalid":
                 stats.invalid += 1
         target = general_target(page_count)
@@ -393,7 +440,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             (uuid.uuid4(), project_id, actor, resource,
              f"prompt={PROMPT_VERSION}+{CROSS_PAGE_PROMPT_VERSION}+{CONFUSABLE_PROMPT_VERSION} replies={stats.replies} "
              f"written={stats.written} cross_written={stats.cross_written} confusable_written={stats.confusable_written} unparseable={stats.unparseable} invalid={stats.invalid} "
-             f"duplicate={stats.duplicate} total={total} target={target} shortfall={max(0, target - total)} "
+             f"duplicate={stats.duplicate} reasons={json.dumps(stats.reasons, sort_keys=True)} total={total} target={target} shortfall={max(0, target - total)} "
              f"cross_total={cross_total} cross_target={cross_target} cross_shortfall={max(0, cross_target - cross_total)} "
              f"confusable_total={conf_total} confusable_target={conf_target} confusable_shortfall={max(0, conf_target - conf_total)}", op_id))
         if all_total > 0:
