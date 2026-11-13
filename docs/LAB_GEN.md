@@ -62,7 +62,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **`build_calls`**（`lab_api/generate_questions.py`）：只讀 benchmark **釘住的 parse**（P-A）裡通過 G8 硬規則的頁、只取其文字證據單位；每題一個呼叫，
   頁面輪流（round-robin），同一頁重複時用程式產生的「第 k 個敘述」提示避免重複。目標數 = N − 3Q（其餘三個 bucket 各至少 Q）。
   **不送**檔名、document／project／actor id、diagnostics、其他頁、其他題的 gold、key。system prompt 固定在程式裡（版本
-  `general-page-v1`，寫進稽核事件），證據用 `<evidence>` 框起來並明說裡面的指令一律忽略。
+  `general-page-v2`，寫進稽核事件），證據用 `<evidence>` 框起來並明說裡面的指令一律忽略。
 - **模型只寫三樣東西**（≤ 500 token）：題目、參考答案、1..3 個 fact。其餘契約欄位全由程式導出：language（粗略 zh／en）、tags `[]`、
   modality `text`、reasoning_type `value_lookup`、SourceAnswer（該頁被送出的文字單位，不含干擾項）、TextualAnswer `checks: []`、
   calculation `null`、每個 fact 平均權重、固定的評分敘述（無部分給分）。
@@ -138,7 +138,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 
 - **何時生成**：同一個生成 job 的同一批呼叫裡，在一般題之後加上 Q 題（Q = ceil(0.10·N)，和 plan 的 cross_page 下限相同）的 cross_page 呼叫；
   乾淨且有文字的頁面少於兩頁時**不產生任何配對、不呼叫**（缺額如實記錄，不湊數）。頁面配對是兩個不同的頁，最近的頁優先，輪流使用。沒有新的 migration。
-- **prompt**（版本 `cross-page-v1`，固定在程式裡）：兩個頁面各自框成資料區塊 A 與 B（不含 evidence id 等識別碼），**每頁各自套用字元上限**（6000），
+- **prompt**（版本 `cross-page-v2`，固定在程式裡）：兩個頁面各自框成資料區塊 A 與 B（不含 evidence id 等識別碼），**每頁各自套用字元上限**（6000），
   標籤中和同一般題；模型回 ≤ 500 token 的 JSON：題目、參考答案、2–3 個 fact，每個 fact 標明 `source`（A 或 B），兩邊都至少要有一個。
 - **程式導出與檢查**：source answer 的證據組 = A、B 兩頁**實際送出**的單位；每個 fact 的支持組只有它被標到的那一頁的單位。因此契約的檢查是真的在檢查：
   證據組必須跨 ≥ 2 頁、且不能有任何單一頁就支持所有 fact（否則 `cross_page_single_page` 而被丟棄）。模型「這個 fact 在哪一頁」的宣稱還會用程式對照該頁送出的文字
@@ -151,7 +151,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 
 - **何時生成**：同一批呼叫裡，在 general 與 cross_page 之後再加 Q 題 confusable；需要兩個不同的乾淨文字頁（頁 A 回答、頁 B 是看起來相似的干擾來源，兩頁輪流當 A）。
   少於兩頁就沒有配對、不呼叫，缺額如實記錄。沒有新的 migration（`distractors` 表早已存在，與 facts 同一套 gold RLS）。
-- **prompt**（`confusable-v1`，固定在程式裡）：A、B 各自框成資料並各自套字元上限、不送任何識別碼；模型回 ≤ 500 token 的 JSON：題目（必須只靠 A 就能答）、參考答案、1–3 個 fact、
+- **prompt**（`confusable-v2`，固定在程式裡）：A、B 各自框成資料並各自套字元上限、不送任何識別碼；模型回 ≤ 500 token 的 JSON：題目（必須只靠 A 就能答）、參考答案、1–3 個 fact、
   `confusion_reason`（B 裡什麼看起來像答案但不是）、`disambiguating_condition`（區分 A 與 B 的細節）。
 - **程式導出與檢查**：gold 證據組 = 頁 A 實際送出的單位；頁 B 實際送出的每個單位都成為 distractor（附同一組 reason 與 condition），所以契約的檢查成立：
   `confusable_without_distractor`（至少一個干擾項）、`distractor_is_gold`（干擾項不能是 gold）。程式再檢查三件事，不過就丟棄並計入 invalid：
@@ -193,3 +193,16 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   `load_gen_config` 與 `lab-gen` 也各自拒絕這種 key（`lab-gen` 回 `refused`，不送任何呼叫、不留預留）。
 - **沒送出的請求不是「結果未知」**：HTTP client 在送出前就拒絕的請求（例如 header 值不合法）是 `failed`，預留釋放、不計費；同一批後面的呼叫標為 `skipped_after_stop`。
 - **`scripts/demo.sh up` 每次都重建 migrate image**，並且在跑 demo 之前確認資料庫的 migration 版本等於 repo 的最新版（不一致就 BLOCKED，不再讓 API 回 503）。
+
+## 出題回覆的解析與落選原因（第一次真實 run 之後；Refs #12、Issue #7）
+
+第一次真實 run：18 次呼叫有 5 個回覆解析失敗、易混淆題 0 題，而且出現「第 5 頁寫什麼」這種題目。之後的規則：
+
+- **容忍無害的偏差，內容仍嚴格檢查**：JSON 前後有說明文字、任何位置的 code fence、外面多包一層單元素陣列、多餘的欄位、fact 寫成純字串、重複的 fact（去重）都可以收；
+  但是空欄位、超長（題目 500、答案 600、fact 400 字）、fact 數量不在 1–3（跨頁題 2–3 且 A、B 兩邊都要有）、source 不是 A／B、缺必要欄位，一律丟掉，**不猜、不修**。
+- **每個被丟掉的回覆都有固定代碼**，數量記在 `benchmark.questions_generated` 稽核事件的 `reasons={…}`（也在 `GET …/generate` 的 `last_generation`），不含任何模型文字：
+  `<桶>:parse:<empty|reply_too_long|not_json|bad_keys|bad_types|empty_field|field_too_long|bad_fact_shape|fact_too_long|bad_fact_source|bad_facts_count>`、
+  `<桶>:no_shown_units`、`<桶>:check:<page_reference|answer_or_fact_not_grounded|condition_not_grounded|b_supports_a_fact|reason_not_in_b|no_overlapping_distractor_unit|fact_not_in_its_page|derive_error|contract_invalid|unit_not_stored>`、`duplicate_question`。
+  下一次真實 run 就能看出易混淆題為什麼是 0。
+- **題目不能提到頁碼**：`page 5`、`p. 5`、`第5頁`、`第五頁` 這類（問的是版面、不是內容，而且頁碼可能是印出來的而不是 PDF 的頁序）→ `check:page_reference`，題目丟掉。
+  三個 prompt 也加了這條規則，版本升到 `general-page-v2`／`cross-page-v2`／`confusable-v2`。
