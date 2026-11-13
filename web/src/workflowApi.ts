@@ -1133,3 +1133,76 @@ export async function listQuestions({
     signal,
   );
 }
+
+// -----------------------------------------------------------------------------
+// Review the questions and exclude some before the freeze (owner only for the action)
+// -----------------------------------------------------------------------------
+export type ReviewItem = {
+  id: string;
+  ordinal: number;
+  quota_bucket: string;
+  question_text: string;
+  verdict: "pass" | "fail" | "needs_review" | "unvalidated" | string;
+  verdict_reason: string | null;
+  excluded: boolean;
+  exclusion_reason: string | null;
+};
+
+export type ReviewResponse = {
+  benchmark_revision_id: string;
+  status: string;
+  items: ReviewItem[];
+  total: number;
+  active: number;
+  excluded: number;
+  validation_of_active: { pass: number; fail: number; needs_review: number; unvalidated: number };
+  can_freeze: boolean;
+  note?: string;
+};
+
+type BenchRef = {
+  projectId: string;
+  logicalId: string;
+  revision?: number;
+  token: string;
+  fetchFn?: typeof fetch;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  baseUrl?: string;
+};
+
+function checkRef(ref: BenchRef): ApiResult<never> | null {
+  if (!ref.token.trim()) return { ok: false, error: { message: "未提供認證 Token", status: 401, code: "unauthorized" } };
+  if (!validateUuid(ref.projectId.trim())) {
+    return { ok: false, error: { message: "Project ID 格式錯誤（須為 UUID）", status: 400, code: "bad_request" } };
+  }
+  return null;
+}
+
+export async function getQuestionReview(ref: BenchRef): Promise<ApiResult<ReviewResponse>> {
+  const bad = checkRef(ref);
+  if (bad) return bad;
+  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/questions/review?project_id=${encodeURIComponent(ref.projectId.trim())}`;
+  return executeFetch<ReviewResponse>(
+    endpoint, { method: "GET", headers: { Authorization: `Bearer ${ref.token.trim()}` } },
+    ref.token.trim(), ref.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);
+}
+
+export async function setQuestionExcluded(
+  ref: BenchRef & { questionId: string; excluded: boolean; reason: string },
+): Promise<ApiResult<{ question_id: string; excluded: boolean; active_questions: number }>> {
+  const bad = checkRef(ref);
+  if (bad) return bad;
+  if (!validateUuid(ref.questionId)) {
+    return { ok: false, error: { message: "題目 ID 格式錯誤", status: 400, code: "bad_request" } };
+  }
+  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/questions/${ref.questionId}/exclusion?project_id=${encodeURIComponent(ref.projectId.trim())}`;
+  return executeFetch(
+    endpoint,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ref.token.trim()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ excluded: ref.excluded, reason: ref.reason.trim() }),
+    },
+    ref.token.trim(), ref.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);
+}
