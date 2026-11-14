@@ -7,6 +7,7 @@ import {
   freezeBenchmark,
   getGenerationProgress,
   getJobStatus,
+  getRunEstimate,
   getRunResults,
   parseDocument,
   planBenchmark,
@@ -20,6 +21,7 @@ import {
   type BenchmarkPlanResponse,
   type GenerationProgressResponse,
   type JobStatusResponse,
+  type RunEstimate,
   type RunResultsResponse,
   type UploadDocumentResponse,
 } from "./workflowApi";
@@ -99,14 +101,13 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
 
   // Step 5: Generate
   const [genModel, setGenModel] = useState("claude-haiku-4-5-20251001");
-  const [genBudget, setGenBudget] = useState(200000);
+  const [genCount, setGenCount] = useState("");          // how many questions (filled with the plan's total once it is known)
   const [genStatus, setGenStatus] = useState<StepState>("idle");
   const [genError, setGenError] = useState<string | null>(null);
   const [genProgress, setGenProgress] = useState<GenerationProgressResponse | null>(null);
 
   // Step 6: Validate
   const [valModel, setValModel] = useState("claude-haiku-4-5-20251001");
-  const [valBudget, setValBudget] = useState(200000);
   const [valStatus, setValStatus] = useState<StepState>("idle");
   const [valError, setValError] = useState<string | null>(null);
   const [valProgress, setValProgress] = useState<GenerationProgressResponse | null>(null);
@@ -122,7 +123,6 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
   const [methodError, setMethodError] = useState<string | null>(null);
   const [methodJobDetail, setMethodJobDetail] = useState<JobStatusResponse | null>(null);
   const [methodModel, setMethodModel] = useState("claude-haiku-4-5-20251001");
-  const [methodBudget, setMethodBudget] = useState(200000);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeEvalId, setActiveEvalId] = useState<string | null>(null);
   const [activeRunKind, setActiveRunKind] = useState<"baseline" | "model" | null>(null);
@@ -142,6 +142,53 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
       activeAbortControllerRef.current?.abort();
     };
   }, []);
+
+  // The worst-case cost of the NEXT model step, in USD, from the API (Issue #186): nobody types a price.
+  type Est = { value: RunEstimate | null; error: string | null };
+  const noEst: Est = { value: null, error: null };
+  const [genEst, setGenEst] = useState<Est>(noEst);
+  const [valEst, setValEst] = useState<Est>(noEst);
+  const [methodEst, setMethodEst] = useState<Est>(noEst);
+  const [judgeEst, setJudgeEst] = useState<Est>(noEst);
+  const countNumber = Number(genCount);
+  const countValid = Number.isInteger(countNumber) && countNumber >= 1;
+
+  const useEstimateEffect = (
+    enabled: boolean,
+    phase: "generate" | "validate" | "answer" | "judge",
+    set: (e: Est) => void,
+    extra: { questionCount?: number; runId?: string | null; onFirst?: (e: RunEstimate) => void } = {},
+    deps: unknown[] = [],
+  ) => {
+    useEffect(() => {
+      if (!enabled || !benchLogicalId) {
+        set(noEst);
+        return;
+      }
+      const controller = new AbortController();
+      void getRunEstimate({
+        projectId: projectId.trim(), logicalId: benchLogicalId, phase, questionCount: extra.questionCount,
+        runId: extra.runId ?? undefined, token: token.trim(), fetchFn, signal: controller.signal,
+      }).then((res) => {
+        if (controller.signal.aborted) return;
+        if (res.ok) {
+          set({ value: res.data, error: null });
+          extra.onFirst?.(res.data);
+        } else {
+          set({ value: null, error: res.error.message });
+        }
+      });
+      return () => controller.abort();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [enabled, benchLogicalId, projectId, token, ...deps]);
+  };
+  useEstimateEffect(planStatus === "success" && genStatus !== "running", "generate", setGenEst,
+    { questionCount: genCount === "" ? undefined : countValid ? countNumber : undefined,
+      onFirst: (e) => { if (genCount === "" && e.plan_total) setGenCount(String(e.plan_total)); } }, [genCount, genStatus]);
+  useEstimateEffect(genStatus === "success" && valStatus !== "running" && freezeStatus !== "success", "validate", setValEst, {}, [genStatus, valStatus]);
+  useEstimateEffect(freezeStatus === "success" && methodStatus !== "running", "answer", setMethodEst, {}, [freezeStatus, methodStatus]);
+  useEstimateEffect(activeRunKind === "model" && Boolean(activeRunId) && judgeStatus !== "running", "judge", setJudgeEst,
+    { runId: activeRunId }, [activeRunKind, activeRunId, judgeStatus]);
 
   // ---------------------------------------------------------------------------
   // Handlers
@@ -338,7 +385,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         logicalId: benchLogicalId,
         revision: 1,
         model: genModel.trim(),
-        budgetCapMicros: Number(genBudget),
+        questionCount: countValid ? countNumber : undefined,
         token: token.trim(),
         fetchFn,
         signal: controller.signal,
@@ -378,7 +425,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         }
         if (jobStatus === "failed" || jobStatus === "cancelled") {
           setGenStatus("error");
-          setGenError(`題目生成任務結束狀態：${jobStatus}`);
+          setGenError(explainFailure("generate", jobStatus, progRes.data.job?.failure_reason));
           return;
         }
 
@@ -412,7 +459,6 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         logicalId: benchLogicalId,
         revision: 1,
         model: valModel.trim(),
-        budgetCapMicros: Number(valBudget),
         token: token.trim(),
         fetchFn,
         signal: controller.signal,
@@ -453,7 +499,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
           }
           if (job.status === "failed" || job.status === "cancelled") {
             setValStatus("error");
-            setValError(`自動驗題任務結束狀態：${job.status}`);
+            setValError(explainFailure("validate", job.status, job.failure_reason));
             return;
           }
         }
@@ -577,7 +623,6 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         logicalId: benchLogicalId,
         revision: 1,
         model: methodModel.trim(),
-        budgetCapMicros: Number(methodBudget),
         token: token.trim(),
         fetchFn,
         signal: controller.signal,
@@ -665,7 +710,6 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         projectId: projectId.trim(),
         runId,
         model: methodModel.trim(),
-        budgetCapMicros: Number(methodBudget),
         token: token.trim(),
         fetchFn,
         signal: controller.signal,
@@ -1067,23 +1111,33 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
               />
             </div>
             <div>
-              <label htmlFor="workflow-gen-budget" style={{ display: "block" }}>預算上限 (micro-USD)</label>
+              <label htmlFor="workflow-gen-count" style={{ display: "block" }}>要出幾題</label>
               <input
-                id="workflow-gen-budget"
+                id="workflow-gen-count"
                 type="number"
-                value={genBudget}
-                onChange={(e) => setGenBudget(Number(e.target.value))}
+                min={1}
+                max={genEst.value?.plan_total ?? 1000}
+                value={genCount}
+                onChange={(e) => setGenCount(e.target.value)}
                 disabled={planStatus !== "success" || genStatus === "running"}
-                style={{ width: "150px" }}
+                style={{ width: "110px" }}
               />
+              {genEst.value?.plan_total ? <span className="muted small"> （這份文件建議 {genEst.value.plan_total} 題）</span> : null}
             </div>
           </div>
 
+          {genEst.value?.split && (
+            <p data-testid="gen-split" className="small" style={{ margin: "0 0 0.25rem 0" }}>
+              {genEst.value.question_count} 題 = 一般 {genEst.value.split.general} ＋ 跨頁 {genEst.value.split.cross_page} ＋ 易混淆 {genEst.value.split.confusable}
+            </p>
+          )}
+          {genCount !== "" && !countValid && <p role="note" className="small" style={{ color: "#c5221f" }}>題數要是 1 以上的整數</p>}
+          <EstimateLine est={genEst} label="開始前先告訴你：這一步" testId="gen-estimate" />
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <button
               type="button"
               onClick={handleGenerate}
-              disabled={planStatus !== "success" || genStatus === "running"}
+              disabled={planStatus !== "success" || genStatus === "running" || (genCount !== "" && !countValid)}
               style={buttonStyle}
             >
               {genStatus === "running" ? "生成中…" : "開始生成題目"}
@@ -1117,7 +1171,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 </li>
                 <li>題目缺額 (Shortfall): {genProgress.shortfall ?? "—"}</li>
                 <li>
-                  已支出: {genProgress.ledger?.spent_micros !== undefined ? `${genProgress.ledger.spent_micros} micro-USD` : "—"}
+                  已支出: {genProgress.ledger?.spent_micros !== undefined ? `約 ${(genProgress.ledger.spent_micros / 1_000_000).toFixed(4)} 美元` : "—"}
                 </li>
               </ul>
             </div>
@@ -1146,19 +1200,13 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 style={{ width: "250px" }}
               />
             </div>
-            <div>
-              <label htmlFor="workflow-val-budget" style={{ display: "block" }}>預算上限 (micro-USD)</label>
-              <input
-                id="workflow-val-budget"
-                type="number"
-                value={valBudget}
-                onChange={(e) => setValBudget(Number(e.target.value))}
-                disabled={genStatus !== "success" || valStatus === "running"}
-                style={{ width: "150px" }}
-              />
-            </div>
           </div>
 
+          <p data-testid="validate-explain" className="muted small" style={{ margin: "0 0 0.25rem 0" }}>
+            自動驗題檢查兩件事：(1) 程式比對每一題的答案、要點和數字是不是真的出現在模型看到的原文裡；(2) 再用模型判斷「光看那段原文，答不答得出來」。
+            兩項都過才算通過；沒通過的題目不能凍結，除非你把它排除（會記錄理由、不會刪除）。這是同一個模型做的自動檢查，不是人工審查。
+          </p>
+          <EstimateLine est={valEst} label="開始前先告訴你：這一步" testId="val-estimate" />
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <button
               type="button"
@@ -1325,6 +1373,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
             </div>
           </div>
 
+          <EstimateLine est={methodEst} label="「模型回答方法」這一步" testId="method-estimate" />
           <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
             <div>
               <label htmlFor="workflow-method-model" style={{ display: "block", fontSize: "0.85rem" }}>模型 (模型回答用)</label>
@@ -1335,17 +1384,6 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 onChange={(e) => setMethodModel(e.target.value)}
                 disabled={freezeStatus !== "success" || methodStatus === "running"}
                 style={{ width: "220px", fontSize: "0.85rem" }}
-              />
-            </div>
-            <div>
-              <label htmlFor="workflow-method-budget" style={{ display: "block", fontSize: "0.85rem" }}>預算 (micro-USD)</label>
-              <input
-                id="workflow-method-budget"
-                type="number"
-                value={methodBudget}
-                onChange={(e) => setMethodBudget(Number(e.target.value))}
-                disabled={freezeStatus !== "success" || methodStatus === "running"}
-                style={{ width: "130px", fontSize: "0.85rem" }}
               />
             </div>
           </div>
@@ -1390,6 +1428,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
               </button>
               <span style={moneyWarningStyle}>會呼叫真實模型、會花錢</span>
             </div>
+            <EstimateLine est={judgeEst} label="評分這一步" testId="judge-estimate" />
             <p className="help" data-testid="judge-help">
               {activeRunKind === "baseline"
                 ? "目前這個 run 是詞彙 baseline，沒有模型答案，不能評分。要評分請在步驟 8 執行「模型回答方法」。"
@@ -1523,6 +1562,36 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
 // -----------------------------------------------------------------------------
 // Styles
 // -----------------------------------------------------------------------------
+const FAILURE_TEXT: Record<string, string> = {
+  budget_exhausted: "預算不夠，一次呼叫都送不出去。預算是依題數自動算的，通常是這個題庫之前已經花掉一部分額度：請減少題數，或重新建立一個題庫再試。",
+  partial_calls: "有些呼叫失敗了（例如模型服務暫時出錯），成功的部分已經寫入；可以再按一次補足剩下的題目。",
+  lab_gen_failed: "和模型服務的連線中斷，這一批的結果遺失；已送出的呼叫會保留預留的額度，不會當成沒花錢。請稍後再試。",
+  lab_gen_refused: "出題程式拒絕送出（設定或價格有問題），沒有任何呼叫被送出，也沒有花錢。",
+  no_calls: "沒有需要送出的呼叫（題目數量已經達到你要的題數）。",
+  benchmark_not_generating: "題庫目前不在「出題中」的狀態，無法執行。",
+  benchmark_not_validating: "題庫目前不在「驗題中」的狀態，無法執行。",
+  internal_error: "系統內部錯誤，沒有花錢；請再試一次，若重複發生請回報。",
+};
+
+function explainFailure(what: "generate" | "validate", status: string, code?: string | null): string {
+  const name = what === "generate" ? "題目生成" : "自動驗題";
+  if (status === "cancelled") return `${name}已取消。`;
+  const text = code ? FAILURE_TEXT[code] : undefined;
+  return text ? `${name}失敗：${text}` : `${name}失敗${code ? `（${code}）` : ""}。`;
+}
+
+function EstimateLine({ est, label, testId }: { est: { value: RunEstimate | null; error: string | null }; label: string; testId: string }) {
+  if (est.error) return <p data-testid={testId} className="muted small">無法估算費用：{est.error}</p>;
+  if (!est.value) return null;
+  const v = est.value;
+  return (
+    <p data-testid={testId} className="small" style={{ margin: "0.25rem 0" }}>
+      {label}最多約 <strong>{v.estimated_max_usd} 美元</strong>（{v.calls} 次呼叫，依最壞情況估算，實際通常低很多）
+      {v.bound ? "；這一步的提示長度用上限估算" : ""}
+    </p>
+  );
+}
+
 const METRIC_HELP: Record<string, string> = {
   recall_at_k: "檢索命中：標準答案需要的證據，有沒有被找回來（0–100）",
   complete_at_k: "完整命中：需要的證據是否全部找回來",

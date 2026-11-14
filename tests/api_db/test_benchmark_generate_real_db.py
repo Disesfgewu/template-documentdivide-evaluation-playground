@@ -122,7 +122,8 @@ class BenchmarkGenerateApiTests(GenerateApiFixtures, FreshDatabase):
     def test_bad_requests_and_wrong_states_are_refused_and_start_nothing(self):
         project, owner = self.planned()
         for body in ({"model": "m", "budget_cap_micros": 1000, "max_output_tokens": 501},
-                     {"model": "m", "budget_cap_micros": 0}, {"model": "m"}, {"budget_cap_micros": 10},
+                     {"model": "m", "budget_cap_micros": 0}, {"budget_cap_micros": 10},          # a body without a budget is now valid: it is derived
+                     {"model": "m", "question_count": 0}, {"model": "m", "question_count": "5"}, {"model": "m", "question_count": 1001},
                      {"model": "m", "budget_cap_micros": 10, "extra": 1}, {"model": "m", "budget_cap_micros": "10"}):
             self.assertEqual(self.api("post", owner, self.GEN, project, body).status_code, 400, body)
         self.assertEqual(self.api("get", owner, self.GEN, project).json()["job"], None)

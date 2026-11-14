@@ -64,18 +64,22 @@ def request_sha256(model: str, system: str, user: str) -> str:
 def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, actor_id: uuid.UUID,
                          benchmark_id: uuid.UUID, model: str, max_output_tokens: int, budget_cap_micros: int,
                          currency: str, pricing_revision: str,
-                         max_attempts: int = DEFAULT_GENERATE_MAX_ATTEMPTS, phase: str = "generate") -> uuid.UUID:
+                         max_attempts: int = DEFAULT_GENERATE_MAX_ATTEMPTS, phase: str = "generate",
+                         requested: tuple[int, int, int] | None = None) -> uuid.UUID:
     """Queue a generation job and move the benchmark ``planning -> generating``; with ``phase="validate"`` queue a
     validation job instead (the benchmark must be ``validating`` and keeps that status).
 
     Authorized here for ``build_edit_freeze`` (owner/maintainer; non-member ``NotFound``, other roles
-    ``PermissionDenied``). The cap above 500 output tokens is refused before anything is written."""
+    ``PermissionDenied``). The cap above 500 output tokens is refused before anything is written.
+    ``requested`` = (general, cross_page, confusable) questions the owner asked for (generation only); None = the plan's targets."""
     if not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS:
         raise GenerationError("max_output_tokens_out_of_range")
     if budget_cap_micros <= 0:
         raise GenerationError("budget_cap_must_be_positive")
     if phase not in ("generate", "validate"):
         raise GenerationError("unknown_phase")
+    if requested is not None and (phase != "generate" or min(requested) < 0 or sum(requested) < 1):
+        raise GenerationError("requested_counts_invalid")
     job_id, op_id = uuid.uuid4(), uuid.uuid4()
     with conn.transaction():
         decision = authorize(conn, project_id, actor_id, "build_edit_freeze")
@@ -103,10 +107,10 @@ def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, act
                      "VALUES (%s, %s, 'document.generate', 'queued', %s, true)", (job_id, project_id, max_attempts))
         conn.execute(
             "INSERT INTO generate_jobs (job_id, project_id, benchmark_id, operation_id, requested_by, model, "
-            "max_output_tokens, budget_cap_micros, currency, pricing_revision, phase) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "max_output_tokens, budget_cap_micros, currency, pricing_revision, phase, requested_general, requested_cross_page, "
+            "requested_confusable) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (job_id, project_id, benchmark_id, op_id, actor_id, model, max_output_tokens, budget_cap_micros, currency,
-             pricing_revision, phase))
+             pricing_revision, phase, *(requested or (None, None, None))))
         conn.execute(
             "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, outcome, operation_id) "
             "VALUES (%s, %s, %s, %s, 'generate_job', %s, 'succeeded', %s)",
