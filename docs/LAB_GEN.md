@@ -62,7 +62,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **`build_calls`**（`lab_api/generate_questions.py`）：只讀 benchmark **釘住的 parse**（P-A）裡通過 G8 硬規則的頁、只取其文字證據單位；每題一個呼叫，
   頁面輪流（round-robin），同一頁重複時用程式產生的「第 k 個敘述」提示避免重複。目標數 = N − 3Q（其餘三個 bucket 各至少 Q）。
   **不送**檔名、document／project／actor id、diagnostics、其他頁、其他題的 gold、key。system prompt 固定在程式裡（版本
-  `general-page-v3`，寫進稽核事件），證據用 `<evidence>` 框起來並明說裡面的指令一律忽略。
+  `general-page-v4`，寫進稽核事件），證據用 `<evidence>` 框起來並明說裡面的指令一律忽略。
 - **模型只寫三樣東西**（≤ 500 token）：題目、參考答案、1..3 個 fact。其餘契約欄位全由程式導出：language（粗略 zh／en）、tags `[]`、
   modality `text`、reasoning_type `value_lookup`、SourceAnswer（該頁被送出的文字單位，不含干擾項）、TextualAnswer `checks: []`、
   calculation `null`、每個 fact 平均權重、固定的評分敘述（無部分給分）。
@@ -138,7 +138,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 
 - **何時生成**：同一個生成 job 的同一批呼叫裡，在一般題之後加上 Q 題（Q = ceil(0.10·N)，和 plan 的 cross_page 下限相同）的 cross_page 呼叫；
   乾淨且有文字的頁面少於兩頁時**不產生任何配對、不呼叫**（缺額如實記錄，不湊數）。頁面配對是兩個不同的頁，最近的頁優先，輪流使用。沒有新的 migration。
-- **prompt**（版本 `cross-page-v3`，固定在程式裡）：兩個頁面各自框成資料區塊 A 與 B（不含 evidence id 等識別碼），**每頁各自套用字元上限**（6000），
+- **prompt**（版本 `cross-page-v4`，固定在程式裡）：兩個頁面各自框成資料區塊 A 與 B（不含 evidence id 等識別碼），**每頁各自套用字元上限**（6000），
   標籤中和同一般題；模型回 ≤ 500 token 的 JSON：題目、參考答案、2–3 個 fact，每個 fact 標明 `source`（A 或 B），兩邊都至少要有一個。
 - **程式導出與檢查**：source answer 的證據組 = A、B 兩頁**實際送出**的單位；每個 fact 的支持組只有它被標到的那一頁的單位。因此契約的檢查是真的在檢查：
   證據組必須跨 ≥ 2 頁、且不能有任何單一頁就支持所有 fact（否則 `cross_page_single_page` 而被丟棄）。模型「這個 fact 在哪一頁」的宣稱還會用程式對照該頁送出的文字
@@ -151,7 +151,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 
 - **何時生成**：同一批呼叫裡，在 general 與 cross_page 之後再加 Q 題 confusable；需要兩個不同的乾淨文字頁（頁 A 回答、頁 B 是看起來相似的干擾來源，兩頁輪流當 A）。
   少於兩頁就沒有配對、不呼叫，缺額如實記錄。沒有新的 migration（`distractors` 表早已存在，與 facts 同一套 gold RLS）。
-- **prompt**（`confusable-v3`，固定在程式裡）：A、B 各自框成資料並各自套字元上限、不送任何識別碼；模型回 ≤ 500 token 的 JSON：題目（必須只靠 A 就能答）、參考答案、1–3 個 fact、
+- **prompt**（`confusable-v4`，固定在程式裡）：A、B 各自框成資料並各自套字元上限、不送任何識別碼；模型回 ≤ 500 token 的 JSON：題目（必須只靠 A 就能答）、參考答案、1–3 個 fact、
   `confusion_reason`（B 裡什麼看起來像答案但不是）、`disambiguating_condition`（區分 A 與 B 的細節）。
 - **程式導出與檢查**：gold 證據組 = 頁 A 實際送出的單位；頁 B 實際送出的每個單位都成為 distractor（附同一組 reason 與 condition），所以契約的檢查成立：
   `confusable_without_distractor`（至少一個干擾項）、`distractor_is_gold`（干擾項不能是 gold）。程式再檢查三件事，不過就丟棄並計入 invalid：
@@ -226,7 +226,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   `<桶>:no_shown_units`、`<桶>:check:<page_reference|answer_or_fact_not_grounded|condition_not_grounded|b_supports_a_fact|reason_not_in_b|no_overlapping_distractor_unit|fact_not_in_its_page|derive_error|contract_invalid|unit_not_stored>`、`duplicate_question`。
   下一次真實 run 就能看出易混淆題為什麼是 0。
 - **題目不能提到頁碼**：`page 5`、`p. 5`、`第5頁`、`第五頁` 這類（問的是版面、不是內容，而且頁碼可能是印出來的而不是 PDF 的頁序）→ `check:page_reference`，題目丟掉。
-  三個 prompt 也加了這條規則，版本升到 `general-page-v3`／`cross-page-v3`／`confusable-v3`。
+  三個 prompt 也加了這條規則，版本升到 `general-page-v4`／`cross-page-v4`／`confusable-v4`。
 
 ## 凍結前排除題目（migration 0019；Refs #10、Issue #7 的 PM 決定）
 
@@ -248,3 +248,14 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **出題回覆解析失敗的原因診斷**：每個解析不了的回覆，稽核事件多一個 `parse_shapes={…}`：只記**形狀**，不記內容（第一個與最後一個字元的類別 `{ } [ ] ` letter cjk digit other none`、長度區間、有沒有 code fence、大括號是否成對；
   括號不成對通常是被 500 token 上限截斷）。三個 prompt 升到 v3，多一條「回覆必須以 { 開頭、以 } 結尾，不要前言、不要 code fence，每個欄位寫短一點」。
   **還沒做 assistant prefill（預填 `{`）**：它要改 lab-gen 的請求格式（最後一則 assistant 訊息）而且不是每個模型都支援，先看形狀資料再決定。
+
+## 第三次真實 run 的發現（Refs #12、Issue #7）
+
+- **模型可以用 JSON 拒絕出題**：三個出題 prompt（升到 v4）多一條：如果這一頁沒有適合出題的內容（只有標題、目錄、頁首頁尾、沒有意義的數字、字太少），不要用文字解釋，回 `{"skip": "<一句理由>"}`。
+  這是一個**決定**，不是解析失敗：計入 `<桶>:declined`，不增加 `unparseable`。稽核事件多 `declined=N` 與 `declined_where=[{bucket, pages, shown_chars}]`（只有桶、頁序、模型看到的字元數區間，**不存理由文字**），
+  可以看出被拒絕的是不是內容很少的頁面。有題目欄位的回覆優先於 skip；理由必須是 1–300 字的字串。純文字的拒絕（沒有 JSON）仍然算解析失敗，形狀記在 `parse_shapes`。
+- **judge 對不上時說明是哪一種**：`judge_fact_mismatch` 加上 `fact_missing`／`fact_extra`／`fact_duplicate`（可以用 `+` 並列），`judge_claim_mismatch` 加上 `claim_missing`／`claim_extra`／`claim_duplicate`／`supporting_hit_not_cited`。
+  兩個代碼都在那一題四個指標的 `reason_codes` 裡（`["judge_claim_mismatch", "claim_missing"]`），job 的失敗計數也用 `代碼:子代碼`；只有固定詞彙，沒有 id、沒有模型文字。
+- **易混淆題一直是 0 的原因（用較豐富的文件驗證）**：測試用兩頁內容不同的文字（Gold 方案年費 120 EUR 五月、Silver 方案年費 60 EUR 六月），一個符合實際的回覆**通過了所有檢查**，寫出易混淆題，干擾項是另一頁；
+  兩頁重複同一個事實時則一定被擋（`b_supports_a_fact`：B 頁也支持這個答案，它就不是「容易混淆但答案不同」）。所以合成文件裡 6 頁幾乎一樣的文字本來就出不了易混淆題；檢查本身沒有改。
+  真實 run 裡另外出現的 `condition_not_grounded`（區分條件不在 A 頁或題目裡）要等有內容豐富的真實文件才看得出是不是太嚴。

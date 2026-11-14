@@ -30,7 +30,7 @@ from lab_db.storage import LocalArtifactStore
 from lab_api import baseline_eval as be
 from lab_api.generate_worker import CallSpec
 from lab_api.method_judge import (JUDGE_GRADER_SUFFIX, JUDGE_LIMITATION, JUDGE_PROMPT_REVISION, JUDGE_PROMPT_SHA256, MAX_JUDGED_CLAIMS,
-                                  build_judge_call, check_verdict, parse_judge_reply_ex)
+                                  build_judge_call, check_verdict_ex, parse_judge_reply_ex)
 from lab_scoring import rules
 
 ACTION = "register_method_and_submit"
@@ -226,9 +226,9 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                     if obj is None:
                         code, detail = "invalid_judge_reply", parse_code        # the generic code plus WHY, never any model text
                     else:
-                        verdict, why = check_verdict(obj, len(it["facts"]), it["claims"])
+                        verdict, why, sub = check_verdict_ex(obj, len(it["facts"]), it["claims"])
                         if verdict is None:
-                            code = why
+                            code, detail = why, sub        # e.g. judge_claim_mismatch + claim_missing: which kind, never an id
                         else:
                             results = derive(it, verdict, grader)
                 if results is None:
