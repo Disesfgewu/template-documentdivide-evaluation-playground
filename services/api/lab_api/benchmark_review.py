@@ -8,6 +8,7 @@
   another row. The freeze then needs every NON-excluded question to pass and at least one to remain."""
 from __future__ import annotations
 
+import json
 import uuid
 
 import psycopg
@@ -44,29 +45,94 @@ def _authorize(conn: psycopg.Connection, project_id: uuid.UUID, actor_id: uuid.U
     return decision.role
 
 
+EXPORT_SCHEMA = "lab-benchmark-export-1"
+MAX_EXPORT_QUESTIONS = 1000
+
+
+def _details(conn: psycopg.Connection, benchmark_id: uuid.UUID, document_version_id: uuid.UUID) -> list[dict]:
+    """Every question of the benchmark (excluded ones too) with EVERYTHING the owner needs to check it: the reference answer, the required facts,
+    the evidence (pages and text), the distractors, the latest automated verdict with its checks, and the exclusion state. Gold is included, so the
+    caller must be owner/maintainer and have set ``lab.actor_id`` (the gold tables are under row level security). No key and no provider payload:
+    the stored validation checks are flags and numbers, the model's text is never kept."""
+    rows = conn.execute(
+        "SELECT q.id, q.question_key, q.ordinal, q.quota_bucket, q.question_text, q.payload, v.verdict, v.reason, v.code_checks, v.llm_checks, "
+        "COALESCE(e.kind = 'exclude', false), e.reason FROM questions q "
+        "LEFT JOIN LATERAL (SELECT verdict, reason, code_checks, llm_checks FROM question_validations x WHERE x.question_id = q.id "
+        "ORDER BY x.created_at DESC, x.id DESC LIMIT 1) v ON true "
+        "LEFT JOIN LATERAL (SELECT kind, reason FROM question_exclusions x WHERE x.question_id = q.id ORDER BY x.seq DESC LIMIT 1) e ON true "
+        "WHERE q.benchmark_id = %s ORDER BY q.ordinal LIMIT %s", (benchmark_id, MAX_EXPORT_QUESTIONS + 1)).fetchall()
+    if len(rows) > MAX_EXPORT_QUESTIONS:
+        raise ApiError(409, "conflict", f"the benchmark has more than {MAX_EXPORT_QUESTIONS} questions: too many to preview or export in one request")
+    gold: dict[uuid.UUID, dict] = {}
+    for qid, kind, payload in conn.execute("SELECT question_id, kind, payload FROM gold_answers WHERE benchmark_id = %s", (benchmark_id,)):
+        gold.setdefault(qid, {})[kind] = payload
+    wanted: set[str] = set()
+    for g in gold.values():
+        src = g.get("source") or {}
+        wanted.update(eid for st in src.get("evidence_sets", []) for eid in st.get("evidence_ids", []))
+        wanted.update(d["evidence_id"] for d in src.get("distractors", []))
+    units: dict[str, dict] = {}
+    if wanted:
+        for key, text, pages in conn.execute(
+                "SELECT eu.evidence_key, eu.normalized_content, array_agg(DISTINCT er.page_index ORDER BY er.page_index) FROM evidence_units eu "
+                "JOIN evidence_regions er ON er.evidence_unit_id = eu.id WHERE eu.document_version_id = %s AND eu.evidence_key = ANY(%s) "
+                "GROUP BY eu.evidence_key, eu.normalized_content", (document_version_id, sorted(wanted))):
+            units[key] = {"evidence_id": key, "pages": [int(p) + 1 for p in pages], "text": text}      # pages are shown 1-based, as in a PDF viewer
+    out = []
+    for qid, key, ordinal, bucket, text, payload, verdict, vreason, code_checks, llm_checks, excluded, ereason in rows:
+        g, sem, src = gold.get(qid, {}), (gold.get(qid, {}).get("semantic") or {}), (gold.get(qid, {}).get("source") or {})
+        out.append({
+            "id": str(qid), "question_key": key, "ordinal": int(ordinal), "bucket": bucket, "quota_bucket": bucket, "question_text": text,
+            "language": (payload or {}).get("language"),
+            "reference_answer": sem.get("reference_answer"),
+            "required_facts": [{"fact_id": f.get("fact_id"), "statement": f.get("statement"), "weight": f.get("weight")} for f in sem.get("required_facts", [])],
+            "conditions": sem.get("conditions", []),
+            "evidence_sets": [{"set_id": st.get("set_id"), "units": [units.get(eid, {"evidence_id": eid, "pages": [], "text": None}) for eid in st.get("evidence_ids", [])]}
+                              for st in src.get("evidence_sets", [])],
+            "distractors": [{**units.get(d["evidence_id"], {"evidence_id": d["evidence_id"], "pages": [], "text": None}),
+                             "confusion_reason": d.get("confusion_reason"), "disambiguating_condition": d.get("disambiguating_condition")}
+                            for d in src.get("distractors", [])],
+            "validation": {"verdict": verdict or "unvalidated", "reason": vreason, "code_checks": code_checks, "llm_checks": llm_checks},
+            "verdict": verdict or "unvalidated", "verdict_reason": vreason,
+            "excluded": bool(excluded), "exclusion_reason": ereason if excluded else None})
+    return out
+
+
 def _review(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int) -> dict:
     _authorize(conn, project_id, actor_id, owner_only=False)
-    benchmark_id, _, status, _ = _find(conn, project_id, logical_id, revision)
+    benchmark_id, document_version_id, status, _ = _find(conn, project_id, logical_id, revision)
     with conn.transaction():
         conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))     # question_validations is gold-RLS
-        rows = conn.execute(
-            "SELECT q.id, q.ordinal, q.quota_bucket, q.question_text, v.verdict, v.reason, "
-            "COALESCE(e.kind = 'exclude', false), e.reason FROM questions q "
-            "LEFT JOIN LATERAL (SELECT verdict, reason FROM question_validations x WHERE x.question_id = q.id "
-            "ORDER BY x.created_at DESC, x.id DESC LIMIT 1) v ON true "
-            "LEFT JOIN LATERAL (SELECT kind, reason FROM question_exclusions x WHERE x.question_id = q.id ORDER BY x.seq DESC LIMIT 1) e ON true "
-            "WHERE q.benchmark_id = %s ORDER BY q.ordinal", (benchmark_id,)).fetchall()
-    items = [{"id": str(qid), "ordinal": int(ordinal), "quota_bucket": bucket, "question_text": text,
-              "verdict": verdict or "unvalidated", "verdict_reason": vreason, "excluded": bool(excluded),
-              "exclusion_reason": ereason if excluded else None}
-             for qid, ordinal, bucket, text, verdict, vreason, excluded, ereason in rows]
+        items = _details(conn, benchmark_id, document_version_id)
     active = [i for i in items if not i["excluded"]]
     counts = {k: sum(1 for i in active if i["verdict"] == k) for k in ("pass", "fail", "needs_review", "unvalidated")}
     return {"benchmark_revision_id": str(benchmark_id), "status": status, "items": items,
             "total": len(items), "active": len(active), "excluded": len(items) - len(active),
             "validation_of_active": counts, "can_freeze": status == "validating" and bool(active) and counts["pass"] == len(active),
             "note": "verdicts are automated and come from the same provider and model as the generator; an exclusion is recorded with "
-                    "its reason and never deletes the question"}
+                    "its reason and never deletes the question",
+            "validation_explained": "the automated validation checks (1) by code that the answer, the facts and the numbers really appear in the text the "
+                                    "model was shown, and (2) with a second model call whether the question can be answered from that text alone"}
+
+
+def _export(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int) -> tuple[dict, list[dict]]:
+    """(header, questions) of the whole benchmark: gold included, so owner/maintainer only."""
+    _authorize(conn, project_id, actor_id, owner_only=False)
+    benchmark_id, document_version_id, status, page_count = _find(conn, project_id, logical_id, revision)
+    with conn.transaction():
+        conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))
+        items = _details(conn, benchmark_id, document_version_id)
+        meta = conn.execute(
+            "SELECT b.n_target, b.q_min, b.compliance, dv.sha256 FROM benchmark_revisions b JOIN document_versions dv ON dv.id = b.document_version_id "
+            "WHERE b.id = %s", (benchmark_id,)).fetchone()
+    header = {"schema": EXPORT_SCHEMA, "logical_id": logical_id, "revision": revision, "benchmark_revision_id": str(benchmark_id), "status": status,
+              "compliance": meta[2], "n_target": meta[0], "q_min": meta[1], "document_sha256": meta[3], "document_page_count": page_count,
+              "questions": len(items), "excluded": sum(1 for i in items if i["excluded"]),
+              "contains_gold": True, "human_review": "skipped",
+              "notes": ["This file contains the gold (reference answers, facts, evidence): do not give it to participants.",
+                        "Validation verdicts are automated (code checks plus a model call by the same provider and model as the generator); they are not independent.",
+                        "An excluded question is recorded with its reason and is not frozen, answered or scored."]}
+    return header, items
 
 
 def _exclude(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int,
@@ -133,3 +199,26 @@ router.add_api_route("/api/v1/benchmarks/{logical_id}/revisions/{revision}/quest
                      name="review_questions_v1")
 router.add_api_route("/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/{question_id}/exclusion", exclusion_handler,
                      methods=["POST"], name="exclude_question_v1")
+
+
+async def export_handler(logical_id: str, revision: int, request: Request, conn: psycopg.Connection = Depends(get_db),
+                         actor_id: uuid.UUID = Depends(get_authenticated_actor)):
+    from fastapi.responses import Response
+    project_id = resolve_project_id(request)
+    fmt = request.query_params.get("format", "json")
+    if fmt not in ("json", "jsonl"):
+        raise ApiError(400, "bad_request", "format must be json or jsonl")
+    header, items = await _run_blocking(request, "meta", _export, conn, actor_id, project_id, logical_id, revision)
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in logical_id)[:80] or "benchmark"
+    if fmt == "json":
+        body = json.dumps({**header, "items": items}, ensure_ascii=False, indent=2)
+        media, ext = "application/json", "json"
+    else:        # one JSON object per line: the header first, then one question per line
+        lines = [json.dumps({"type": "benchmark", **header}, ensure_ascii=False)] + [json.dumps({"type": "question", **i}, ensure_ascii=False) for i in items]
+        body = "\n".join(lines) + "\n"
+        media, ext = "application/x-ndjson", "jsonl"
+    return Response(content=body.encode("utf-8"), media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="{safe}-r{revision}.{ext}"', "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+router.add_api_route("/api/v1/benchmarks/{logical_id}/revisions/{revision}/export", export_handler, methods=["GET"], name="export_benchmark_v1")

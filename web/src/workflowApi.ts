@@ -1236,10 +1236,21 @@ export async function listQuestions({
 // -----------------------------------------------------------------------------
 // Review the questions and exclude some before the freeze (owner only for the action)
 // -----------------------------------------------------------------------------
+export type EvidenceUnitView = { evidence_id: string; pages: number[]; text: string | null };
+
 export type ReviewItem = {
   id: string;
   ordinal: number;
   quota_bucket: string;
+  /** Same as quota_bucket: general / cross_page / confusable. */
+  bucket?: string;
+  language?: string | null;
+  reference_answer?: string | null;
+  required_facts?: { fact_id: string; statement: string; weight: number }[];
+  conditions?: string[];
+  evidence_sets?: { set_id: string; units: EvidenceUnitView[] }[];
+  distractors?: (EvidenceUnitView & { confusion_reason: string | null; disambiguating_condition: string | null })[];
+  validation?: { verdict: string; reason: string | null; code_checks: Record<string, unknown> | null; llm_checks: Record<string, unknown> | null };
   question_text: string;
   verdict: "pass" | "fail" | "needs_review" | "unvalidated" | string;
   verdict_reason: string | null;
@@ -1257,6 +1268,7 @@ export type ReviewResponse = {
   validation_of_active: { pass: number; fail: number; needs_review: number; unvalidated: number };
   can_freeze: boolean;
   note?: string;
+  validation_explained?: string;
 };
 
 type BenchRef = {
@@ -1334,4 +1346,38 @@ export async function getRunEstimate(ref: {
   const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/estimate?${qs.toString()}`;
   return executeFetch<RunEstimate>(endpoint, { method: "GET", headers: { Authorization: `Bearer ${token}` } }, token,
     ref.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);
+}
+
+// -----------------------------------------------------------------------------
+// Download the whole benchmark (gold included): owner / maintainer only
+// -----------------------------------------------------------------------------
+export type DownloadResult = { ok: true; blob: Blob; filename: string } | { ok: false; error: { message: string; status?: number } };
+
+export async function downloadBenchmark(ref: BenchRef & { format: "json" | "jsonl" }): Promise<DownloadResult> {
+  const bad = checkRef(ref);
+  if (bad) return { ok: false, error: bad.ok ? { message: "請求無效" } : bad.error };
+  const token = ref.token.trim();
+  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/export?project_id=${encodeURIComponent(ref.projectId.trim())}&format=${ref.format}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ref.timeoutMs ?? 60_000);
+  try {
+    const res = await (ref.fetchFn ?? fetch)(endpoint, { method: "GET", headers: { Authorization: `Bearer ${token}` }, signal: ref.signal ?? controller.signal });
+    if (!res.ok) {
+      let message = `下載失敗（HTTP ${res.status}）`;
+      try {
+        const body = (await res.json()) as { error?: { message?: string } };
+        if (body?.error?.message) message = `下載失敗：${sanitizeErrorMessage(String(body.error.message), token)}`;
+      } catch {
+        /* keep the generic message */
+      }
+      return { ok: false, error: { message, status: res.status } };
+    }
+    const blob = await res.blob();
+    const m = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "");
+    return { ok: true, blob, filename: m ? m[1] : `benchmark.${ref.format}` };
+  } catch (err) {
+    return { ok: false, error: { message: sanitizeErrorMessage(`下載失敗（${err instanceof Error ? err.message : String(err)}）`, token) } };
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -273,3 +273,12 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **失敗要說原因**：`GET .../generate` 的 `job.failure_reason` 是 worker 結束這個 job 的固定代碼（`budget_exhausted`、`partial_calls`、`lab_gen_failed`、`lab_gen_refused`、`no_calls`…），網頁把它翻成一句話
   （例如「預算不夠，一次呼叫都送不出去…請減少題數」），不再只寫 failed。
 - 網頁的自動驗題那一步多一句說明：它檢查什麼（程式比對答案、要點和數字是否真的在原文裡；再用模型判斷光看那段原文答不答得出來），沒過就不能凍結，除非排除。
+
+## 題庫預覽與下載（Issue #186 第二部分）
+
+- **預覽**：`GET .../questions/review`（owner／maintainer）現在每一題都帶完整細節：題型（`bucket`）、語言、**參考答案**、**要點事實**（含權重）、條件、**出處**（每個證據單位的頁碼——和 PDF 閱讀器一樣從第 1 頁起算——與原文）、
+  易混淆題的**干擾段落**（含為什麼會混淆、怎麼區分）、最新的**自動驗題結果**（結論、理由、程式檢查與模型檢查的旗標）、是否被排除與理由，以及一句 `validation_explained` 說明驗題在檢查什麼。
+  網頁的題目一覽可以逐題展開看這些；驗題那一步也用一句話說明：(1) 程式比對答案、要點、數字是不是真的在模型看到的原文裡；(2) 再用模型判斷光看那段原文答不答得出來。
+- **下載**：`GET .../export?format=json|jsonl`（owner／maintainer；沒有 token 是 401，其他角色 403／404）。`json` 是一個檔案：標頭（schema `lab-benchmark-export-1`、題庫名稱與版本、狀態、compliance、N 與 Q、文件 sha256 與頁數、題數與排除數、`contains_gold: true`、`human_review: skipped`、注意事項）加上 `items`；
+  `jsonl` 是第一行標頭、之後一題一行。**被排除的題目也在檔案裡**（標明 `excluded` 與理由）。**不含 API key、不含任何 provider 回應原文**（驗題只存旗標與數字）；
+  因為包含標準答案，檔案開頭的注意事項提醒不要給參與者。回應是 `attachment`、`no-store`。
