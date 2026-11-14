@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { QuestionsPanel } from "./QuestionsPanel";
 import { QuestionReview } from "./QuestionReview";
+import { BenchmarkDownload } from "./BenchmarkDownload";
 import {
   cancelJob,
   createBenchmark,
@@ -1262,7 +1263,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 reloadKey={`${genStatus}-${valStatus}-${freezeStatus}-${genProgress?.questions ?? 0}`}
               />
             ) : (
-              <QuestionsPanel
+              <>
+                <BenchmarkDownload fetchFn={fetchFn} token={token} projectId={projectId} logicalId={benchLogicalId} />
+                <QuestionsPanel
                 fetchFn={fetchFn}
                 token={token}
                 projectId={projectId}
@@ -1271,6 +1274,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 runId={activeRunId}
                 evaluationId={activeEvalId}
               />
+              </>
             )}
           </div>
         </div>
