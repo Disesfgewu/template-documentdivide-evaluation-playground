@@ -105,6 +105,29 @@ class VerdictMatchingTests(unittest.TestCase):
         dup_c = verdict(claims=[verdict()["claims"][0], verdict()["claims"][0]])
         self.assertEqual(self.check(dup_c), (None, "judge_claim_mismatch"))
 
+    def test_every_mismatch_says_which_kind_without_naming_an_id(self):
+        f1, f2 = {"id": "f1", "verdict": "stated"}, {"id": "f2", "verdict": "missing"}
+        c1 = {"id": "c1", "supported": True, "supporting_hit_ids": ["p1-c0"]}
+        c2 = {"id": "c2", "supported": False, "supporting_hit_ids": []}
+        ex = lambda obj: mj.check_verdict_ex(obj, 2, CLAIMS)[1:]
+        cases = [
+            (verdict(facts=[f1]), ("judge_fact_mismatch", "fact_missing")),
+            (verdict(facts=[f1, f2, {"id": "f3", "verdict": "stated"}]), ("judge_fact_mismatch", "fact_extra")),
+            (verdict(facts=[f1, f1]), ("judge_fact_mismatch", "fact_missing+fact_duplicate")),
+            (verdict(facts=[f1, {"id": "f9", "verdict": "stated"}]), ("judge_fact_mismatch", "fact_missing+fact_extra")),
+            (verdict(facts=[f1, f2, f2]), ("judge_fact_mismatch", "fact_duplicate")),
+            (verdict(claims=[c1]), ("judge_claim_mismatch", "claim_missing")),
+            (verdict(claims=[c1, c2, {"id": "c3", "supported": True, "supporting_hit_ids": []}]), ("judge_claim_mismatch", "claim_extra")),
+            (verdict(claims=[c1, c1]), ("judge_claim_mismatch", "claim_missing+claim_duplicate")),
+            (verdict(claims=[c1, c2, c2]), ("judge_claim_mismatch", "claim_duplicate")),
+            (verdict(claims=[{"id": "c1", "supported": True, "supporting_hit_ids": ["p2-c0"]}, c2]), ("judge_claim_mismatch", "supporting_hit_not_cited")),
+        ]
+        for obj, want in cases:
+            self.assertEqual(ex(obj), want, obj)
+            self.assertIsNone(mj.check_verdict_ex(obj, 2, CLAIMS)[0])
+            self.assertEqual(mj.check_verdict(obj, 2, CLAIMS), (None, want[0]))            # the old two-value form is unchanged
+        self.assertEqual(mj.check_verdict_ex(verdict(), 2, CLAIMS)[1:], (None, None))
+
     def test_a_supporting_hit_that_the_claim_does_not_cite_is_refused(self):
         bad = verdict(claims=[{"id": "c1", "supported": True, "supporting_hit_ids": ["p2-c0"]},
                               {"id": "c2", "supported": False, "supporting_hit_ids": []}])

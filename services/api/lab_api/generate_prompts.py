@@ -18,12 +18,12 @@ __all__ = ["CONFUSABLE_PROMPT_VERSION", "ConfusableReply", "build_confusable_cal
            "CROSS_PAGE_PROMPT_VERSION", "CrossReply", "MAX_FACTS", "PROMPT_VERSION", "build_cross_page_call", "parse_cross_page_reply",
            "select_page_pairs", "shown_by_page", "ParsedReply", "build_page_call", "detect_language", "parse_model_reply",
            "select_pages", "shown_pieces", "page_reference", "parse_cross_page_reply_ex", "parse_confusable_reply_ex",
-           "parse_model_reply_ex", "read_json_object", "reply_shape"]
+           "parse_model_reply_ex", "read_json_object", "reply_shape", "read_skip"]
 
 MAX_FACTS = 3
-PROMPT_VERSION = "general-page-v3"   # recorded with every generation batch (PM-DECISION 2026-11-12)
-CROSS_PAGE_PROMPT_VERSION = "cross-page-v3"
-CONFUSABLE_PROMPT_VERSION = "confusable-v3"
+PROMPT_VERSION = "general-page-v4"   # recorded with every generation batch (PM-DECISION 2026-11-12)
+CROSS_PAGE_PROMPT_VERSION = "cross-page-v4"
+CONFUSABLE_PROMPT_VERSION = "confusable-v4"
 MAX_QUESTION_CHARS, MAX_ANSWER_CHARS, MAX_FACT_CHARS = 500, 600, 400
 DEFAULT_PAGE_CHARS = 6000
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S)
@@ -79,6 +79,20 @@ def reply_shape(text: str) -> str:
     bucket = "0" if n == 0 else "1-199" if n < 200 else "200-499" if n < 500 else "500-999" if n < 1000 else "1000-1999" if n < 2000 else "2000+"
     return (f"start={_char_class(t[:1])};end={_char_class(t[-1:])};len={bucket};fence={'yes' if '```' in t else 'no'};"
             f"balanced={'yes' if t.count('{') == t.count('}') else 'no'}")
+
+
+MAX_SKIP_CHARS = 300
+
+
+def read_skip(text: str) -> Optional[str]:
+    """The reason of a deliberate decline, or ``None``. The model may answer ``{"skip": "<short reason>"}`` when the passage has no
+    content suitable for a question: that is a DECISION recorded as ``<bucket>:declined``, not a parse failure. A reply that has the
+    question keys wins over a skip; only a non-empty string of at most 300 characters counts; the reason itself is never stored."""
+    obj, _ = read_json_object(text, {"skip"})
+    if obj is None or {"question", "reference_answer", "facts"} <= set(obj):
+        return None
+    v = obj["skip"]
+    return v.strip() if isinstance(v, str) and 0 < len(v.strip()) <= MAX_SKIP_CHARS else None
 
 
 def _normalise_facts(raw, lo: int, *, sources: bool) -> tuple[Optional[list], str]:
@@ -148,6 +162,8 @@ SYSTEM = (
     "CONTENT only.\n"
     "- Give a short reference answer and 1 to 3 facts that a correct answer must contain (each fact one short "
     "statement taken from the evidence).\n"
+    "- If the passage has NO content suitable for a question (only headings, a table of contents, page furniture, numbers with no meaning, "
+    "too little text), do not explain in prose: reply with {\"skip\": \"<one short reason>\"} and nothing else.\n"
     "- Your reply must START with the character { and END with the character }: no sentence before it, no code fence, nothing after it. "
     "Keep every field short so the whole reply fits.\n"
     "- Reply with ONE JSON object and nothing else: "
@@ -249,6 +265,8 @@ SYSTEM_CROSS = (
     "- Give a short reference answer and 2 or 3 facts that a correct answer must contain, each one short statement taken "
     "from the evidence, with \"source\": \"A\" or \"B\" saying which passage it comes from. At least one fact must come "
     "from A and at least one from B.\n"
+    "- If the passage has NO content suitable for a question (only headings, a table of contents, page furniture, numbers with no meaning, "
+    "too little text), do not explain in prose: reply with {\"skip\": \"<one short reason>\"} and nothing else.\n"
     "- Your reply must START with the character { and END with the character }: no sentence before it, no code fence, nothing after it. "
     "Keep every field short so the whole reply fits.\n"
     "- Reply with ONE JSON object and nothing else: "
@@ -333,6 +351,8 @@ SYSTEM_CONFUSABLE = (
     "- Give a short reference answer and 1 to 3 facts taken from passage A.\n"
     "- Also say why passage B is confusable (\"confusion_reason\": what in B looks like the answer but is not) and which "
     "detail tells them apart (\"disambiguating_condition\": the detail in the question or in A that selects A and not B).\n"
+    "- If the passage has NO content suitable for a question (only headings, a table of contents, page furniture, numbers with no meaning, "
+    "too little text), do not explain in prose: reply with {\"skip\": \"<one short reason>\"} and nothing else.\n"
     "- Your reply must START with the character { and END with the character }: no sentence before it, no code fence, nothing after it. "
     "Keep every field short so the whole reply fits.\n"
     "- Reply with ONE JSON object and nothing else: "

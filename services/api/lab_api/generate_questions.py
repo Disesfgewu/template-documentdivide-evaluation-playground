@@ -35,7 +35,7 @@ from lab_contracts.benchmark import (Distractor, EvidenceSet, EvidenceUnit, Fact
 from lab_api.generate_prompts import (CONFUSABLE_PROMPT_VERSION, CROSS_PAGE_PROMPT_VERSION, DEFAULT_PAGE_CHARS, ConfusableReply, PROMPT_VERSION, CrossReply, ParsedReply,
                                       build_confusable_call, build_cross_page_call, build_page_call, detect_language, page_reference,
                                       parse_confusable_reply_ex, parse_cross_page_reply_ex, parse_model_reply_ex, select_page_pairs,
-                                      select_pages, shown_pieces, reply_shape)
+                                      select_pages, shown_pieces, read_skip, reply_shape)
 from lab_api.generate_worker import CallSpec
 from lab_api.validate_questions import code_checks
 
@@ -58,9 +58,19 @@ class GenerationStats:
     reasons: dict = field(default_factory=dict)
     # the SHAPE (never the content) of every reply that could not be parsed: start/end character class, length bucket, fence, braces
     shapes: dict = field(default_factory=dict)
+    # replies where the model DECLINED ({"skip": ...}): a decision, not a parse failure. Only the bucket, the page index and how much
+    # text the model was shown (a length bucket) are kept, never the reason text, so it can be seen whether they are the thin pages.
+    declined: int = 0
+    declined_pages: list = field(default_factory=list)
 
     def drop(self, code: str) -> None:
         self.reasons[code] = self.reasons.get(code, 0) + 1
+
+    def decline(self, bucket: str, pages, shown_chars: int) -> None:
+        self.declined += 1
+        self.drop(f"{bucket}:declined")
+        bucket_len = "0" if shown_chars == 0 else "1-199" if shown_chars < 200 else "200-999" if shown_chars < 1000 else "1000+"
+        self.declined_pages.append({"bucket": bucket, "pages": list(pages), "shown_chars": bucket_len})
 
     def shape(self, bucket: str, text: str) -> None:
         key = f"{bucket}:{reply_shape(text)}"
@@ -322,6 +332,9 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             if conf_pages is not None:
                 reply, why = parse_confusable_reply_ex(row["text"])
                 a_units, d_units = shown_units(pages.get(conf_pages[0], [])), shown_units(pages.get(conf_pages[1], []))
+                if reply is None and read_skip(row["text"]) is not None:
+                    stats.decline("confusable", conf_pages, sum(len(u.normalized_content) for u in a_units + d_units))
+                    continue
                 if reply is None:
                     stats.unparseable += 1
                     stats.drop("confusable:parse:" + why)
@@ -366,6 +379,9 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             elif cross_pages is not None:
                 reply, why = parse_cross_page_reply_ex(row["text"])
                 a_units, b_units = shown_units(pages.get(cross_pages[0], [])), shown_units(pages.get(cross_pages[1], []))
+                if reply is None and read_skip(row["text"]) is not None:
+                    stats.decline("cross_page", cross_pages, sum(len(u.normalized_content) for u in a_units + b_units))
+                    continue
                 if reply is None:
                     stats.unparseable += 1
                     stats.drop("cross_page:parse:" + why)
@@ -400,6 +416,9 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 reply, why = parse_model_reply_ex(row["text"])
                 _, page = parse_call_id(row["call_id"])
                 units = pages.get(page)
+                if reply is None and read_skip(row["text"]) is not None:
+                    stats.decline("general", [page], sum(len(u.normalized_content) for u in shown_units(units or [])))
+                    continue
                 if reply is None:
                     stats.unparseable += 1
                     stats.drop("general:parse:" + why)
@@ -449,7 +468,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             (uuid.uuid4(), project_id, actor, resource,
              f"prompt={PROMPT_VERSION}+{CROSS_PAGE_PROMPT_VERSION}+{CONFUSABLE_PROMPT_VERSION} replies={stats.replies} "
              f"written={stats.written} cross_written={stats.cross_written} confusable_written={stats.confusable_written} unparseable={stats.unparseable} invalid={stats.invalid} "
-             f"duplicate={stats.duplicate} reasons={json.dumps(stats.reasons, sort_keys=True)} parse_shapes={json.dumps(stats.shapes, sort_keys=True)} total={total} target={target} shortfall={max(0, target - total)} "
+             f"duplicate={stats.duplicate} reasons={json.dumps(stats.reasons, sort_keys=True)} parse_shapes={json.dumps(stats.shapes, sort_keys=True)} declined={stats.declined} declined_where={json.dumps(stats.declined_pages, sort_keys=True)} total={total} target={target} shortfall={max(0, target - total)} "
              f"cross_total={cross_total} cross_target={cross_target} cross_shortfall={max(0, cross_target - cross_total)} "
              f"confusable_total={conf_total} confusable_target={conf_target} confusable_shortfall={max(0, conf_target - conf_total)}", op_id))
         if all_total > 0:

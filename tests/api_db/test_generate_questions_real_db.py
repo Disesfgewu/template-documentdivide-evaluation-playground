@@ -79,7 +79,7 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertIn("confusable_shortfall=0", reason[0][0])
         self.assertIn("shortfall=0", reason[0][0])
         self.assertIn("cross_shortfall=0", reason[0][0])
-        self.assertIn("prompt=general-page-v3", reason[0][0])
+        self.assertIn("prompt=general-page-v4", reason[0][0])
         self.assertEqual(self.bench_status(bench), "validating")                     # generating -> validating, never frozen
 
     def test_unparseable_replies_write_nothing_and_are_counted(self):
@@ -101,11 +101,40 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
     def test_the_shape_of_every_unparseable_reply_is_recorded_and_never_its_content(self):
         project, owner, bench, job, out = self.run_batch("badjson")
         reason = self.audit_reason(project)[0][0]
-        shapes = json.loads(reason.split("parse_shapes=")[1].split(" total=")[0])
+        shapes = json.loads(reason.split("parse_shapes=")[1].split(" declined=")[0])
         want = "start=letter;end=other;len=1-199;fence=no;balanced=yes"                 # "I cannot comply."
         self.assertEqual(shapes, {f"general:{want}": general_target(3), f"cross_page:{want}": cross_page_target(3),
                                   f"confusable:{want}": confusable_target(3)})
         self.assertNotIn("I cannot comply", reason)
+
+    def declined_info(self, project):
+        reason = self.audit_reason(project)[0][0]
+        count = int(reason.split(" declined=")[1].split(" ")[0])
+        where = json.loads(reason.split("declined_where=")[1].split(" total=")[0])
+        reasons = json.loads(reason.split("reasons=")[1].split(" parse_shapes=")[0])
+        return reason, count, where, reasons
+
+    def test_a_model_that_declines_in_json_is_a_decision_not_a_parse_failure(self):
+        project, owner, bench, job, out = self.run_batch("questions_skip_all")
+        reason, count, where, reasons = self.declined_info(project)
+        total = general_target(3) + cross_page_target(3) + confusable_target(3)
+        self.assertEqual(count, total)
+        self.assertEqual(reasons, {"general:declined": general_target(3), "cross_page:declined": cross_page_target(3),
+                                   "confusable:declined": confusable_target(3)})
+        self.assertIn("unparseable=0", reason)
+        self.assertEqual(self.count("questions", bench), 0)
+        self.assertNotIn("furniture", reason)                                             # the model's reason text is never stored
+        self.assertTrue(all(w["shown_chars"] in ("1-199", "200-999") for w in where), where)   # how much text the model was shown
+        self.assertEqual({w["bucket"] for w in where}, {"general", "cross_page", "confusable"})
+        self.assertTrue(all(isinstance(pg, int) for w in where for pg in w["pages"]))
+
+    def test_declined_and_answered_replies_mix_and_only_the_answered_become_questions(self):
+        project, owner, bench, job, out = self.run_batch("questions_skip_half")
+        reason, count, where, reasons = self.declined_info(project)
+        self.assertGreater(count, 0)
+        self.assertGreater(self.count("questions", bench), 0)
+        self.assertIn("unparseable=0", reason)
+        self.assertEqual(sum(v for k, v in reasons.items() if k.endswith(":declined")), count)
 
     def test_prose_and_a_fence_around_the_json_are_tolerated(self):
         project, owner, bench, job, out = self.run_batch("questions_prose")
@@ -347,6 +376,82 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         with self.connect(autocommit=True) as c:
             c.execute(f'DROP OWNED BY "{role}"')
             c.execute(f'DROP ROLE IF EXISTS "{role}"')
+
+
+GOLD_PAGE = "Gold plan: the annual fee is 120 EUR and is due in May. Members may add up to 3 guests per visit."
+SILVER_PAGE = "Silver plan: the annual fee is 60 EUR and is due in June. Members may add up to 1 guest per visit."
+SAME_A = "The standard service fee is 120 EUR and is due in May for every member of the club."
+SAME_B = "The standard service fee is 120 EUR and is due in May for every member of the club, as stated above."
+
+
+def batch_with_texts(texts):
+    """Like tests.api_db.test_promote_real_db.make_batch, but with the given text on pages 1 and 3 (and nothing on page 2)."""
+    from lab_parser.normalize import DisplayFrame, UnstructuredParser, UnstructuredProfile
+    from tests.api_db.test_promote_real_db import PAGES, element
+    from tests.parser.test_normalize import _make_request, _make_unstructured_manifest
+
+    def make(document_id, sha, operation_id, pages_with_text=(1, 3)):
+        elements = [element(p, texts[p], f"e{p}") for p in pages_with_text]
+        request = _make_request([0, 1, 2]).model_copy(update={"operation_id": str(operation_id)})
+        frames = {p: DisplayFrame(coordinate_frame="rotated_cropbox_top_left", width=612.0, height=792.0, transform_ref=f"tr-{p}")
+                  for p in range(PAGES)}
+        return UnstructuredParser().normalize(json.dumps(elements).encode(), request, _make_unstructured_manifest([0, 1, 2]),
+                                              UnstructuredProfile(strategy="fast"), document_id=str(document_id), document_sha256=sha,
+                                              frames=frames, document_page_count=PAGES)
+    return make
+
+
+@unittest.skipUnless(ADMIN_URL, "LAB_TEST_DATABASE_URL not set")
+class ConfusableOnRicherTextTests(GenerateFixtures, FreshDatabase):
+    """Issue #7 item 3: confusable was 0 in three real runs on a synthetic document whose pages say nearly the same thing. Is that the
+    checks being too strict, or the fixture? A realistic reply on pages that differ in the right way is accepted; on pages that repeat the
+    same fact it is refused by design (page B would be a second source for the answer, so the question is not confusable)."""
+
+    REPLY = {"question": "How much is the annual fee of the Gold plan and when is it due?", "reference_answer": "120 EUR, due in May",
+             "facts": [{"statement": "The annual fee of the Gold plan is 120 EUR and is due in May"}],
+             "confusion_reason": "The Silver plan on the other page also states an annual fee and a due month",
+             "disambiguating_condition": "Gold plan"}
+    SAME = {"question": "What is the standard service fee and when is it due?", "reference_answer": "120 EUR, due in May",
+            "facts": [{"statement": "The standard service fee is 120 EUR and is due in May for every member of the club"}],
+            "confusion_reason": "The other page repeats the standard service fee and the due month",
+            "disambiguating_condition": "standard service fee"}
+
+    def run_with(self, texts, reply):
+        import lab_api.generate_questions as gq
+        from lab_api.generate_prompts import ConfusableReply
+        from unittest.mock import patch
+        with patch("tests.api_db.test_promote_real_db.make_batch", batch_with_texts(texts)):
+            project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=BIG)
+        parsed = ConfusableReply(reply["question"], reply["reference_answer"], tuple(f["statement"] for f in reply["facts"]),
+                                 reply["confusion_reason"], reply["disambiguating_condition"])
+        with patch.object(gq, "parse_confusable_reply_ex", lambda text: (parsed, "")):
+            out = self.process(project, job, "questions", build_calls=make_build_calls(), on_results=make_on_results())
+        self.assertEqual(out.status, "succeeded")
+        with self.connect() as c:
+            reason = c.execute("SELECT reason FROM audit_events WHERE project_id = %s AND action = 'benchmark.questions_generated'", (project,)).fetchone()[0]
+            confusable = c.execute("SELECT q.id FROM questions q WHERE q.benchmark_id = %s AND q.quota_bucket = 'confusable'", (bench,)).fetchall()
+            distractors = c.execute("SELECT eu.evidence_key, er.page_index FROM distractors d JOIN evidence_units eu ON eu.id = d.evidence_unit_id "
+                                    "JOIN evidence_regions er ON er.evidence_unit_id = eu.id WHERE d.benchmark_id = %s", (bench,)).fetchall()
+        return reason, confusable, distractors
+
+    def test_pages_that_differ_in_the_right_way_give_a_confusable_question_with_the_other_page_as_distractor(self):
+        reason, confusable, distractors = self.run_with({1: GOLD_PAGE, 3: SILVER_PAGE}, self.REPLY)
+        self.assertGreaterEqual(len(confusable), 1, reason)                                  # the checks do accept a realistic reply
+        self.assertGreaterEqual(len(distractors), 1)
+        self.assertEqual({page for _, page in distractors}, {2})                             # the distractor is the Silver page (index 2)
+        reasons = json.loads(reason.split("reasons=")[1].split(" parse_shapes=")[0])
+        # the other pairing (A = the Silver page, B = the Gold page) is dropped for exactly the two reasons that are true of it: the scripted
+        # Gold fact is not in A, and it IS in B (so B would be the real source)
+        self.assertEqual({k for k in reasons if k.startswith("confusable:")},
+                         {"confusable:check:answer_or_fact_not_grounded", "confusable:check:b_supports_a_fact"})
+
+    def test_pages_that_repeat_the_same_fact_cannot_give_a_confusable_question_by_design(self):
+        reason, confusable, distractors = self.run_with({1: SAME_A, 3: SAME_B}, self.SAME)
+        self.assertEqual(confusable, [])
+        self.assertEqual(distractors, [])
+        reasons = json.loads(reason.split("reasons=")[1].split(" parse_shapes=")[0])
+        self.assertGreater(reasons.get("confusable:check:b_supports_a_fact", 0), 0, reasons)  # B states the fact too: a second source
 
 
 if __name__ == "__main__":

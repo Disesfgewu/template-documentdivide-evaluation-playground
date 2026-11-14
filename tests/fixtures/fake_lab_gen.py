@@ -43,7 +43,7 @@ for i, c in enumerate(inp["calls"]):
     r = {"id": c["id"], "status": "ok", "usage_known": True, "input_tokens": 5, "output_tokens": 20, "charged_micros": cost(5, 20),
          "held_micros": 0, "transport_attempts": 1, "request_sha256": req}
     text = f"reply {i}"
-    if mode in ("questions", "questions_ungrounded", "dupes", "badjson", "partial_questions", "questions_prose", "questions_pagerefs"):
+    if mode in ("questions", "questions_ungrounded", "dupes", "badjson", "partial_questions", "questions_prose", "questions_pagerefs", "questions_skip_all", "questions_skip_half"):
         if mode == "badjson":
             text = "I cannot comply."
         else:
@@ -74,6 +74,8 @@ for i, c in enumerate(inp["calls"]):
             if answer is not None:
                 text = json.dumps({"question": f"What does statement number {n} of the document say about {nopage(body)}?",
                                    "reference_answer": answer, "facts": [{"statement": fact}]})
+    if mode == "questions_skip_all" or (mode == "questions_skip_half" and i % 2 == 1):
+        text = '{"skip": "only page furniture, nothing to ask about"}'      # the model declines in JSON
     if mode == "questions_prose":                 # a harmless deviation seen in real output: prose and a fence around the JSON
         text = "Here is the question you asked for:\n```json\n" + text + "\n```\nLet me know if you need another."
     if mode == "questions_pagerefs":              # the model names a page number in the question

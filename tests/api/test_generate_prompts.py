@@ -87,6 +87,19 @@ class ParseReplyTests(unittest.TestCase):
                            ("x" * 30_000, "reply_too_long")):
             self.assertEqual(parse_model_reply_ex(text), (None, code), text[:40])
 
+    def test_a_deliberate_decline_is_recognised_only_when_it_is_a_clean_skip(self):
+        from lab_api.generate_prompts import read_skip
+        self.assertEqual(read_skip('{"skip": "only headings"}'), "only headings")
+        self.assertEqual(read_skip('Sorry:\n```json\n{"skip": "table of contents"}\n```'), "table of contents")
+        for text in ("", "This page has no suitable content.", '{"skip": ""}', '{"skip": "  "}', '{"skip": 5}', '{"skip": null}',
+                     '{"skip": "' + "x" * 301 + '"}', "{}", '[{"other": 1}]'):
+            self.assertIsNone(read_skip(text), text[:30])
+        # a real question reply wins even if it carries a skip key
+        self.assertIsNone(read_skip(reply(skip="no")))
+        from lab_api.generate_prompts import SYSTEM, SYSTEM_CROSS, SYSTEM_CONFUSABLE
+        for system in (SYSTEM, SYSTEM_CROSS, SYSTEM_CONFUSABLE):
+            self.assertIn('{"skip":', system.replace('\\"', '"'))                     # all three prompts offer the JSON way out
+
     def test_the_shape_of_a_reply_says_why_it_failed_without_showing_any_content(self):
         from lab_api.generate_prompts import reply_shape
         secret = "SECRET-CONTENT-12345"

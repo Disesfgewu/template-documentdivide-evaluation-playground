@@ -129,13 +129,13 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertIsNone(out["judge"])
 
     def test_an_invented_fact_is_an_error_for_the_question(self):
-        self._all_errors("judge_invented_fact", "judge_fact_mismatch")
+        self._all_errors("judge_invented_fact", "judge_fact_mismatch", "fact_extra")
 
     def test_an_omitted_claim_is_an_error_for_the_question(self):
-        self._all_errors("judge_omitted_claim", "judge_claim_mismatch")
+        self._all_errors("judge_omitted_claim", "judge_claim_mismatch", "claim_missing")
 
     def test_a_supporting_hit_the_claim_does_not_cite_is_an_error_for_the_question(self):
-        self._all_errors("judge_foreign_hit", "judge_claim_mismatch")
+        self._all_errors("judge_foreign_hit", "judge_claim_mismatch", "supporting_hit_not_cited")
 
     def test_model_abstentions_are_not_judged_and_method_failures_stay_errors(self):
         project, owner, run = self.answered("answer_mixed")

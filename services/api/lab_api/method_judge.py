@@ -19,7 +19,7 @@ from typing import Optional, Sequence
 from lab_api.generate_worker import CallSpec
 
 __all__ = ["JUDGE_PROMPT_REVISION", "JUDGE_PROMPT_SHA256", "JUDGE_LIMITATION", "JUDGE_GRADER_SUFFIX", "MAX_JUDGED_CLAIMS",
-           "JudgeVerdict", "build_judge_call", "parse_judge_reply", "parse_judge_reply_ex", "check_verdict"]
+           "JudgeVerdict", "build_judge_call", "parse_judge_reply", "parse_judge_reply_ex", "check_verdict", "check_verdict_ex"]
 
 JUDGE_PROMPT_REVISION = "judge-v1"
 JUDGE_GRADER_SUFFIX = "+llm-judge-1"
@@ -98,21 +98,41 @@ def parse_judge_reply(text: str) -> Optional[dict]:
     return parse_judge_reply_ex(text)[0]
 
 
-def check_verdict(obj: dict, n_facts: int, claims: Sequence[tuple[str, str, Sequence[str]]]) -> tuple[Optional[JudgeVerdict], Optional[str]]:
+def _id_problems(got: Sequence[str], want: Sequence[str], kind: str) -> str:
+    """Which of ``<kind>_missing`` / ``<kind>_extra`` / ``<kind>_duplicate`` apply (joined by "+"), or "". Never the ids themselves."""
+    problems = []
+    if set(want) - set(got):
+        problems.append(f"{kind}_missing")
+    if set(got) - set(want):
+        problems.append(f"{kind}_extra")
+    if len(set(got)) != len(got):
+        problems.append(f"{kind}_duplicate")
+    return "+".join(problems)
+
+
+def check_verdict_ex(obj: dict, n_facts: int, claims: Sequence[tuple[str, str, Sequence[str]]]
+                     ) -> tuple[Optional[JudgeVerdict], Optional[str], Optional[str]]:
     """Match the verdict to the question: EXACTLY the fact labels f1..fN and EXACTLY the submission's claim ids, once each, and
     every supporting id one the claim cites. A fact or claim the judge invents or omits is an error for the whole question.
-    Returns (verdict, None) or (None, reason code)."""
-    labels = [f"f{i}" for i in range(1, n_facts + 1)]
-    got_f = [f["id"] for f in obj["facts"]]
-    if sorted(got_f) != sorted(labels) or len(set(got_f)) != len(got_f):
-        return None, "judge_fact_mismatch"
+    Returns (verdict, None, None) or (None, reason code, sub-code): ``judge_fact_mismatch`` with ``fact_missing`` / ``fact_extra`` /
+    ``fact_duplicate`` (several joined by "+"), or ``judge_claim_mismatch`` with ``claim_missing`` / ``claim_extra`` / ``claim_duplicate``
+    or ``supporting_hit_not_cited``. Fixed words only: no id and no model text."""
+    problem = _id_problems([f["id"] for f in obj["facts"]], [f"f{i}" for i in range(1, n_facts + 1)], "fact")
+    if problem:
+        return None, "judge_fact_mismatch", problem
     cited = {cid: set(ids) for cid, _, ids in claims}
-    got_c = [c["id"] for c in obj["claims"]]
-    if sorted(got_c) != sorted(cited) or len(set(got_c)) != len(got_c):
-        return None, "judge_claim_mismatch"
+    problem = _id_problems([c["id"] for c in obj["claims"]], list(cited), "claim")
+    if problem:
+        return None, "judge_claim_mismatch", problem
     for c in obj["claims"]:
         if not set(c["supporting_hit_ids"]) <= cited[c["id"]]:
-            return None, "judge_claim_mismatch"
+            return None, "judge_claim_mismatch", "supporting_hit_not_cited"
     return JudgeVerdict(
         facts=tuple((f["id"], f["verdict"]) for f in obj["facts"]),
-        claims=tuple((c["id"], c["supported"], tuple(dict.fromkeys(c["supporting_hit_ids"]))) for c in obj["claims"])), None
+        claims=tuple((c["id"], c["supported"], tuple(dict.fromkeys(c["supporting_hit_ids"]))) for c in obj["claims"])), None, None
+
+
+def check_verdict(obj: dict, n_facts: int, claims: Sequence[tuple[str, str, Sequence[str]]]) -> tuple[Optional[JudgeVerdict], Optional[str]]:
+    """``check_verdict_ex`` without the sub-code: (verdict, None) or (None, reason code)."""
+    verdict, code, _ = check_verdict_ex(obj, n_facts, claims)
+    return verdict, code
