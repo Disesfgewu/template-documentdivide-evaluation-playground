@@ -80,7 +80,9 @@ class PromoteFixtures:
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()
         env = {"LAB_ENV": "test", "LAB_PROVIDER_MODE": "mock", "LAB_DATABASE_URL": self.url, "LAB_ARTIFACT_ROOT": str(self.root),
-               "LAB_AUTH_SECRET": "top-secret-signing-key-for-tests-only", "LAB_DB_CONNECT_TIMEOUT_S": "5"}
+               "LAB_AUTH_SECRET": "top-secret-signing-key-for-tests-only", "LAB_DB_CONNECT_TIMEOUT_S": "5",
+               # the generation model's list prices (the same as the fake worker's CFG): the API derives run caps from them
+               "LAB_GEN_PRICE_IN_MICROS_PER_MTOK": "3000000", "LAB_GEN_PRICE_OUT_MICROS_PER_MTOK": "15000000"}
         with patch.dict(os.environ, env, clear=True):
             settings = load_settings()
         self.client = TestClient(create_app(settings=settings, checks={}))

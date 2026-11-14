@@ -43,6 +43,9 @@ services:
       dockerfile: deploy/api.Dockerfile
     environment:
       LAB_ENV: dev
+      # list prices of the generation model, only to show/derive the worst-case cost of a run before it starts (no key here)
+      LAB_GEN_PRICE_IN_MICROS_PER_MTOK: ${LAB_GEN_PRICE_IN_MICROS_PER_MTOK:-1000000}
+      LAB_GEN_PRICE_OUT_MICROS_PER_MTOK: ${LAB_GEN_PRICE_OUT_MICROS_PER_MTOK:-5000000}
       LAB_PROVIDER_MODE: mock
       LAB_DATABASE_URL: postgresql://lab:lab-dev-only@db:5432/lab
       LAB_ARTIFACT_ROOT: /var/lib/lab/artifacts

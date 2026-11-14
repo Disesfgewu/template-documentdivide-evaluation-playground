@@ -259,3 +259,17 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
 - **易混淆題一直是 0 的原因（用較豐富的文件驗證）**：測試用兩頁內容不同的文字（Gold 方案年費 120 EUR 五月、Silver 方案年費 60 EUR 六月），一個符合實際的回覆**通過了所有檢查**，寫出易混淆題，干擾項是另一頁；
   兩頁重複同一個事實時則一定被擋（`b_supports_a_fact`：B 頁也支持這個答案，它就不是「容易混淆但答案不同」）。所以合成文件裡 6 頁幾乎一樣的文字本來就出不了易混淆題；檢查本身沒有改。
   真實 run 裡另外出現的 `condition_not_grounded`（區分條件不在 A 頁或題目裡）要等有內容豐富的真實文件才看得出是不是太嚴。
+
+## 你設定「要出幾題」，不是設定價格（Issue #186；migration 0022）
+
+- **出題**：`POST .../generate` 的 body 多了 `question_count`（1 到這份文件計畫的總題數；省略 = 計畫的總題數，例如 29＋5＋5）。題數依計畫的比例分到一般／跨頁／易混淆，**只送出這麼多次呼叫**
+  （要 10 題就約 10 次，不再是計畫的 39 次）。這個數量存在 job 上（`generate_jobs.requested_*`），重試時只補還缺的題目。
+- **預算由系統算**：省略 `budget_cap_micros` 時，上限 = 這一次要送出的呼叫的最壞情況總和（和 lab-gen 預留的公式一樣：每個 prompt 位元組至少一個 token、回覆用滿 500 token 上限）。
+  出題與驗題用「真正要送的 prompt」算，所以上限剛好容得下這些呼叫；作答與評分的 prompt 要在 worker 裡才建得出來，所以用上限（最大的幾頁、外加固定部分與 25% 的餘裕）估，
+  真的超過時那一次呼叫會被記成預算不足，不會多花。有一個硬上限（5 美元）：最壞情況超過就拒絕並要求少出幾題。價格來自和 worker 相同的設定（`LAB_GEN_PRICE_IN/OUT_MICROS_PER_MTOK`，API 也要有；不含 key）。
+  想自己指定上限的腳本仍可以傳 `budget_cap_micros`。回應會說 `budget_derived`、`estimate`、`requested`。
+- **開始前先看費用**：`GET .../estimate?phase=generate|validate|answer|judge[&question_count=N][&run_id=…]` 回傳呼叫次數、最壞情況（`estimated_max_usd`）、題數的分配與硬上限。網頁每個會花錢的步驟都顯示
+  「最多約 0.05 美元（N 次呼叫）」，**頁面上不再有 micro-USD 欄位**。
+- **失敗要說原因**：`GET .../generate` 的 `job.failure_reason` 是 worker 結束這個 job 的固定代碼（`budget_exhausted`、`partial_calls`、`lab_gen_failed`、`lab_gen_refused`、`no_calls`…），網頁把它翻成一句話
+  （例如「預算不夠，一次呼叫都送不出去…請減少題數」），不再只寫 failed。
+- 網頁的自動驗題那一步多一句說明：它檢查什麼（程式比對答案、要點和數字是否真的在原文裡；再用模型判斷光看那段原文答不答得出來），沒過就不能凍結，除非排除。

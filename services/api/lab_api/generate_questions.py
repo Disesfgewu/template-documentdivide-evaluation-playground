@@ -161,11 +161,21 @@ def parse_call_id(cid: str) -> tuple[int, int]:
 
 
 def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
-    def build_calls(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID) -> Sequence[CallSpec]:
+    def build_calls(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID,
+                    requested: tuple[int, int, int] | None = None) -> Sequence[CallSpec]:
+        """The calls of a generation job. ``requested`` = (general, cross_page, confusable) questions to reach; None = what the newest
+        generation job of the benchmark asked for (the owner's question count, Issue #186), and when that is NULL the plan's targets."""
         page_count, pages, _ = load_clean_pages(conn, project_id, benchmark_id)
+        if requested is None:
+            row = conn.execute("SELECT requested_general, requested_cross_page, requested_confusable FROM generate_jobs "
+                               "WHERE project_id = %s AND benchmark_id = %s AND phase = 'generate' ORDER BY created_at DESC LIMIT 1",
+                               (project_id, benchmark_id)).fetchone()
+            requested = tuple(row) if row is not None and row[0] is not None else None
+        want_general, want_cross, want_conf = requested or (general_target(page_count), cross_page_target(page_count),
+                                                            confusable_target(page_count))
         have = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
                                  (benchmark_id,)).fetchall())
-        needed = max(0, general_target(page_count) - int(have.get("general", 0)))
+        needed = max(0, want_general - int(have.get("general", 0)))
         chosen = select_pages(sorted(pages), needed)
         seen: dict[int, int] = {}
         calls = []
@@ -176,7 +186,7 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             calls.append(build_page_call(call_id(k, page), page, units, page_chars, variant))
         # cross_page: two DIFFERENT clean text pages per call (no pair, no call, when fewer than two clean pages exist);
         # these come last so that a budget that runs out skips them first.
-        needed_cross = max(0, cross_page_target(page_count) - int(have.get("cross_page", 0)))
+        needed_cross = max(0, want_cross - int(have.get("cross_page", 0)))
         pair_seen: dict[tuple[int, int], int] = {}
         for k, (a_page, b_page) in enumerate(select_page_pairs(sorted(pages), needed_cross)):
             variant = pair_seen.get((a_page, b_page), 0)
@@ -185,7 +195,7 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             calls.append(build_cross_page_call(cross_call_id(k, a_page, b_page), pair, page_chars, variant))
         # confusable: passage A answers, passage B is the similar-looking distractor (two different clean text pages; the
         # roles alternate so both pages serve as the answer page); last of all, so a budget that runs out skips them first.
-        needed_conf = max(0, confusable_target(page_count) - int(have.get("confusable", 0)))
+        needed_conf = max(0, want_conf - int(have.get("confusable", 0)))
         conf_seen: dict[tuple[int, int], int] = {}
         for k, (p1, p2) in enumerate(select_page_pairs(sorted(pages), needed_conf)):
             a_page, d_page = (p1, p2) if k % 2 == 0 else (p2, p1)

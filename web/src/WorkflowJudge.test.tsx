@@ -15,7 +15,7 @@ const SHA = "a".repeat(64);
 const TOKEN = `lab_act_${U1}_${SHA}`;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-type Opts = { judgeStatus?: number; judgeJob?: string; judged?: boolean; submissions?: Record<string, unknown> };
+type Opts = { judgeStatus?: number; judgeJob?: string; judged?: boolean; submissions?: Record<string, unknown>; genJob?: Record<string, unknown> };
 
 function backend(opts: Opts = {}) {
   const calls: { url: string; method: string; body?: string }[] = [];
@@ -37,9 +37,15 @@ function backend(opts: Opts = {}) {
       return json({ benchmark_revision_id: U1, logical_id: "b", revision: 1, status: "planning", parse_job_id: U4, pages: { usable: [0, 1], insufficient_material: {} }, compliance_projection: "partial" });
     }
     if (u.includes("/generate") && method === "POST") return json({ job_id: U2, status: "queued", phase: "generate" }, 202);
+    if (u.includes("/estimate?")) {
+      const q = new URL(u, "http://x").searchParams;
+      const n = q.get("question_count") ? Number(q.get("question_count")) : 6;
+      return json({ phase: q.get("phase"), calls: n, estimated_max_micros: 50_000, estimated_max_usd: "0.0500", currency: "USD", ceiling_usd: "5.0000",
+        question_count: n, plan_total: 6, split: { general: n - 2 > 0 ? n - 2 : n, cross_page: n - 2 > 0 ? 1 : 0, confusable: n - 2 > 0 ? 1 : 0 } });
+    }
     if (u.includes("/generate") && method === "GET") {
       return json({ benchmark_revision_id: U1, logical_id: "b", revision: 1, benchmark_status: "validating", general_target: 5, cross_page_target: 2, confusable_target: 2,
-        questions: 6, by_bucket: { general: 4, cross_page: 1, confusable: 1 }, shortfall: 3, job: { status: "succeeded", phase: "validate" },
+        questions: 6, by_bucket: { general: 4, cross_page: 1, confusable: 1 }, shortfall: 3, job: opts.genJob ?? { status: "succeeded", phase: "validate" },
         validation: { pass: 6, fail: 0, needs_review: 0, unvalidated: 0 } });
     }
     if (u.includes("/validate") && method === "POST") return json({ job_id: U3, status: "queued", phase: "validate" }, 202);
@@ -112,7 +118,7 @@ describe("Workflow: the judge step", () => {
     await waitFor(() => expect(screen.getByTestId("judge-summary")).toBeTruthy(), { timeout: 8000 });
     const post = calls.find((c) => c.url.includes("/judge-runs"))!;
     expect(post.url).toContain(`/api/v1/runs/${RUN}/judge-runs?project_id=${U1}`);
-    expect(JSON.parse(post.body!)).toEqual({ model: "claude-haiku-4-5-20251001", budget_cap_micros: 200000 });
+    expect(JSON.parse(post.body!)).toEqual({ model: "claude-haiku-4-5-20251001" });                 // no price: the API derives the cap
     const summary = screen.getByTestId("judge-summary").textContent ?? "";
     expect(summary).toContain("claude-haiku-4-5-20251001");
     expect(summary).toContain("評了 5 題");
@@ -180,5 +186,79 @@ describe("Workflow: how the submissions of a run are described", () => {
     fireEvent.click(screen.getByRole("button", { name: "詞彙 baseline" }));
     await waitFor(() => expect(screen.getByTestId("results-table")).toBeTruthy());
     expect(screen.getByTestId("results-table").textContent).toContain("0–100");
+  }, 20000);
+});
+
+describe("Workflow: the owner sets HOW MANY questions, never a price", () => {
+  async function toPlan(f: typeof fetch) {
+    render(<Workflow fetchFn={f} />);
+    fireEvent.change(screen.getByLabelText(/認證 Token/i), { target: { value: TOKEN } });
+    fireEvent.change(screen.getByLabelText(/Project ID/i), { target: { value: U1 } });
+    fireEvent.change(screen.getByLabelText(/選擇 PDF 檔案/i), { target: { files: [new File(["%PDF-1.4"], "a.pdf", { type: "application/pdf" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "上傳 PDF" }));
+    await waitFor(() => expect(screen.getByTestId("upload-result")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "開始解析" }));
+    await waitFor(() => expect(screen.getByTestId("step3-status").textContent).toBe("succeeded"));
+    fireEvent.change(screen.getByLabelText(/Benchmark Logical ID/i), { target: { value: "b" } });
+    fireEvent.click(screen.getByRole("button", { name: "建立 Benchmark 與素材計畫" }));
+    await waitFor(() => expect(screen.getByText("素材計畫建立成功！")).toBeTruthy());
+  }
+
+  it("the count defaults to the plan's total, the split and the USD worst case are shown before starting, and no micro-USD field exists", async () => {
+    const { f } = backend();
+    await toPlan(f);
+    const count = (await screen.findByLabelText("要出幾題")) as HTMLInputElement;
+    await waitFor(() => expect(count.value).toBe("6"));
+    expect(screen.getByText(/這份文件建議 6 題/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("gen-estimate").textContent).toContain("0.0500 美元"));
+    expect(screen.getByTestId("gen-estimate").textContent).toContain("6 次呼叫");
+    expect(screen.getByTestId("gen-split").textContent).toContain("一般");
+    expect(document.body.textContent).not.toContain("micro-USD");
+    expect(screen.queryByLabelText(/預算/)).toBeNull();
+  }, 20000);
+
+  it("asking for fewer questions re-estimates and sends question_count without any budget", async () => {
+    const { f, calls } = backend();
+    await toPlan(f);
+    const count = (await screen.findByLabelText("要出幾題")) as HTMLInputElement;
+    await waitFor(() => expect(count.value).toBe("6"));
+    fireEvent.change(count, { target: { value: "3" } });
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/estimate?") && c.url.includes("question_count=3"))).toBe(true));
+    await waitFor(() => expect(screen.getByTestId("gen-estimate").textContent).toContain("3 次呼叫"));
+    fireEvent.click(screen.getByRole("button", { name: "開始生成題目" }));
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/generate?") && c.method === "POST")).toBe(true));
+    const post = calls.find((c) => c.url.includes("/generate?") && c.method === "POST")!;
+    expect(JSON.parse(post.body!)).toEqual({ model: "claude-haiku-4-5-20251001", question_count: 3 });
+  }, 20000);
+
+  it("a count that is not a whole number blocks the button instead of sending something odd", async () => {
+    const { f } = backend();
+    await toPlan(f);
+    const count = (await screen.findByLabelText("要出幾題")) as HTMLInputElement;
+    await waitFor(() => expect(count.value).toBe("6"));
+    fireEvent.change(count, { target: { value: "0" } });
+    expect((screen.getByRole("button", { name: "開始生成題目" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/題數要是 1 以上的整數/)).toBeTruthy();
+  }, 20000);
+
+  it("a failed generation says why in words, not just 'failed'", async () => {
+    const { f } = backend({ genJob: { status: "failed", phase: "generate", failure_reason: "budget_exhausted" } });
+    await toPlan(f);
+    await waitFor(() => expect((screen.getByLabelText("要出幾題") as HTMLInputElement).value).toBe("6"));
+    fireEvent.click(screen.getByRole("button", { name: "開始生成題目" }));
+    const alert = await screen.findByText(/預算不夠/, {}, { timeout: 8000 });
+    expect(alert.parentElement?.textContent).toContain("請減少題數");
+    expect(alert.parentElement?.textContent).not.toContain("結束狀態：failed");
+  }, 20000);
+
+  it("the validation, answering and judging steps show their worst case in USD and no price field", async () => {
+    const { f } = backend();
+    await runUntilFrozen(f);
+    expect(screen.getByTestId("validate-explain").textContent).toContain("光看那段原文");
+    await waitFor(() => expect(screen.getByTestId("method-estimate").textContent).toContain("0.0500 美元"));
+    fireEvent.click(screen.getByRole("button", { name: "模型回答方法" }));
+    await waitFor(() => expect(judgeButton().disabled).toBe(false));
+    await waitFor(() => expect(screen.getByTestId("judge-estimate").textContent).toContain("美元"));
+    expect(document.body.textContent).not.toContain("micro-USD");
   }, 20000);
 });

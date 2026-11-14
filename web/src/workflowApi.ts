@@ -577,7 +577,23 @@ export async function planBenchmark({
 // -----------------------------------------------------------------------------
 // Step 5: Question Generation
 // -----------------------------------------------------------------------------
+export type RunEstimate = {
+  phase: string;
+  calls: number;
+  estimated_max_micros: number;
+  estimated_max_usd: string;
+  currency: string;
+  ceiling_usd: string;
+  question_count?: number;
+  plan_total?: number;
+  split?: { general: number; cross_page: number; confusable: number };
+  bound?: boolean;
+};
+
 export type StartGenerationResponse = {
+  budget_derived?: boolean;
+  estimate?: RunEstimate;
+  requested?: { general: number; cross_page: number; confusable: number };
   job_id: string;
   benchmark_revision_id: string;
   status: string;
@@ -609,7 +625,9 @@ export type GenerationProgressResponse = {
     confusable: number;
   };
   shortfall: number;
+  excluded?: number;
   job?: {
+    failure_reason?: string | null;
     job_id: string;
     phase: string;
     status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
@@ -641,7 +659,8 @@ export async function startQuestionGeneration({
   logicalId,
   revision = 1,
   model = "claude-haiku-4-5-20251001",
-  budgetCapMicros = 200000,
+  questionCount,
+  budgetCapMicros,
   token,
   fetchFn = fetch,
   signal,
@@ -652,6 +671,9 @@ export async function startQuestionGeneration({
   logicalId: string;
   revision?: number;
   model?: string;
+  /** How many questions to generate (default: the plan's total). */
+  questionCount?: number;
+  /** Omit it: the API derives the cap from exactly the calls this run makes. */
   budgetCapMicros?: number;
   token: string;
   fetchFn?: typeof fetch;
@@ -679,7 +701,8 @@ export async function startQuestionGeneration({
       },
       body: JSON.stringify({
         model: model.trim(),
-        budget_cap_micros: Math.floor(budgetCapMicros),
+        ...(questionCount !== undefined ? { question_count: Math.floor(questionCount) } : {}),
+        ...(budgetCapMicros !== undefined ? { budget_cap_micros: Math.floor(budgetCapMicros) } : {}),     // omitted = the API derives it
       }),
     },
     cleanToken,
@@ -741,7 +764,7 @@ export async function startQuestionValidation({
   logicalId,
   revision = 1,
   model = "claude-haiku-4-5-20251001",
-  budgetCapMicros = 200000,
+  budgetCapMicros,
   token,
   fetchFn = fetch,
   signal,
@@ -779,7 +802,7 @@ export async function startQuestionValidation({
       },
       body: JSON.stringify({
         model: model.trim(),
-        budget_cap_micros: Math.floor(budgetCapMicros),
+        ...(budgetCapMicros !== undefined ? { budget_cap_micros: Math.floor(budgetCapMicros) } : {}),     // omitted = the API derives it
       }),
     },
     cleanToken,
@@ -939,7 +962,7 @@ export async function startMethodRun({
   logicalId,
   revision = 1,
   model = "claude-haiku-4-5-20251001",
-  budgetCapMicros = 200000,
+  budgetCapMicros,
   token,
   fetchFn = fetch,
   signal,
@@ -977,7 +1000,7 @@ export async function startMethodRun({
       },
       body: JSON.stringify({
         model: model.trim(),
-        budget_cap_micros: Math.floor(budgetCapMicros),
+        ...(budgetCapMicros !== undefined ? { budget_cap_micros: Math.floor(budgetCapMicros) } : {}),     // omitted = the API derives it
       }),
     },
     cleanToken,
@@ -1006,7 +1029,7 @@ export async function startJudgeRun({
   projectId,
   runId,
   model = "claude-haiku-4-5-20251001",
-  budgetCapMicros = 200000,
+  budgetCapMicros,
   token,
   fetchFn = fetch,
   signal,
@@ -1047,7 +1070,7 @@ export async function startJudgeRun({
       },
       body: JSON.stringify({
         model: model.trim(),
-        budget_cap_micros: Math.floor(budgetCapMicros),
+        ...(budgetCapMicros !== undefined ? { budget_cap_micros: Math.floor(budgetCapMicros) } : {}),     // omitted = the API derives it
       }),
     },
     cleanToken,
@@ -1281,4 +1304,34 @@ export async function setQuestionExcluded(
       body: JSON.stringify({ excluded: ref.excluded, reason: ref.reason.trim() }),
     },
     ref.token.trim(), ref.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);
+}
+
+// -----------------------------------------------------------------------------
+// What a run can cost at most, before it starts (Issue #186): shown in USD, never typed in micro-USD
+// -----------------------------------------------------------------------------
+export async function getRunEstimate(ref: {
+  projectId: string;
+  logicalId: string;
+  revision?: number;
+  phase: "generate" | "validate" | "answer" | "judge";
+  questionCount?: number;
+  /** The run to judge (phase "judge" only). */
+  runId?: string;
+  token: string;
+  fetchFn?: typeof fetch;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  baseUrl?: string;
+}): Promise<ApiResult<RunEstimate>> {
+  const token = ref.token.trim();
+  if (!token) return { ok: false, error: { message: "未提供認證 Token", status: 401, code: "unauthorized" } };
+  if (!validateUuid(ref.projectId.trim())) {
+    return { ok: false, error: { message: "Project ID 格式錯誤（須為 UUID）", status: 400, code: "bad_request" } };
+  }
+  const qs = new URLSearchParams({ project_id: ref.projectId.trim(), phase: ref.phase });
+  if (ref.questionCount !== undefined) qs.set("question_count", String(Math.floor(ref.questionCount)));
+  if (ref.runId) qs.set("run_id", ref.runId);
+  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/estimate?${qs.toString()}`;
+  return executeFetch<RunEstimate>(endpoint, { method: "GET", headers: { Authorization: `Bearer ${token}` } }, token,
+    ref.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);
 }
