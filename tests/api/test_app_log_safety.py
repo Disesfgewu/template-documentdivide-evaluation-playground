@@ -87,3 +87,15 @@ class SafetyTests(unittest.TestCase):
             reason = worker._outcome_log_reason(job, ParseOutcome(job, "succeeded", "generated"))
             self.assertEqual(reason, "generated" if phase == "generate" else phase)
             self.assertFalse(worker._phases)
+
+    def test_page_status_logging_is_observational_even_with_an_incomplete_test_double(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, LAB_APP_LOG="full", LAB_APP_LOG_FILE=d + "/app.log"):
+            before = log.get_log_failures()
+            log.log_page_statuses(SimpleNamespace())
+            self.assertGreater(log.get_log_failures(), before)
+            log.log_page_statuses(SimpleNamespace(result=SimpleNamespace(pages=[SimpleNamespace(page_index=2, status="partial", diagnostics=[])])))
+            text = Path(d + "/app.log").read_text()
+            self.assertIn("parse_page", text)
+            self.assertIn("page_index=2", text)
+            self.assertIn("partial", text)

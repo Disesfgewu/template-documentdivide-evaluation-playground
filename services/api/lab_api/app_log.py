@@ -286,3 +286,15 @@ def app_traced(stage: str | None = None, is_stage: bool = False):
         return sync_wrapper
 
     return decorator
+
+
+def log_page_statuses(batch):
+    """Observe parser diagnostics without imposing new requirements on its caller."""
+    global _LOG_FAILURES
+    if get_log_level() not in ("stages", "full"):
+        return
+    try:
+        for page in batch.result.pages:
+            log_op("parse_page", status=page.status, page_index=page.page_index, diagnostics=page.diagnostics, stage="parse")
+    except Exception:
+        _LOG_FAILURES += 1

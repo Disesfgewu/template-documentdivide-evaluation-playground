@@ -38,7 +38,7 @@ from lab_db.storage import LocalArtifactStore
 from lab_parser.isolation import InspectionError
 from lab_parser.normalize import NormalizedBatch
 from lab_parser.batch_parse import PartialParseFailure, parse_in_batches
-from .app_log import app_traced, log_op, log_alarm, ContextScope
+from .app_log import app_traced, log_op, log_alarm, ContextScope, log_page_statuses
 
 LOG = logging.getLogger("lab.parse_worker")
 
@@ -269,8 +269,7 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
             jobs.finish(conn, project_id, lease, "queued", error)
             return ParseOutcome(job_id, "queued", error)
         return _fail(conn, project_id, lease, error)
-    for page in batch.result.pages:
-        log_op("parse_page", status=page.status, page_index=page.page_index, diagnostics=page.diagnostics, stage="parse")
+    log_page_statuses(batch)
     if batch.quarantine_reason is not None:
         return _fail(conn, project_id, lease, "quarantined:" + batch.quarantine_reason)
     try:
