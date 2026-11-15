@@ -188,7 +188,12 @@ def format_log_line(mode: str, func_name: str, args_repr: str, status: str, retu
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     svc = _current_service.get() or os.environ.get("LAB_SERVICE_NAME", "api")
     cid = _current_context_id.get() or "-"
-    ret_part = f" {{Return: {return_repr}}}" if return_repr is not None else ""
+    # Bound fields before assembling the grammar, so a large tree cannot cut off delimiters.
+    args_repr = args_repr[:8192]
+    status = status[:200]
+    func_name = func_name[:128]
+    svc, cid = svc[:64], cid[:160]
+    ret_part = f" {{Return: {return_repr[:4096]}}}" if return_repr is not None else ""
     return f"{ts} {svc} {cid} [{mode}] FUNCTION:{{{func_name}({args_repr})}} {status}{ret_part}"
 
 

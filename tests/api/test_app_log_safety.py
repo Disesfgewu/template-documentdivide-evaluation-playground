@@ -109,3 +109,12 @@ class SafetyTests(unittest.TestCase):
             text = Path(d + "/app.log").read_text()
             self.assertNotIn("SHORT_RAW_DOCUMENT_SENTINEL", text)
             self.assertIn("sha256:", text)
+
+    def test_large_trees_keep_the_line_grammar_and_size_bound(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, LAB_APP_LOG="full", LAB_APP_LOG_FILE=d + "/app.log"):
+            tree = {str(n): ["x" * 300] * 8 for n in range(8)}
+            log.log_event("RETURN", "large", "ok", return_val=tree, inputs=tree)
+            line = Path(d + "/app.log").read_text()
+            self.assertLess(len(line.encode()), 16384)
+            self.assertIn(")} ok {Return:", line)
+            self.assertTrue(line.endswith("}\n"))
