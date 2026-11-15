@@ -473,12 +473,11 @@ def _rejected(n: int, code: str, qid: Optional[str] = None, h: Optional[str] = N
     return LineResult(line=n, status="rejected", code=code, question_id=qid, payload_hash=h)
 
 
-def parse_jsonl(body: bytes) -> list[tuple[LineResult, Optional[SubmissionLine]]]:
-    """Validate an external submission. Each line is accepted or rejected on
-    its own (T33); blank lines inside the body are rejected as invalid_json.
-    All accepted lines of one batch must share run/benchmark/method/document
-    binding. Persisting, idempotency against stored payloads (same hash ->
-    same result, different hash -> 409) and the run lock are #5+."""
+def jsonl_lines(body: bytes) -> list[str]:
+    """Validate batch encoding/size and split physical JSONL lines.
+
+    Shared with run-bound preflight; no submission has been accepted yet.
+    """
     if len(body) > MAX_JSONL_BYTES:
         raise BatchRejected(413, "payload_too_large")
     try:
@@ -494,6 +493,17 @@ def parse_jsonl(body: bytes) -> list[tuple[LineResult, Optional[SubmissionLine]]
         lines.pop()
     if len(lines) > MAX_JSONL_LINES:
         raise BatchRejected(413, "too_many_lines")
+
+    return lines
+
+
+def parse_jsonl(body: bytes) -> list[tuple[LineResult, Optional[SubmissionLine]]]:
+    """Validate an external submission. Each line is accepted or rejected on
+    its own (T33); blank lines inside the body are rejected as invalid_json.
+    All accepted lines of one batch must share run/benchmark/method/document
+    binding. Persisting, idempotency against stored payloads (same hash ->
+    same result, different hash -> 409) and the run lock are #5+."""
+    lines = jsonl_lines(body)
 
     out: list[tuple[LineResult, Optional[SubmissionLine]]] = []
     seen: dict[tuple[str, str], tuple[str, int]] = {}

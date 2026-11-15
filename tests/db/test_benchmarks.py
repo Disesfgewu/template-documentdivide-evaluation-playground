@@ -7,7 +7,15 @@ import uuid
 import psycopg
 from psycopg import errors
 
-from lab_db.repo import Change, StaleVersion, record_change, transition_benchmark
+from lab_db.repo import (
+    Change,
+    FreezeIneligible,
+    PermissionDenied,
+    StaleVersion,
+    grant_app_privileges,
+    record_change,
+    transition_benchmark,
+)
 
 from .base import FreshDatabase, h
 
@@ -79,7 +87,10 @@ class Fixture:
         v = 1
         for s in HAPPY_PATH:
             v = transition_benchmark(self.c, self.p, self.bench, v, s, f"to {s}", self.a)
-        return transition_benchmark(self.c, self.p, self.bench, v, "frozen", "freeze", self.a, compliance="partial")
+        with self.c.transaction():
+            self.c.execute("SELECT set_config('lab.test_allow_legacy_freeze', 'true', true)")
+            v = transition_benchmark(self.c, self.p, self.bench, v, "frozen", "freeze", self.a, compliance="partial")
+        return v
 
 
 class DocumentIntegrityTests(FreshDatabase):
@@ -149,6 +160,204 @@ class StateMachineTests(FreshDatabase):
                 transition_benchmark(c, f.p, f.bench, 1, "frozen", "skip everything", f.a, compliance="compliant")
             self.assertEqual(c.execute("SELECT status::text, row_version FROM benchmark_revisions WHERE id = %s",
                                        (f.bench,)).fetchone(), ("draft", 1))
+
+    def test_direct_sql_insert_non_draft_rejected(self):
+        with self.connect() as c:
+            f = Fixture(self, c)
+            rv = record_change(c, Change(f.p, f.a, "benchmark.create", "benchmark_revision", "bench_neg", 1,
+                                         h("bench_neg"), "lab-c14n-1", "benchmark.created"))
+            bad_inserts = [
+                ("INSERT INTO benchmark_revisions (id, project_id, resource_id, document_version_id, n_target, q_min, status) "
+                 "VALUES (%s, %s, %s, %s, 20, 2, 'frozen')", "must begin in draft status"),
+                ("INSERT INTO benchmark_revisions (id, project_id, resource_id, document_version_id, n_target, q_min, status) "
+                 "VALUES (%s, %s, %s, %s, 20, 2, 'parsing')", "must begin in draft status"),
+                ("INSERT INTO benchmark_revisions (id, project_id, resource_id, document_version_id, n_target, q_min, row_version) "
+                 "VALUES (%s, %s, %s, %s, 20, 2, 2)", "must begin at row_version 1"),
+                ("INSERT INTO benchmark_revisions (id, project_id, resource_id, document_version_id, n_target, q_min, frozen_at) "
+                 "VALUES (%s, %s, %s, %s, 20, 2, now())", "cannot have frozen_at set"),
+                ("INSERT INTO benchmark_revisions (id, project_id, resource_id, document_version_id, n_target, q_min, compliance) "
+                 "VALUES (%s, %s, %s, %s, 20, 2, 'compliant')", "cannot have compliance set"),
+                ("INSERT INTO benchmark_revisions (id, project_id, resource_id, document_version_id, n_target, q_min, compliance) "
+                 "VALUES (%s, %s, %s, %s, 20, 2, 'partial')", "cannot have compliance set"),
+            ]
+            for stmt, expected_err in bad_inserts:
+                with self.subTest(expected_err=expected_err), self.assertRaises(errors.CheckViolation) as ctx:
+                    with c.transaction():
+                        c.execute(stmt, (uuid.uuid4(), f.p, rv, f.doc))
+                self.assertIn(expected_err, str(ctx.exception))
+
+    def test_direct_sql_freeze_transition_rejected_for_compliant_and_partial(self):
+        with self.connect() as c:
+            f = Fixture(self, c)
+            v = 1
+            for s in HAPPY_PATH:
+                v = transition_benchmark(c, f.p, f.bench, v, s, f"to {s}", f.a)
+
+            # Direct SQL UPDATE to frozen with compliant is rejected at PostgreSQL boundary
+            with self.assertRaises(errors.CheckViolation) as ctx:
+                with c.transaction():
+                    c.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', 'sql freeze', true)",
+                              (str(f.a),))
+                    c.execute(
+                        "UPDATE benchmark_revisions SET status = 'frozen', compliance = 'compliant', "
+                        "frozen_at = now(), row_version = %s WHERE id = %s",
+                        (v + 1, f.bench),
+                    )
+            self.assertIn("compliance must be partial", str(ctx.exception))
+            # Verify rollback
+            st, ver, frozen_at = c.execute(
+                "SELECT status::text, row_version, frozen_at FROM benchmark_revisions WHERE id = %s",
+                (f.bench,)
+            ).fetchone()
+            self.assertEqual(st, "ready_to_freeze")
+            self.assertEqual(ver, v)
+            self.assertIsNone(frozen_at)
+
+            # Direct SQL UPDATE to frozen with partial is also rejected without legacy test bypass
+            with self.assertRaises(errors.CheckViolation) as ctx:
+                with c.transaction():
+                    c.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', 'sql freeze partial', true)",
+                              (str(f.a),))
+                    c.execute(
+                        "UPDATE benchmark_revisions SET status = 'frozen', compliance = 'partial', "
+                        "frozen_at = now(), row_version = %s WHERE id = %s",
+                        (v + 1, f.bench),
+                    )
+            self.assertIn("lack a passing automated validation", str(ctx.exception))
+            # Verify rollback
+            st, ver, frozen_at = c.execute(
+                "SELECT status::text, row_version, frozen_at FROM benchmark_revisions WHERE id = %s",
+                (f.bench,)
+            ).fetchone()
+            self.assertEqual(st, "ready_to_freeze")
+            self.assertEqual(ver, v)
+            self.assertIsNone(frozen_at)
+
+    def test_transition_benchmark_freeze_fails_closed(self):
+        with self.connect() as c:
+            f = Fixture(self, c)
+            v = 1
+            for s in HAPPY_PATH:
+                v = transition_benchmark(c, f.p, f.bench, v, s, f"to {s}", f.a)
+
+            # Compliant freeze rejected
+            with self.assertRaises(FreezeIneligible) as ctx:
+                transition_benchmark(c, f.p, f.bench, v, "frozen", "freeze compliant", f.a, compliance="compliant")
+            self.assertIn("compliance must be partial", str(ctx.exception))
+
+            # Partial freeze rejected without test fixture bypass
+            with self.assertRaises(FreezeIneligible) as ctx:
+                transition_benchmark(c, f.p, f.bench, v, "frozen", "freeze partial", f.a, compliance="partial")
+            self.assertIn("lack a passing automated validation", str(ctx.exception))
+
+            # Missing compliance rejected
+            with self.assertRaises(ValueError) as ctx:
+                transition_benchmark(c, f.p, f.bench, v, "frozen", "freeze missing compliance", f.a, compliance=None)
+            self.assertIn("compliance designation", str(ctx.exception))
+
+    def test_freeze_partial_by_non_owner_rejected(self):
+        with self.connect() as c:
+            f = Fixture(self, c)
+            maintainer = uuid.uuid4()
+            with c.transaction():
+                c.execute("INSERT INTO actors (id, kind, display) VALUES (%s, 'user', 'maint')", (maintainer,))
+                c.execute("INSERT INTO project_members (project_id, actor_id, role) VALUES (%s, %s, 'maintainer')",
+                          (f.p, maintainer))
+            v = 1
+            for s in HAPPY_PATH:
+                v = transition_benchmark(c, f.p, f.bench, v, s, f"to {s}", f.a)
+            with self.assertRaises(PermissionDenied) as ctx:
+                transition_benchmark(c, f.p, f.bench, v, "frozen", "maint partial freeze", maintainer, compliance="partial")
+            self.assertIn("owner required", str(ctx.exception))
+
+    def test_restricted_app_role_cannot_insert_or_freeze(self):
+        with self.connect() as c:
+            f = Fixture(self, c)
+            role = f"lab_app_{uuid.uuid4().hex[:10]}"
+            with c.transaction():
+                c.execute(f'CREATE ROLE "{role}" NOLOGIN')
+            grant_app_privileges(c, role)
+
+            def _cleanup():
+                with psycopg.connect(self.url, autocommit=True) as cleanup_c:
+                    cleanup_c.execute(f'DROP OWNED BY "{role}"')
+                    cleanup_c.execute(f'DROP ROLE IF EXISTS "{role}"')
+            self.addCleanup(_cleanup)
+
+            rv = record_change(c, Change(f.p, f.a, "benchmark.create", "benchmark_revision", "bench_app", 1,
+                                         h("bench_app"), "lab-c14n-1", "benchmark.created"))
+
+            # 1. App role cannot INSERT benchmark directly into frozen
+            with self.assertRaises(errors.CheckViolation):
+                with c.transaction():
+                    c.execute(f'SET LOCAL ROLE "{role}"')
+                    c.execute(
+                        "INSERT INTO benchmark_revisions (id, project_id, resource_id, document_version_id, n_target, q_min, status) "
+                        "VALUES (%s, %s, %s, %s, 20, 2, 'frozen')",
+                        (uuid.uuid4(), f.p, rv, f.doc),
+                    )
+
+            # Advance f.bench to ready_to_freeze
+            v = 1
+            for s in HAPPY_PATH:
+                v = transition_benchmark(c, f.p, f.bench, v, s, f"to {s}", f.a)
+
+            # 2. App role cannot UPDATE to frozen
+            with self.assertRaises(errors.CheckViolation):
+                with c.transaction():
+                    c.execute(f'SET LOCAL ROLE "{role}"')
+                    c.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', 'app freeze', true)",
+                              (str(f.a),))
+                    c.execute(
+                        "UPDATE benchmark_revisions SET status = 'frozen', compliance = 'partial', "
+                        "frozen_at = now(), row_version = %s WHERE id = %s",
+                        (v + 1, f.bench),
+                    )
+
+            # 3. App role cannot bypass freeze gate even if attempting set_config('lab.test_allow_legacy_freeze')
+            with self.assertRaises(errors.InsufficientPrivilege) as ctx:
+                with c.transaction():
+                    c.execute(f'SET LOCAL ROLE "{role}"')
+                    c.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', 'app bypass', true)",
+                              (str(f.a),))
+                    c.execute("SELECT set_config('lab.test_allow_legacy_freeze', 'true', true)")
+                    c.execute(
+                        "UPDATE benchmark_revisions SET status = 'frozen', compliance = 'partial', "
+                        "frozen_at = now(), row_version = %s WHERE id = %s",
+                        (v + 1, f.bench),
+                    )
+            self.assertIn("only superuser sessions and roles may bypass the benchmark freeze gate", str(ctx.exception))
+
+            # Application roles are arbitrary names, not necessarily lab_app_*.
+            other_role = f"worker_{uuid.uuid4().hex[:10]}"
+            with c.transaction():
+                c.execute(f'CREATE ROLE "{other_role}" NOLOGIN')
+            grant_app_privileges(c, other_role)
+
+            def _cleanup_other():
+                with psycopg.connect(self.url, autocommit=True) as cleanup_c:
+                    cleanup_c.execute(f'DROP OWNED BY "{other_role}"')
+                    cleanup_c.execute(f'DROP ROLE IF EXISTS "{other_role}"')
+            self.addCleanup(_cleanup_other)
+            with self.assertRaises(errors.InsufficientPrivilege):
+                with c.transaction():
+                    c.execute(f'SET LOCAL ROLE "{other_role}"')
+                    c.execute("SELECT set_config('lab.actor_id', %s, true), set_config('lab.transition_reason', 'app bypass', true)", (str(f.a),))
+                    c.execute("SELECT set_config('lab.test_allow_legacy_freeze', 'true', true)")
+                    c.execute(
+                        "UPDATE benchmark_revisions SET status = 'frozen', compliance = 'partial', "
+                        "frozen_at = now(), row_version = %s WHERE id = %s",
+                        (v + 1, f.bench),
+                    )
+
+            # Verify rollback
+            st, ver, frozen_at = c.execute(
+                "SELECT status::text, row_version, frozen_at FROM benchmark_revisions WHERE id = %s",
+                (f.bench,)
+            ).fetchone()
+            self.assertEqual(st, "ready_to_freeze")
+            self.assertEqual(ver, v)
+            self.assertIsNone(frozen_at)
 
     def test_stale_row_version(self):
         with self.connect() as c:

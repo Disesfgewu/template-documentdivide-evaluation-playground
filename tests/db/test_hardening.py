@@ -138,6 +138,7 @@ class TestIntegrityHardening(FreshDatabase):
             if freeze:
                 conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))
                 conn.execute("SELECT set_config('lab.transition_reason', 'advance', true)")
+                conn.execute("SELECT set_config('lab.test_allow_legacy_freeze', 'true', true)")
                 steps = ["parsing", "planning", "generating", "validating", "ready_to_freeze"]
                 rv = 1
                 for st in steps:
@@ -644,6 +645,7 @@ class TestIntegrityHardening(FreshDatabase):
                     (q2, bm_id, h("q2")),
                 )
                 conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(a),))
+                conn.execute("SELECT set_config('lab.test_allow_legacy_freeze', 'true', true)")
                 for idx, st in enumerate(["parsing", "planning", "generating", "validating", "ready_to_freeze"], start=2):
                     conn.execute("UPDATE benchmark_revisions SET status = %s, row_version = %s WHERE id = %s", (st, idx, bm_id))
                 conn.execute(
@@ -837,6 +839,7 @@ class TestIntegrityHardening(FreshDatabase):
                 )
                 conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(a),))
                 conn.execute("SELECT set_config('lab.transition_reason', 'freeze-now', true)")
+                conn.execute("SELECT set_config('lab.test_allow_legacy_freeze', 'true', true)")
                 conn.execute(
                     "UPDATE benchmark_revisions SET status = 'frozen', compliance = 'compliant', frozen_at = now(), row_version = 7 WHERE id = %s",
                     (bm_id,),

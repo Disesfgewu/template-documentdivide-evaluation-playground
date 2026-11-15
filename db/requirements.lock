@@ -1,0 +1,8 @@
+# Resolved set for db/requirements.txt (pip freeze of a clean environment).
+alembic==1.20.1
+Mako==1.4.3
+MarkupSafe==3.0.4
+psycopg==3.3.8
+psycopg-binary==3.3.8
+SQLAlchemy==2.1.8
+typing_extensions==4.16.0

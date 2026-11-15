@@ -4,3 +4,13 @@ __pycache__/
 .lab-artifacts/
 web/node_modules/
 web/dist/
+services/worker/agentkitsmoke/log/
+services/worker/agentflow/log/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# agentKit writes model/agentlog files into ./log/ of the package under test (go test)
+services/worker/**/log/

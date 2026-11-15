@@ -80,3 +80,28 @@ def run_checks(checks: dict[str, Check]) -> tuple[bool, dict[str, dict]]:
             res = CheckResult(False, f"check raised {type(exc).__name__}")
         results[name] = {"ok": res.ok, "detail": res.detail}
     return all(r["ok"] for r in results.values()) and bool(results), results
+
+
+WORKER_FRESH_SECONDS = 90
+
+
+def generation_status(settings: Settings) -> dict:
+    """What is TRUE about question generation, from the database (the worker writes ``worker_status``; ``llm_calls`` is the ledger of the
+    calls it really made). Never the key. ``worker_running`` means a generate worker reported itself within the last 90 s; without a key
+    the worker does not start, so ``no_worker`` also covers a missing key. ``last_real_call`` is the newest call the provider reported
+    usage for (its model and time): evidence that a real model was used, not a configuration claim. Any failure is ``unknown``."""
+    try:
+        with connect(settings) as conn:
+            worker = conn.execute(
+                "SELECT provider_host, protocol FROM worker_status WHERE kind = 'document.generate' "
+                "AND updated_at > now() - make_interval(secs => %s) ORDER BY updated_at DESC LIMIT 1", (WORKER_FRESH_SECONDS,)).fetchone()
+            last = conn.execute(
+                "SELECT model, created_at FROM llm_calls WHERE status = 'ok' AND usage_known ORDER BY seq DESC LIMIT 1").fetchone()
+    except psycopg.Error as exc:
+        return {"state": "unknown", "detail": f"database unavailable ({type(exc).__name__})"}
+    out: dict = {"state": "worker_running" if worker else "no_worker",
+                 "provider_host": worker[0] if worker else None, "protocol": worker[1] if worker else None,
+                 "last_real_call": {"model": last[0], "at": last[1].isoformat()} if last else None}
+    if not worker:
+        out["detail"] = "no question-generation worker is running (it only starts with an API key); model steps will fail"
+    return out

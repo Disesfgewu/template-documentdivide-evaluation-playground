@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     auth_secret: SecretStr | None = None
     db_connect_timeout_s: float = Field(default=3.0, gt=0, le=30)
     trust_remote_traceparent: bool = False
+    # List prices (micro-currency per million tokens) of the question-generation model, the same values the generate worker is given:
+    # the API only uses them to show and derive the worst-case cost of a run BEFORE it starts (Issue #186). Never a key.
+    gen_price_in_micros_per_mtok: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    gen_price_out_micros_per_mtok: int | None = Field(default=None, ge=0, le=1_000_000_000)
 
     @field_validator("trust_remote_traceparent", mode="before")
     @classmethod
