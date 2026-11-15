@@ -80,6 +80,13 @@ class GenerateWorker(Worker):
         self.validate_build_calls, self.validate_on_results = validate_questions.make_build_calls(), validate_questions.make_on_results()
         self._phases: dict[uuid.UUID, str] = {}
 
+    def _handle(self, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome | None:
+        try:
+            return super()._handle(project_id, job_id)
+        finally:
+            # Includes queued, lease-lost, not-claimable and exception exits.
+            self._phases.pop(job_id, None)
+
     def _outcome_log_reason(self, job_id: uuid.UUID, outcome: ParseOutcome) -> str:
         phase = self._phases.pop(job_id, None)
         if outcome.status == "succeeded" and phase in ("validate", "answer", "judge"):

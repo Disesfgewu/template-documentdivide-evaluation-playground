@@ -36,3 +36,12 @@ proof, actual multi-service demo acceptance and a controlled demo overhead
 measurement. Fake-child/real-PostgreSQL tests are not real-provider evidence.
 The small local test timing comparison is dominated by database setup and must
 not be reported as a performance guarantee. SPEC #15/Epic release gates remain.
+
+HTTP completion is observed at the ASGI send boundary, after the final body and
+any requested trailers. Stream failures, failed sends, cancellation and incomplete
+disconnected responses produce ERROR instead of a premature successful RETURN;
+original messages, results and exceptions are preserved. Generate-worker phase
+entries are removed on every handler exit, including nonterminal and exception
+paths. API log IDs still require canonical integration with the separate trace
+correlation increment (#65); the current log-only ID must not be treated as the
+returned error ID.
