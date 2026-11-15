@@ -70,11 +70,19 @@ def _insert_adaptive(conn, table: str, values: dict[str, object]) -> None:
 class UpgradeTests(FreshDatabase):  # helpers only; no test methods
     migrate_to_head = False
 
-    def _fingerprints(self, conn) -> dict[str, str]:
+    def _fingerprints(self, conn, columns: dict | None = None) -> dict[str, str]:
+        """Row fingerprints per table over the columns that existed BEFORE the upgrade: a migration that only ADDS a column
+        (e.g. 0018 submissions.failure_reason) must not look like data loss. Pass the first call's ``self._columns`` to the second."""
         out: dict[str, str] = {}
+        self._columns = {} if columns is None else columns
         for table in FINGERPRINT_TABLES:
+            names = self._columns.get(table) or [r[0] for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s "
+                "ORDER BY ordinal_position", (table,))]
+            self._columns[table] = names
+            selected = ", ".join(f'"{n}"' for n in names)
             digest = conn.execute(
-                f"SELECT md5(string_agg(t::text, '|' ORDER BY t::text)) FROM {table} t"
+                f"SELECT md5(string_agg(t::text, '|' ORDER BY t::text)) FROM (SELECT {selected} FROM {table}) t"
             ).fetchone()[0]
             self.assertIsNotNone(digest, f"expected rows in {table}")
             out[table] = digest
@@ -200,7 +208,7 @@ class UpgradeDataTests(UpgradeTests):
                 [(m.version, "v-old" if m.version <= 3 else "v-new") for m in discover()],
             )
 
-            after = self._fingerprints(c)
+            after = self._fingerprints(c, self._columns)
             self.assertEqual(before, after)
 
             q_cols = {r[0] for r in _table_columns(c, "questions")}

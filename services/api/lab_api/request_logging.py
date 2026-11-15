@@ -9,9 +9,11 @@ Scope and guarantees:
 - Ensures ``lab_api.request_log`` has an active ``INFO`` handler via
   ``configure_request_logger()`` when the default sink is used, without mutating
   or suppressing the root logger or external server loggers.
-- Route identities are allowlisted fixed templates (``/healthz``, ``/readyz``,
-  or ``unmatched``); raw request paths, path parameters, raw_path bytes, and
-  query strings are never recorded in ``RequestLogEvent``.
+- Route identities are allowlisted router-owned route templates from actual
+  app routes (e.g. ``/healthz``, ``/readyz``, ``/api/v1/documents``,
+  ``/api/v1/documents/{document_id}``, or ``unmatched`` for unknown or unmatched
+  paths); raw request paths, path parameters, raw_path bytes, and query strings
+  are never recorded in ``RequestLogEvent``.
 - HTTP methods are restricted to a fixed standard allowlist; non-standard or
   malformed method strings are normalized to ``INVALID_METHOD``.
 - HTTP status codes are validated as exact ``int`` values (excluding ``bool``)
@@ -91,12 +93,108 @@ INVALID_HTTP_METHOD = "INVALID_METHOD"
 ROUTE_HEALTHZ = "/healthz"
 ROUTE_READYZ = "/readyz"
 ROUTE_UNMATCHED = "unmatched"
-ALLOWED_ROUTES: frozenset[str] = frozenset({ROUTE_HEALTHZ, ROUTE_READYZ, ROUTE_UNMATCHED})
+ALLOWED_ROUTES: frozenset[str] = frozenset(
+    {
+        ROUTE_HEALTHZ,
+        ROUTE_READYZ,
+        ROUTE_UNMATCHED,
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        "/api/v1/audit-events",
+        "/api/v1/benchmarks",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/baseline-run",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/estimate",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/export",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/freeze",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/generate",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/method-runs",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/plan",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/export",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/review",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/{question_id}/exclusion",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/submissions",
+        "/api/v1/benchmarks/{logical_id}/revisions/{revision}/validate",
+        "/api/v1/comparisons",
+        "/api/v1/documents",
+        "/api/v1/documents/{document_id}",
+        "/api/v1/documents/{document_id}/download",
+        "/api/v1/documents/{document_id}/original",
+        "/api/v1/documents/{document_id}/pages/{page_index}",
+        "/api/v1/documents/{document_id}/parse",
+        "/api/v1/documents/{document_id}/parse-results/{job_id}",
+        "/api/v1/documents/{document_id}/parse-results/{job_id}/pages/{page_index}",
+        "/api/v1/jobs/{job_id}",
+        "/api/v1/jobs/{job_id}/cancel",
+        "/api/v1/logs",
+        "/api/v1/projects/{project_id}/documents",
+        "/api/v1/resources/{resource_id}/lineage",
+        "/api/v1/runs/{run_id}",
+        "/api/v1/runs/{run_id}/judge-runs",
+        "/api/v1/runs/{run_id}/results",
+        "/api/v1/runs/{run_id}/submission-details",
+        "/api/v1/submission-format",
+        "/documents",
+        "/documents/{document_id}",
+        "/documents/{document_id}/download",
+        "/documents/{document_id}/original",
+        "/documents/{document_id}/pages/{page_index}",
+        "/resources/{resource_id}/lineage",
+    }
+)
 
 OPERATION_BY_ROUTE: dict[str, str] = {
     ROUTE_HEALTHZ: "http.healthz",
     ROUTE_READYZ: "http.readyz",
     ROUTE_UNMATCHED: "http.unmatched",
+    "/openapi.json": "http.openapi",
+    "/docs": "http.swagger_ui_html",
+    "/docs/oauth2-redirect": "http.swagger_ui_redirect",
+    "/redoc": "http.redoc_html",
+    "/api/v1/audit-events": "http.list_audit_events_v1",
+    "/api/v1/benchmarks": "http.create_benchmark_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}": "http.get_benchmark_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/baseline-run": "http.run_local_baseline_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/estimate": "http.estimate_run_cost_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/export": "http.export_benchmark_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/freeze": "http.freeze_benchmark_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/generate": "http.start_generation_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/method-runs": "http.start_method_run_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/plan": "http.plan_benchmark_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions": "http.list_public_questions_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/export": "http.export_questions_package_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/review": "http.review_questions_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/{question_id}/exclusion": "http.exclude_question_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/submissions": "http.upload_submission_v1",
+    "/api/v1/benchmarks/{logical_id}/revisions/{revision}/validate": "http.start_validation_v1",
+    "/api/v1/comparisons": "http.get_comparison_v1",
+    "/api/v1/documents": "http.upload_document_v1",
+    "/api/v1/documents/{document_id}": "http.get_document_v1",
+    "/api/v1/documents/{document_id}/download": "http.download_document_v1",
+    "/api/v1/documents/{document_id}/original": "http.download_document_original_v1",
+    "/api/v1/documents/{document_id}/pages/{page_index}": "http.get_document_page_v1",
+    "/api/v1/documents/{document_id}/parse": "http.parse_document_v1",
+    "/api/v1/documents/{document_id}/parse-results/{job_id}": "http.parse_result_summary_v1",
+    "/api/v1/documents/{document_id}/parse-results/{job_id}/pages/{page_index}": "http.parse_result_page_v1",
+    "/api/v1/jobs/{job_id}": "http.get_job_v1",
+    "/api/v1/jobs/{job_id}/cancel": "http.cancel_job_v1",
+    "/api/v1/logs": "http.list_logs_v1",
+    "/api/v1/projects/{project_id}/documents": "http.upload_project_document",
+    "/api/v1/resources/{resource_id}/lineage": "http.get_resource_lineage_v1",
+    "/api/v1/runs/{run_id}": "http.get_run_v1",
+    "/api/v1/runs/{run_id}/judge-runs": "http.start_judge_run_v1",
+    "/api/v1/runs/{run_id}/results": "http.get_run_results_v1",
+    "/api/v1/runs/{run_id}/submission-details": "http.submission_details_v1",
+    "/api/v1/submission-format": "http.submission_format_v1",
+    "/documents": "http.upload_document_compat",
+    "/documents/{document_id}": "http.get_document_compat",
+    "/documents/{document_id}/download": "http.download_document_compat",
+    "/documents/{document_id}/original": "http.download_document_original_compat",
+    "/documents/{document_id}/pages/{page_index}": "http.get_document_page_compat",
+    "/resources/{resource_id}/lineage": "http.get_resource_lineage_compat",
 }
 
 EVENT_COMPLETED = "http.request.completed"
@@ -215,14 +313,56 @@ def sanitize_http_status(raw_status: Any) -> tuple[int | None, bool]:
     return None, False
 
 
-def classify_route(scope: dict[str, Any]) -> str:
+_SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+
+
+def collect_route_templates(app_or_router: Any) -> set[str]:
+    """Collect router-owned route templates from actual application routes."""
+    templates: set[str] = set()
+    routes = getattr(app_or_router, "routes", None)
+    if routes is None:
+        return templates
+    for r in routes:
+        path = getattr(r, "path", None)
+        if isinstance(path, str) and path.startswith("/"):
+            templates.add(path)
+        orig = getattr(r, "original_router", None)
+        if orig is not None:
+            templates.update(collect_route_templates(orig))
+        sub_routes = getattr(r, "routes", None)
+        if sub_routes is not None and r is not app_or_router:
+            templates.update(collect_route_templates(r))
+    return templates
+
+
+def classify_operation_name(route: str, route_obj: Any | None = None) -> str:
+    """Derive an allowlisted operation name for the route.
+
+    Never echoes raw paths, query strings, or unallowlisted tokens.
+    """
+    if route == ROUTE_UNMATCHED:
+        return OPERATION_BY_ROUTE[ROUTE_UNMATCHED]
+    if route in OPERATION_BY_ROUTE:
+        return OPERATION_BY_ROUTE[route]
+    if route_obj is not None:
+        name = getattr(route_obj, "name", None)
+        if isinstance(name, str) and _SAFE_IDENTIFIER_RE.match(name) and len(name) <= 64:
+            return f"http.{name}"
+    return OPERATION_BY_ROUTE[ROUTE_UNMATCHED]
+
+
+def classify_route(
+    scope: dict[str, Any],
+    allowed_routes: frozenset[str] | set[str] | None = None,
+) -> str:
     """Map an ASGI scope to a fixed allowlisted route template.
 
     Never echoes dynamic path segments, query strings, or unmatched paths.
     """
+    effective_allowed = allowed_routes if allowed_routes is not None else ALLOWED_ROUTES
     route_obj = scope.get("route")
     route_path = getattr(route_obj, "path", None)
-    if isinstance(route_path, str) and route_path in ALLOWED_ROUTES and route_path != ROUTE_UNMATCHED:
+    if isinstance(route_path, str) and route_path in effective_allowed and route_path != ROUTE_UNMATCHED:
         return route_path
     raw_path = scope.get("path")
     if isinstance(raw_path, str) and raw_path in (ROUTE_HEALTHZ, ROUTE_READYZ):
@@ -381,6 +521,7 @@ class RequestLoggingMiddleware:
         env: Environment,
         provider_mode: ProviderMode,
         sink: RequestLogSink | None = None,
+        allowed_routes: frozenset[str] | set[str] | None = None,
     ) -> None:
         if not isinstance(env, Environment):
             raise TypeError("env must be an Environment enum")
@@ -396,6 +537,16 @@ class RequestLoggingMiddleware:
             self._sink = sink
         self._dropped_count = 0
         self._lock = threading.Lock()
+        if allowed_routes is not None:
+            self._allowed_routes: frozenset[str] = frozenset(allowed_routes)
+        else:
+            discovered: set[str] = set(ALLOWED_ROUTES)
+            curr: Any = app
+            while curr is not None:
+                if hasattr(curr, "routes"):
+                    discovered.update(collect_route_templates(curr))
+                curr = getattr(curr, "app", None)
+            self._allowed_routes = frozenset(discovered)
 
     @property
     def dropped_count(self) -> int:
@@ -466,8 +617,9 @@ class RequestLoggingMiddleware:
             elapsed_ns = max(0, time.monotonic_ns() - start_ns)
             duration_ms = round(elapsed_ns / 1_000_000.0, 3)
             observed_at = _utc_timestamp()
-            route = classify_route(child_scope)
-            operation_name = OPERATION_BY_ROUTE[route]
+            route = classify_route(child_scope, allowed_routes=self._allowed_routes)
+            route_obj = child_scope.get("route")
+            operation_name = classify_operation_name(route, route_obj)
             http_status, status_valid = sanitize_http_status(raw_status)
 
             if caught_exc is not None:

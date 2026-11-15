@@ -4,7 +4,17 @@
   - 每個檔案和它在 `schema_migrations` 的紀錄（版本、sha256、deployment）放在同一個交易，失敗時整個回滾。
   - 已套用的檔案若內容被改動，migration 會拒絕執行。
   - 用 advisory lock 確保同時只有一個 migrator。
-- 執行 migration：`LAB_MIGRATION_DATABASE_URL=… PYTHONPATH=db python -m lab_db.migrate --deployment <id>`。連線字串只從環境變數讀取，不放在命令列。
+- **PostgreSQL 用 Docker 執行，schema 由 Alembic 套用。**
+  - 啟動資料庫：`docker compose -f deploy/compose.dev.yml up -d --wait`（PostgreSQL 17 + pgvector，映像以 digest 鎖定）。
+  - 在容器裡套用：`docker compose -f deploy/compose.dev.yml --profile tools run --rm migrate`（建置 `deploy/Dockerfile.migrate`：只含 Alembic 與 `lab_db`，非 root；預設 `-x deployment=local upgrade head`，要換 deployment id 可改成 `run --rm migrate -x deployment=<id> upgrade head`）。
+  - 在本機套用：`pip install -r db/requirements.lock`，然後 `cd db && LAB_MIGRATION_DATABASE_URL=postgresql://… alembic -x deployment=<id> upgrade head`（`alembic.ini` 用 `%(here)s`，從任何目錄都能執行）。等價的舊入口 `PYTHONPATH=db python -m lab_db.migrate --deployment <id>` 仍可用。
+  - 連線字串只從環境變數 `LAB_MIGRATION_DATABASE_URL` 讀取（migration 角色），不放在設定檔或命令列；必須指定 deployment id。
+- **Alembic 的用法與限制。**
+  - SQL 檔案仍是唯一的事實來源（`lab_db/migrations/NNNN_*.sql`）。每個檔案在 `lab_db/schema/versions/` 有一個薄的 revision（`NNNN_*.py`），revision id 就是四位數版本號，鏈必須是單一線性鏈且與 SQL 檔一一對應（`tests/dbunit/test_alembic_schema.py` 驗證）。
+  - 每個 migration 仍是各自的交易（連同 `schema_migrations` 的紀錄與 `alembic_version` 的更新），失敗整個回滾；用 advisory lock 保證同時只有一個 migrator；已套用的 SQL 若 checksum 改變，或資料庫比程式碼新，都會拒絕。
+  - **只能向前**：沒有 downgrade（`alembic downgrade` 會失敗且不改資料），回復請用備份。不支援 `--sql` 離線輸出（無法驗證 checksum）。
+  - **既有資料庫**：只有 `schema_migrations`、沒有 `alembic_version` 的資料庫（舊 runner 套用的）會先驗證 checksum，再標記到目前版本，不會重跑任何 migration。
+  - **新增 migration**：新增下一號的 SQL 檔，並在 `lab_db/schema/versions/` 新增對應的 revision（複製前一個、改 `revision`、`down_revision` 與檔名）。版本號必須連續且不可跳號；兩個 PR 同時新增同一號時，後合併的要改成下一號。
 - `0001_core`：projects、actors、project_members（角色 enum）、resource_versions、operations、lineage_edges、artifacts、idempotency_keys、audit_events、outbox_events。
   - 跨專案的關聯用 `(project_id, id)` 複合外鍵阻擋；刪除一律 RESTRICT，不用 cascade。
   - resource_versions 由 trigger 保護：
@@ -35,4 +45,14 @@
 - 遮罩造成的部分可見性。
 - outbox `delivered_at` 與逐 consumer 消費的語意統一。
 - parse_runs/observations 的 revision 與 hash 補強。
-- pgvector collection（#11）。
+- 真 embedding model 的呼叫、method-service 與 benchmark 建題流程對 collection 的實際接線（#11／#10／#6）。
+
+## pgvector 向量儲存（#11 增量，migration 0010、`lab_db.vectors`）
+
+- `embedding_spaces`：不可變的 embedding 身分（`UNIQUE(project_id, config_hash)`）；不同 space 的向量不能互相比較。
+- `vector_collections`：屬於一個 project、一個 space 與一種用途（`method` 或 `benchmark_generation`，兩者互相隔離）；`method` 才需要 `method_revision`。狀態 `building → ready → frozen`（或 `failed`）；`ready` 必須有 `manifest_hash`、`item_count` 與 `ready_at`，發佈前以 `manifest` 重算核對，未 ready 的 collection 不能查詢。
+- `vector_items`／`vector_item_regions`：append-only。向量欄位不指定維度，由 trigger 對照 space 的維度；只在 `building` 時可寫入，限同 project 與文件範圍，cosine 不接受零向量。
+- `vector_index_revisions`：每個 collection 一個部分 HNSW 表達式索引（`((embedding::vector(d)) ops) WHERE collection_id = ...`）或精確掃描。查詢以 `EXPLAIN` 驗證確實使用索引；沒用到就丟 `IndexNotUsed`，不默默改成全表掃描。
+- `vector_queries`：append-only，記錄要求的模式、實際使用的模式、缺額（shortfall）與 fallback 原因；`fallback` 只在實際模式與要求不同時才有值。精確 fallback 必須由呼叫端明確允許。
+
+API：`create_space`、`create_collection`、`upsert`、`manifest`／`manifest_hash_of`、`publish`、`build_index`（`exact` 或 `hnsw`）、`search`（回傳 `QueryResult`）。測試 `tests/db/test_vectors.py` 涵蓋 T53–T57：隔離、ready 閘、維度與零向量、HNSW 召回（真 PostgreSQL＋pgvector）。

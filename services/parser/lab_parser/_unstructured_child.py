@@ -1,0 +1,154 @@
+"""Fixed subprocess bootstrap that runs pinned Unstructured ``fast`` on one PDF.
+
+Not a public CLI. Started only by ``unstructured_runner`` with a validated argv, in an
+empty private working directory containing ``source.pdf``. Writes ``elements.json``
+(the OSS ``elements_to_dicts`` output) and ``meta.json`` (the installed version).
+Diagnostics, document text and exception text are never written anywhere else.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import resource
+import sys
+
+
+def apply_limits(memory: int, cpu: int, output: int) -> None:
+    os.umask(0o077)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (output, output))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+
+
+def die_with_parent() -> None:
+    """Load the shared implementation by path (``-I`` keeps this directory off ``sys.path``)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_pdeathsig", Path(__file__).with_name("_pdeathsig.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.die_with_parent()
+
+
+
+def _page_info(path: str) -> list[dict]:
+    """Per page: /Rotate (0, 90, 180, 270) and the MediaBox and CropBox, as pypdf resolves them.
+
+    The parent decides what can be attested from this (Unstructured fast takes its coordinates from
+    pdfminer, which applies /Rotate to the layout size but ignores /CropBox; measured on CI).
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(path, strict=True)
+    return [{"rotation": page.rotation % 360,
+             "mediabox": [float(v) for v in page.mediabox], "cropbox": [float(v) for v in page.cropbox]}
+            for page in reader.pages]
+
+
+MIN_LOST_TEXT_CHARS = 20   # shorter pypdf text (a page number, a stray mark) is not evidence of lost content
+
+
+def _hidden_text_pages(path: str) -> list[list]:
+    """``[[page_index, code], ...]`` for pages with invisible text or unanalysable content (see ``_hidden_text``)."""
+    import importlib.util
+    from pypdf import PdfReader
+
+    spec = importlib.util.spec_from_file_location("_hidden_text", Path(__file__).with_name("_hidden_text.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.scan_document(PdfReader(path, strict=True))
+
+
+def _ink_maps(path: str) -> list:
+    """Per page an occupancy map of what PDFium renders (see ``_ink``), or None when it cannot be rendered."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_ink", Path(__file__).with_name("_ink.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.document_ink(path)
+
+
+def _pages_with_lost_text(path: str, elements: list) -> list[int]:
+    """0-based pages with real pypdf text, but only when Unstructured returned NO element at all.
+
+    Unstructured 0.27.36 downloads a spaCy model on first use; when that fails (read-only site-packages,
+    no network) it logs one debug line and returns NO elements, so a document's text can vanish while the
+    run looks successful. Only that total loss is flagged: when any element exists, a page without one
+    stays an honest ``needs_review`` page (pypdf and pdfminer may legitimately disagree on a single page).
+    The parent turns a non-empty list into ``text_extraction_empty``.
+    """
+    from pypdf import PdfReader
+
+    if any(isinstance(e, dict) for e in elements):
+        return []
+    reader = PdfReader(path, strict=True)
+    lost = []
+    for index, page in enumerate(reader.pages):
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            continue  # unreadable by pypdf: it cannot vouch that text exists
+        if len("".join(text.split())) >= MIN_LOST_TEXT_CHARS:
+            lost.append(index)
+    return lost
+
+
+def main() -> int:
+    die_with_parent()
+    apply_limits(*map(int, sys.argv[1:]))
+    try:
+        import importlib.metadata as md
+        import json
+        from unstructured.partition.pdf import partition_pdf
+        from unstructured.staging.base import elements_to_dicts
+
+        source = "source.pdf"
+        if os.path.exists("pages.json"):
+            # A batch: parse only these original pages, in this order (the parent validated them).
+            from pypdf import PdfReader, PdfWriter
+
+            with open("pages.json", "rb") as stream:
+                pages = json.loads(stream.read(65536))
+            reader = PdfReader("source.pdf", strict=True)
+            if (type(pages) is not list or not pages or any(type(i) is not int or not 0 <= i < len(reader.pages)
+                                                            for i in pages)):
+                return 1
+            writer = PdfWriter()
+            for i in pages:
+                writer.add_page(reader.pages[i])
+            with open("subset.pdf", "xb") as stream:
+                writer.write(stream)
+            source = "subset.pdf"
+        elements = partition_pdf(filename=source, strategy="fast")
+        payload = json.dumps(elements_to_dicts(elements), allow_nan=False, sort_keys=True,
+                             separators=(",", ":")).encode("utf-8")
+        info = _page_info(source)
+        lost = _pages_with_lost_text(source, json.loads(payload))
+        unsafe = _hidden_text_pages(source)
+        ink = _ink_maps(source)
+        flagged = {i for i, _ in unsafe}
+        # A page PDFium cannot render within the caps cannot be cross-checked: fail closed like unparseable content.
+        unsafe += [[i, "content_unparseable"] for i, rows in enumerate(ink) if rows is None and i not in flagged]
+        unsafe.sort()
+        meta = json.dumps({"unstructured": md.version("unstructured"),
+                           "lost_text_pages": lost, "unsafe_text_pages": unsafe,
+                           # Text units are intact only for upright (0) and upside-down (180) pages; 90 and
+                           # 270 come out letter-scrambled (measured), so they are never attested.
+                           "attestable_pages": [i["rotation"] in (0, 180) for i in info],
+                           "page_geometry": info}).encode("utf-8")
+        with open("elements.json", "xb") as stream:
+            stream.write(payload)
+        with open("ink.json", "xb") as stream:
+            stream.write(json.dumps({"grid": 128, "pages": ink}, separators=(",", ":"), allow_nan=False).encode("ascii"))
+        with open("meta.json", "xb") as stream:
+            stream.write(meta)
+        return 0
+    except BaseException:
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -4,12 +4,32 @@ Run: ``uvicorn --factory lab_api.main:create_app`` (from services/api).
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .audit import router as audit_router
+from .benchmark_baseline import router as benchmark_baseline_router
+from .benchmark_build import router as benchmark_build_router
+from .benchmark_freeze import router as benchmark_freeze_router
+from .benchmark_generate import router as benchmark_generate_router
+from .benchmark_method import router as benchmark_method_router
+from .benchmark_review import router as benchmark_review_router
+from .benchmark_external import router as benchmark_external_router
+from .benchmarks import router as benchmarks_router
 from .config import Settings, load_settings
 from .documents import ApiError, DownloadAdmissionMiddleware, router as documents_router
-from .readiness import Check, default_checks, run_checks
+from .openapi import configure_openapi
+from .comparisons import router as comparisons_router
+from .logs import router as logs_router
+from .results import router as results_router
+from .runs import router as runs_router
+from .jobs import router as jobs_router
+from .parse_jobs import router as parse_jobs_router
+from .parse_results import router as parse_results_router
+from .lineage import router as lineage_router
+from .readiness import Check, default_checks, generation_status, run_checks
 from .request_logging import RequestLogSink, RequestLoggingMiddleware
 
 API_VERSION = "0.1.0"
@@ -18,9 +38,12 @@ API_VERSION = "0.1.0"
 def create_app(
     settings: Settings | None = None,
     checks: dict[str, Check] | None = None,
+    generation: Callable[[], dict] | None = None,
     log_sink: RequestLogSink | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
+    if generation is None:      # injected checks (tests) never reach for a database on their own
+        generation = (lambda: generation_status(settings)) if checks is None else (lambda: {"state": "unknown"})
     checks = checks if checks is not None else default_checks(settings)
 
     app = FastAPI(title="document-seperater-playground LAB API", version=API_VERSION)
@@ -49,11 +72,31 @@ def create_app(
         body = {
             "status": "ready" if ready else "not_ready",
             "env": settings.env.value,
-            "provider_mode": settings.provider_mode.value,
+            "provider_mode": settings.provider_mode.value,     # legacy setting of THIS service; question generation does not use it
+            "generation": generation(),                        # what is true about the model path (Issue #181)
             "checks": results,
         }
         return JSONResponse(body, status_code=200 if ready else 503)
 
     app.include_router(documents_router)
+    app.include_router(audit_router)
+    app.include_router(logs_router)
+    app.include_router(runs_router)
+    app.include_router(results_router)
+    app.include_router(comparisons_router)
+    app.include_router(jobs_router)
+    app.include_router(parse_jobs_router)
+    app.include_router(parse_results_router)
+    app.include_router(lineage_router)
+    app.include_router(benchmarks_router)
+    app.include_router(benchmark_build_router)
+    app.include_router(benchmark_generate_router)
+    app.include_router(benchmark_freeze_router)
+    app.include_router(benchmark_baseline_router)
+    app.include_router(benchmark_method_router)
+    app.include_router(benchmark_review_router)
+    app.include_router(benchmark_external_router)
+
+    configure_openapi(app)
 
     return app

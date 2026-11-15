@@ -322,6 +322,63 @@ class RequestLoggingIntegrationTests(unittest.TestCase):
             req_logger.propagate = saved_propagate
 
 
+    def test_business_route_logging_uses_router_template_and_never_leaks_concrete_path_secrets(self):
+        events: list[RequestLogEvent] = []
+        app = create_app(
+            make_settings(),
+            checks={"db": lambda: CheckResult(True, "ok")},
+            log_sink=events.append,
+        )
+        client = TestClient(app)
+        secret_doc_id = "canary-doc-secret-id-987654"
+        secret_query = "canary-query-secret-4321"
+        secret_auth = "canary-bearer-secret-token-1122"
+
+        resp = client.get(
+            f"/api/v1/documents/{secret_doc_id}?token={secret_query}",
+            headers={"Authorization": f"Bearer {secret_auth}"},
+        )
+        # Endpoint may fail authentication / DB with 503 or 401, but event is emitted
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assert_valid_event_structure(ev)
+        self.assertEqual(ev.route, "/api/v1/documents/{document_id}")
+        self.assertEqual(ev.operation_name, "http.get_document_v1")
+        self.assertNotIn(secret_doc_id, ev.route)
+        self.assertNotIn(secret_doc_id, ev.operation_name)
+        self.assertNotIn(secret_doc_id, ev.to_json())
+        self.assertNotIn(secret_query, ev.to_json())
+        self.assertNotIn(secret_auth, ev.to_json())
+
+    def test_unknown_route_fallback_stays_bounded_and_never_leaks_secrets_in_concrete_paths(self):
+        events: list[RequestLogEvent] = []
+        app = create_app(
+            make_settings(),
+            checks={"db": lambda: CheckResult(True, "ok")},
+            log_sink=events.append,
+        )
+        client = TestClient(app)
+        secret_path = "canary-unmatched-secret-segment-8888"
+        secret_query = "canary-unmatched-query-secret-7777"
+        secret_auth = "canary-unmatched-auth-secret-6666"
+
+        resp = client.get(
+            f"/unmatched/path/{secret_path}?param={secret_query}",
+            headers={"Authorization": f"Bearer {secret_auth}"},
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assert_valid_event_structure(ev)
+        self.assertEqual(ev.route, ROUTE_UNMATCHED)
+        self.assertEqual(ev.operation_name, "http.unmatched")
+        self.assertEqual(ev.status, OUTCOME_CLIENT_ERROR)
+        self.assertEqual(ev.http_status, 404)
+        self.assertNotIn(secret_path, ev.to_json())
+        self.assertNotIn(secret_query, ev.to_json())
+        self.assertNotIn(secret_auth, ev.to_json())
+
+
 class UvicornSubprocessIntegrationTests(unittest.TestCase):
     def test_real_uvicorn_subprocess_safe_startup_emits_200_404_503_json_logs_without_canary_leaks(self):
         api_dir = Path(__file__).resolve().parents[2] / "services" / "api"
@@ -880,6 +937,7 @@ class AdversarialLeakageAndBoundaryTests(unittest.TestCase):
             RequestLoggingMiddleware(dummy, env="test", provider_mode=ProviderMode.mock)  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             RequestLoggingMiddleware(dummy, env=Environment.test, provider_mode="mock")  # type: ignore[arg-type]
+
 
 
 if __name__ == "__main__":

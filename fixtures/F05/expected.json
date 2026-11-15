@@ -21,7 +21,7 @@
       "outcome": "flag",
       "reason": "xref_repaired",
       "page_count": 2,
-      "note": "可修復；必須記錄修復與警告，不得靜默當作正常檔"
+      "note": "可修復；必須記錄修復與警告，不得靜默當作正常檔。此為 importer／CLI 診斷結果；認證上傳路徑（#97）對任何 pypdf 警告一律硬拒絕為 422 corrupt_pdf，不走 flag"
     },
     "F05.encrypted": {
       "outcome": "reject",
