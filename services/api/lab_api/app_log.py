@@ -93,7 +93,16 @@ class ContextScope:
 
 
 _SENSITIVE = re.compile(r"key|token|secret|password|passwd|auth|url|dsn|cookie|credential|header", re.I)
-_RAW = {"text", "system", "user", "prompt", "reply", "stdout", "stderr", "data", "shown_text", "quote", "content", "file_content", "body", "by_page", "response", "payload", "raw", "raw_text", "normalized_text"}
+# Provider prompts and raw model replies (and bytes) are NEVER shown: length + sha256 only (AGENTS.md: no raw provider payloads).
+# "text" and "content" are ambiguous (lab-gen result rows carry the model's reply under "text"), so they stay hash-only too.
+_HASH_ONLY = {"system", "user", "prompt", "reply", "stdout", "stderr", "data", "body", "response", "payload", "raw", "raw_text",
+              "text", "content", "hit_text", "by_page", "normalized_text"}
+_HASH_ONLY_PARTS = ("prompt", "reply", "stdout", "stderr", "payload", "raw")
+# The owner's own data (question, reference answer, facts, a developer's answer and quotes, the system's matched text, verdict
+# reasons): a bounded preview (first 120 chars) + length + hash. The file is owner-local and git-ignored.
+_PREVIEW = {"shown_text", "quote", "quotes", "file_content", "answer", "answers", "reference_answer", "facts", "fact_statements",
+            "question_text", "matched_text", "verdict_reason", "claim", "claims", "answer_text"}
+PREVIEW_CHARS = 120
 _DSN = re.compile(r"(?i)postgres(?:ql)?(?:\+[a-z0-9]+)?://[^\s\"'<>]+")
 
 
@@ -106,16 +115,43 @@ def _digest(value) -> str:
     return f"<{len(value)} {'chars' if isinstance(value, str) else 'bytes'} sha256:{hashlib.sha256(data).hexdigest()[:16]}>"
 
 
+_SAFE_NAMES = {"question_key", "evidence_key", "qkey"}      # identifiers of benchmark items, not credentials
+
+
 def _field(name, value, depth=0):
-    if _SENSITIVE.search(name):
+    if _SENSITIVE.search(name) and name.lower() not in _SAFE_NAMES:
         return "'[REDACTED]'"
-    if name.lower() in _RAW or name.lower().endswith("_text"):
+    low = name.lower()
+    if low in _HASH_ONLY or any(part in low for part in _HASH_ONLY_PARTS):
         return _raw_value(value, depth)
+    if low in _PREVIEW or low.endswith(("_text", "_answer", "_quote", "_quotes")):
+        return preview_value(value, depth)
     return bound_value(value, depth=depth)
 
 
+def preview_value(value, depth=0):
+    """Owner data: strings become ``<N chars sha256:..>'first 120 chars'`` (redacted first); containers leaf by leaf."""
+    try:
+        if type(value) is str:
+            return _digest(value) + repr(_clean(value)[:PREVIEW_CHARS])
+        if type(value) in (bytes, bytearray):
+            return _digest(value)
+        if depth > 4:
+            return "..."
+        if type(value) is dict:
+            items = [f"{_clean(str(k)[:80])!r}: {_field(k, v, depth + 1) if type(k) is str else preview_value(v, depth + 1)}"
+                     for k, v in itertools.islice(value.items(), 8)]
+            return "{" + ", ".join(items) + (f", ... len={len(value)}" if len(value) > 8 else "") + "}"
+        if type(value) in (list, tuple, set, frozenset):
+            items = [preview_value(v, depth + 1) for v in itertools.islice(value, 8)]
+            return "[" + ", ".join(items) + (f", ... len={len(value)}" if len(value) > 8 else "") + "]"
+        return bound_value(value, depth=depth)
+    except Exception:
+        return "<unserializable>"
+
+
 def _raw_value(value, depth=0):
-    """Raw-named mappings (e.g. hit_text) must not expose short text leaves."""
+    """Provider text: never any content, only length + sha256 (nested leaves too)."""
     if type(value) in (str, bytes, bytearray):
         return _digest(value)
     if depth > 4:
@@ -197,6 +233,20 @@ def format_log_line(mode: str, func_name: str, args_repr: str, status: str, retu
     return f"{ts} {svc} {cid} [{mode}] FUNCTION:{{{func_name}({args_repr})}} {status}{ret_part}"
 
 
+_BANNER_KEY: tuple = ()
+BANNER = ("owner-local diagnostic log (git-ignored): shows a 120-char preview of the owner's own question/answer/quote text; "
+          "never keys, tokens, DSNs, provider prompts or raw model replies")
+
+
+def _banner_once() -> None:
+    global _BANNER_KEY
+    key = (os.getpid(), get_log_path())
+    if _BANNER_KEY == key:
+        return
+    _BANNER_KEY = key
+    _write_log_line(_clean(format_log_line("OP", "app_log_start", f"pid={os.getpid()}", BANNER)))
+
+
 def log_event(mode: str, func_name: str, status: str, return_val: Any = None,
               stage: str | None = None, is_stage: bool = False, **params) -> None:
     global _LOG_FAILURES
@@ -206,6 +256,7 @@ def log_event(mode: str, func_name: str, status: str, return_val: Any = None,
             return
         if lvl == "stages" and not is_stage and stage is None and mode not in ("ALARM", "ERROR"):
             return
+        _banner_once()
         parts = [f"stage={stage!r}"] if stage is not None else []
         for k, v in itertools.islice(params.items(), 32):
             parts.append(f"{k}={_field(k, v)}")
@@ -236,8 +287,10 @@ def _reason(exc):
         return "operation_failed"
 
 
-def app_traced(stage: str | None = None, is_stage: bool = False):
-    """Decorator to log entry ([CALL]), exit ([RETURN]), and failure ([ERROR])."""
+def app_traced(stage: str | None = None, is_stage: bool = False, hash_only: Sequence[str] = ()):
+    """Decorator to log entry ([CALL]), exit ([RETURN]), and failure ([ERROR]).
+
+    ``hash_only`` names parameters that carry a provider reply: they are logged as length + sha256 only, never as a preview."""
     def decorator(fn: Callable) -> Callable:
         name = fn.__name__
         sig = None
@@ -257,6 +310,9 @@ def app_traced(stage: str | None = None, is_stage: bool = False):
                     params = dict(kwargs)
             else:
                 params = dict(kwargs)
+            for k in hash_only:
+                if k in params:
+                    params[k + "_raw"] = params.pop(k)
             # Remove self / cls
             params.pop("self", None)
             params.pop("cls", None)

@@ -27,6 +27,13 @@ class AppLogFlowTests(unittest.TestCase):
             for stage in ("promote", "plan", "generate", "validate", "freeze", "export", "external_submission", "rule_scoring", "judge", "results", "api"):
                 for mode in ("CALL", "RETURN"):
                     self.assertTrue(any(f"[{mode}]" in line and f"stage='{stage}'" in line for line in text.splitlines()), (stage, mode))
+            # PM-DECISION #191: every function on the path of validation, rule scoring, quotes, judge and the freeze gate is logged
+            for fn in ("code_checks", "verdict_for", "unit_hit", "quote_located", "validate_line", "build_judge_call", "check_verdict_ex",
+                       "derive", "freeze_gate", "score_rule_metrics"):
+                self.assertIn(fn, text, fn)
+            self.assertIn("app_log_start", text.splitlines()[0])
+            self.assertRegex(text, r"api_request.*\{Return: \{'status_code': \d+, 'duration_ms': \d+\}\}")
+            self.assertRegex(text, r"<\d+ chars sha256:[0-9a-f]{16}>'")      # owner data: length + hash + a bounded preview
             self.assertIn("quote_not_found", text)
             self.assertIn("judge_source_filter", text)
             self.assertNotIn("postgresql://", text)

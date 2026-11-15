@@ -34,6 +34,7 @@ class ExclusionRequest(BaseModel):
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 
 
+@app_traced(stage="exclusion")
 def _authorize(conn: psycopg.Connection, project_id: uuid.UUID, actor_id: uuid.UUID, owner_only: bool) -> str:
     try:
         decision = authorize(conn, project_id, actor_id, BUILD_ACTION)
@@ -99,6 +100,7 @@ def _details(conn: psycopg.Connection, benchmark_id: uuid.UUID, document_version
     return out
 
 
+@app_traced(stage="exclusion")
 def _review(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int) -> dict:
     _authorize(conn, project_id, actor_id, owner_only=False)
     benchmark_id, document_version_id, status, _ = _find(conn, project_id, logical_id, revision)

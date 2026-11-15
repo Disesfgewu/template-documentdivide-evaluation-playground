@@ -121,6 +121,7 @@ def decode_cursor(cursor: str, evaluation_id: uuid.UUID, filters: dict | None = 
     return data["o"], data["m"]
 
 
+@app_traced(stage="results")
 def _authorize_results(conn: psycopg.Connection, actor_id: uuid.UUID, run_id: uuid.UUID) -> tuple:
     row = conn.execute("SELECT r.project_id, r.benchmark_id, m.owner_actor_id FROM runs r "
                        "JOIN method_revisions m ON m.id = r.method_revision_id WHERE r.id = %s", (run_id,)).fetchone()

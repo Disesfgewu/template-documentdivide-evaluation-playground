@@ -155,7 +155,13 @@ def _score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_cod
         unit_regions.setdefault(key, []).append(rules.Region(page, _fraction(x0), _fraction(y0), _fraction(x1), _fraction(y1)))
     returned = [rules.Region(r.page_index, _fraction(r.bbox[0]), _fraction(r.bbox[1]), _fraction(r.bbox[2]), _fraction(r.bbox[3]))
                 for h in response.retrieved_hits for r in h.regions]
-    matched = {k for k, regs in unit_regions.items() if rules.unit_hit(returned, regs)}
+    matched = set()
+    for k, regs in unit_regions.items():
+        hit = rules.unit_hit(returned, regs)
+        log_op("unit_hit", question_key=qkey, evidence_key=k, hit=hit, gold_regions=len(regs), returned_regions=len(returned),
+               stage="rule_scoring")
+        if hit:
+            matched.add(k)
     first_set_regions = [r for k in sorted(gold_sets[0]) for r in unit_regions.get(k, [])]
     out = [rules.recall_at_k(qkey, gold_sets, matched, GRADER_REVISION),
            rules.complete_at_k(qkey, gold_sets, matched, GRADER_REVISION),

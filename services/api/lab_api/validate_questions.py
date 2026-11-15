@@ -91,6 +91,7 @@ def code_checks(shown_text: str, reference_answer: str, facts: Sequence[str]) ->
             "passed": not missing_numbers and all(c >= MIN_FACT_COVERAGE for c in fact_cov)}
 
 
+@app_traced(stage="validate", hash_only=("text",))
 def parse_validator_reply(text: str):
     """(supported, answerable, needs_outside_context) as bools, or None if the reply is not exactly that JSON."""
     t = (text or "").strip()

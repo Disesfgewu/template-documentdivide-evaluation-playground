@@ -183,6 +183,8 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         # A claim with no passage the judge could see (an uploaded answer whose every quote was not found, or that cited nothing) is
         # unsupported BY CONSTRUCTION, whatever the model says: faithfulness and citation scores never get credit from an invented source.
         no_passage = {cid for cid, _, ids in it["claims"] if not ids}
+        if no_passage:
+            log_op("judge_unsupported_by_construction", question_key=qkey, claims=sorted(no_passage), stage="judge")
         supported = {cid: ((False, set()) if cid in no_passage else (ok, set(hids))) for cid, ok, hids in verdict.claims}
         citations = [(cit.claim_id, frozenset({cit.hit_id}), cit.hit_id in supported[cit.claim_id][1]) for cit in it["response"].citations]
         fully = sum(1 for ok, hids in supported.values() if ok and hids)

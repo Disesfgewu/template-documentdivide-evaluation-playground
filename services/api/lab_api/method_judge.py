@@ -73,7 +73,7 @@ def build_judge_call(call_id: str, fact_statements: Sequence[str], answer_text: 
     return CallSpec(id=call_id, system=SYSTEM, user=user)
 
 
-@app_traced(stage="judge")
+@app_traced(stage="judge", hash_only=("text",))
 def parse_judge_reply_ex(text: str) -> tuple[Optional[dict], str]:
     """(verdict as a plain dict, "") or (None, code). The ENVELOPE is read like the question generator's replies (prose before or after the
     JSON, a code fence anywhere; see ``generate_prompts.read_json_object``); the CONTENT stays strict: exactly the fact and claim entries with
