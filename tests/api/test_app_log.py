@@ -101,7 +101,8 @@ class AppLogTests(unittest.TestCase):
             log_error("run_lab_gen", "RuntimeError", "child_crashed", stage="generate")
 
         lines = self.read_lines()
-        self.assertEqual(len(lines), 5)
+        self.assertIn("app_log_start", lines[0])        # the once-per-start owner-local banner is the first line, in the same format
+        self.assertEqual(len(lines), 6)
         for line in lines:
             self.assertRegex(line, LOG_LINE_REGEX, f"Line does not match fixed format: {line}")
 

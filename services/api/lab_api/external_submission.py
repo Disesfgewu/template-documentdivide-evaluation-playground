@@ -87,6 +87,7 @@ class Parsed:
 
 
 def _problem(problems: list, line: int, code: str) -> None:
+    log_alarm("validate_line", code, stage="external_submission", line=line)
     if len(problems) < MAX_PROBLEMS_LISTED:
         problems.append({"line": line, "code": code})
 
@@ -142,9 +143,11 @@ def parse_file(text: str, question_keys: set, page_count: int) -> Parsed:
             continue
         code.line = number
         entries[qid] = code
+        log_op("validate_line", "valid", stage="external_submission", line=number, question_key=qid)
     return Parsed(header, entries, problems, n_lines, ignored)
 
 
+@app_traced(stage="external_submission")
 def _check_entry(obj: dict, page_count: int):
     status = obj.get("status")
     if status not in ("answered", "abstained"):
@@ -235,6 +238,8 @@ WHOLE_PAGE = ((0.0, 0.0, 1.0, 1.0), "page")
 @app_traced(stage="external_submission")
 def locate(quote: str, page_index: int, by_page: dict) -> Located:
     loc = _locate_inner(quote, page_index, by_page)
+    log_op("quote_located", match_quality=loc.quality, coverage=loc.coverage, page_index=page_index, quote=quote,
+           stage="external_submission")
     if not loc.found:
         log_alarm("locate", "quote_not_found", stage="external_submission", page_index=page_index, quote=quote)
     return loc

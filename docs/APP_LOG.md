@@ -24,18 +24,24 @@ exclusion/freeze/export, external submission parsing/quote matching, rule scorin
 judge building/parsing and results. Helpers add page statuses, dropped-reply
 alarms, quote-not-found alarms, score numerators/denominators and judge source
 selection. UTC timestamp, service and request/job context precede each event.
-Raw prompts/replies/document-text fields and bytes are represented by length/hash;
-unknown objects are never repr-dumped. Secrets and PostgreSQL DSNs are redacted.
+Provider prompts, raw model replies, generic `text`/`content` fields, document page text and bytes are
+represented by length + sha256 only. The owner's OWN data (question text, reference answer, facts, a developer's
+answer and quotes, the system's matched text, verdict reasons) is shown as `<N chars sha256:..>'first 120 chars'`
+(redacted first); the file is owner-local and git-ignored, and a banner line (`app_log_start`) says so once per
+process and file. Functions that receive a model reply under a generic name pass `hash_only=("text",)` to `app_traced`.
+Item identifiers such as `question_key` are not redacted; credentials (`*key*`, token, secret, auth, url, dsn) are.
+Unknown objects are never repr-dumped. Secrets and PostgreSQL DSNs are redacted.
 The file sink swallows and counts failures (`get_log_failures()`); business audit
 failures retain their existing behavior.
 
-This is a draft increment, not complete #191 acceptance. Remaining work includes
-an exhaustive every-function path inventory, detailed per-line submission and
-SQL/state-transition operations, complete participant-phase telemetry isolation
-proof, actual multi-service demo acceptance and a controlled demo overhead
-measurement. Fake-child/real-PostgreSQL tests are not real-provider evidence.
-The small local test timing comparison is dominated by database setup and must
-not be reported as a performance guarantee. SPEC #15/Epic release gates remain.
+Coverage added for #191 (PM-DECISION): `code_checks`, `verdict_for`, `parse_validator_reply` (reply hash-only),
+each submission line (`validate_line`, valid or its fixed code), `_check_entry`, each quote (`quote_located` with
+match quality and coverage), each `unit_hit` decision, `derive`/`check_verdict_ex` and the unsupported-by-construction
+branch, the freeze gate counts (`freeze_gate`), review/authorize/export/exclusion, and each API request (CALL with
+the method; RETURN with the route template, status and `duration_ms`).
+Still not done: a run on the owner's real stack with the real model (the coding agent never runs a real model; the
+owner's `scripts/demo.sh generate` run is theirs). The local measurement used real PostgreSQL and a fake lab-gen child;
+its timing is dominated by database setup and is not a performance guarantee. SPEC #15/Epic release gates remain.
 
 HTTP completion is observed at the ASGI send boundary, after the final body and
 any requested trailers. Stream failures, failed sends, cancellation and incomplete

@@ -72,6 +72,8 @@ class SafetyTests(unittest.TestCase):
             for p in files:
                 self.assertEqual(p.stat().st_mode & 0o007, 0)
                 for line in p.read_text().splitlines():
+                    if "app_log_start" in line:      # the once-per-process owner-local banner
+                        continue
                     self.assertEqual(line.count("FUNCTION:"), 1)
                     self.assertIn("[OP]", line)
                     self.assertIn("concurrent_write", line)
@@ -118,3 +120,50 @@ class SafetyTests(unittest.TestCase):
             self.assertLess(len(line.encode()), 16384)
             self.assertIn(")} ok {Return:", line)
             self.assertTrue(line.endswith("}\n"))
+
+
+class OwnerPreviewTests(unittest.TestCase):
+    """Issue #191 PM-DECISION: the owner's own data is shown as a 120-char preview; provider prompts/replies never."""
+
+    def _run(self, fn):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, LAB_APP_LOG="full", LAB_APP_LOG_FILE=d + "/app.log"):
+            fn()
+            return Path(d + "/app.log").read_text()
+
+    def test_owner_data_has_a_120_char_preview_with_length_and_hash(self):
+        long_answer = "The wall thickness is 250 mm. " * 20
+        text = self._run(lambda: log.log_op("probe", question_text="What is the wall thickness?", reference_answer=long_answer,
+                                            quote="250 mm", facts=["a fact"], verdict_reason="the answer is supported"))
+        self.assertIn("What is the wall thickness?", text)
+        self.assertIn("'250 mm'", text)
+        self.assertIn("the answer is supported", text)
+        self.assertIn(f"<{len(long_answer)} chars sha256:", text)
+        self.assertIn(long_answer[:120], text)
+        self.assertNotIn(long_answer[:121], text)
+
+    def test_provider_prompts_and_replies_stay_hash_only(self):
+        @log.app_traced(stage="judge", hash_only=("text",))
+        def parse_reply(text):
+            return {"ok": True}
+        text = self._run(lambda: (parse_reply("MODEL_REPLY_SENTINEL"),
+                                  log.log_op("rows", rows=[{"text": "ROW_REPLY_SENTINEL", "status": "ok"}], system="SYSTEM_SENTINEL",
+                                             user="USER_SENTINEL")))
+        for secret in ("MODEL_REPLY_SENTINEL", "ROW_REPLY_SENTINEL", "SYSTEM_SENTINEL", "USER_SENTINEL"):
+            self.assertNotIn(secret, text)
+        self.assertIn("sha256:", text)
+
+    def test_banner_is_written_once_per_process_and_says_the_file_is_owner_local(self):
+        def go():
+            log.log_op("a")
+            log.log_op("b")
+        text = self._run(go)
+        self.assertEqual(text.count("app_log_start"), 1)
+        self.assertIn("owner-local", text.splitlines()[0])
+
+    def test_item_identifiers_named_key_are_not_redacted_but_credentials_are(self):
+        text = self._run(lambda: log.log_op("probe", question_key="q-3", evidence_key="e-1", api_key="sk-ant-SENTINEL",
+                                            idempotency_key="IDEM_SENTINEL", token="TOKEN_SENTINEL"))
+        self.assertIn("question_key='q-3'", text)
+        self.assertIn("evidence_key='e-1'", text)
+        for secret in ("sk-ant-SENTINEL", "IDEM_SENTINEL", "TOKEN_SENTINEL"):
+            self.assertNotIn(secret, text)

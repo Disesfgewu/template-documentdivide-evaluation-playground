@@ -74,6 +74,7 @@ def _freeze(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID
                 "WHERE q.benchmark_id = %s GROUP BY 1", (benchmark_id,)).fetchall())
             n_questions = sum(int(v) for v in totals.values())
             counts = {k: int(verdicts.get(k, 0)) for k in ("pass", "fail", "needs_review", "unvalidated")}
+            log_op("freeze_gate", active_questions=n_questions, verdicts=counts, benchmark_status=status, stage="freeze")
             excluded = [{"id": str(i), "ordinal": int(o), "reason": r} for i, o, r in conn.execute(
                 "SELECT q.id, q.ordinal, e.reason FROM questions q JOIN LATERAL (SELECT kind, reason FROM question_exclusions x "
                 "WHERE x.question_id = q.id ORDER BY x.seq DESC LIMIT 1) e ON e.kind = 'exclude' WHERE q.benchmark_id = %s "

@@ -1,5 +1,6 @@
 """Observe actual ASGI completion, including streamed bodies and trailers."""
 import asyncio
+import time
 import uuid
 from .app_log import ContextScope, log_event
 
@@ -17,6 +18,7 @@ class AppLogMiddleware:
         trailers_complete = False
         disconnected = False
         request_id = "req-" + uuid.uuid4().hex
+        started = time.monotonic()
 
         async def observe_receive():
             nonlocal disconnected
@@ -39,10 +41,11 @@ class AppLogMiddleware:
                 trailers_complete = True
 
         def event(mode, reason):
-            route = getattr(scope.get("route"), "path", "unmatched")
+            # the route template is only known once the router has matched: the CALL line has the method only
+            extra = {} if mode == "CALL" else {"route": getattr(scope.get("route"), "path", "unmatched")}
             log_event(mode, "api_request", reason, stage="api", is_stage=True,
-                      method=scope.get("method"), route=route,
-                      return_val={"status_code": status})
+                      method=scope.get("method"), **extra,
+                      return_val={"status_code": status, "duration_ms": round((time.monotonic() - started) * 1000)})
 
         with ContextScope(service="api", request_id=request_id, stage="api"):
             event("CALL", "started")
