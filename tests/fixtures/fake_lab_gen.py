@@ -36,6 +36,10 @@ def cost(tin, tout):
     return -(-(tin * m["input_micros_per_mtok"] + tout * m["output_micros_per_mtok"]) // 1_000_000)
 
 
+if os.environ.get("FAKE_LAB_GEN_CAPTURE"):       # tests only: record exactly what the model would have been shown
+    with open(os.environ["FAKE_LAB_GEN_CAPTURE"], "a", encoding="utf-8") as capture_file:
+        for c in inp["calls"]:
+            capture_file.write(json.dumps({"id": c["id"], "system": c["system"], "user": c["user"]}, ensure_ascii=False) + "\n")
 calls, spent, held = [], 0, 0
 for i, c in enumerate(inp["calls"]):
     req = hashlib.sha256(f'{m["name"]}\x00{c["system"]}\x00{c["user"]}'.encode()).hexdigest()

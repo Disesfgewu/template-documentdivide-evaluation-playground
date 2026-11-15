@@ -72,9 +72,12 @@ def start_judge_run(conn: psycopg.Connection, project_id: uuid.UUID, run_id: uui
             raise JudgeRunError("benchmark_is_not_frozen")
         if run_status not in ("completed", "completed_with_errors"):
             raise JudgeRunError("the_run_is_not_finished")
-        if conn.execute("SELECT 1 FROM generate_jobs WHERE project_id = %s AND run_id = %s AND phase = 'answer'",
-                        (project_id, run_id)).fetchone() is None:
-            raise JudgeRunError("only_an_answering_method_run_can_be_judged")
+        answering = conn.execute("SELECT 1 FROM generate_jobs WHERE project_id = %s AND run_id = %s AND phase = 'answer'",
+                                 (project_id, run_id)).fetchone()
+        uploaded = conn.execute("SELECT 1 FROM runs r JOIN method_revisions m ON m.id = r.method_revision_id WHERE r.id = %s "
+                                "AND m.execution_mode = 'offline_file'", (run_id,)).fetchone()
+        if answering is None and uploaded is None:      # a model-answering run or an uploaded developer file; a retrieval-only baseline has no answer
+            raise JudgeRunError("only_a_run_with_answers_can_be_judged")
         active = conn.execute(
             "SELECT 1 FROM generate_jobs g JOIN jobs j ON j.project_id = g.project_id AND j.id = g.job_id "
             "WHERE g.project_id = %s AND g.benchmark_id = %s AND g.phase IN ('judge', 'answer') AND j.status::text = ANY(%s) LIMIT 1",
@@ -140,6 +143,19 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                 cited: dict[str, list[str]] = {}
                 for cit in resp.citations:
                     cited.setdefault(cit.claim_id, []).append(cit.hit_id)
+                # An UPLOADED developer file: the judge may only see sources whose quote was FOUND on the cited page, and only the system
+                # parse's own text of the matched units, never the developer's string. A model-answering run has no match rows: its hits
+                # are what the method retrieved from the PDF itself.
+                matches = conn.execute("SELECT hit_key, matched_text FROM submission_source_matches WHERE submission_id = %s", (sid,)).fetchall()
+                offline = bool(matches)
+                found = {k: t for k, t in matches if t is not None}
+                if offline:
+                    item["hit_text"] = found
+                    item["not_found"] = len(matches) - len(found)
+                    cited = {cid: [h for h in hids if h in found] for cid, hids in cited.items()}
+                else:
+                    item["hit_text"] = {h.hit_id: h.content for h in resp.retrieved_hits}
+                    item["not_found"] = 0
                 item["response"] = resp
                 item["claims"] = [(c.claim_id, c.text, list(dict.fromkeys(cited.get(c.claim_id, [])))) for c in resp.answer.claims]
             out.append(item)
@@ -152,15 +168,17 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         calls = []
         for it in load(conn, benchmark_id):
             if judgeable(it):
-                hits = {h.hit_id: h.content for h in it["response"].retrieved_hits}
-                calls.append(build_judge_call(it["call_id"], it["facts"], it["response"].answer.text, it["claims"], hits))
+                calls.append(build_judge_call(it["call_id"], it["facts"], it["response"].answer.text, it["claims"], it["hit_text"]))
         return calls
 
     def derive(it, verdict, grader) -> list:
         qkey = it["qkey"]
         score = {label: Fraction(1) if v == "stated" else Fraction(0) for label, v in verdict.facts}
         facts = [(w, score[f"f{i}"]) for i, w in enumerate(it["weights"], start=1)]
-        supported = {cid: (ok, set(hids)) for cid, ok, hids in verdict.claims}
+        # A claim with no passage the judge could see (an uploaded answer whose every quote was not found, or that cited nothing) is
+        # unsupported BY CONSTRUCTION, whatever the model says: faithfulness and citation scores never get credit from an invented source.
+        no_passage = {cid for cid, _, ids in it["claims"] if not ids}
+        supported = {cid: ((False, set()) if cid in no_passage else (ok, set(hids))) for cid, ok, hids in verdict.claims}
         citations = [(cit.claim_id, frozenset({cit.hit_id}), cit.hit_id in supported[cit.claim_id][1]) for cit in it["response"].citations]
         fully = sum(1 for ok, hids in supported.values() if ok and hids)
         correctness = rules.correctness(qkey, facts, False, grader)

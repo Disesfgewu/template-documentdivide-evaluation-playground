@@ -1,0 +1,76 @@
+{
+  "line": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "one line of the answers file (not the optional header line)",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "question_id",
+      "status"
+    ],
+    "properties": {
+      "question_id": {
+        "type": "string",
+        "description": "the question_id of the questions file"
+      },
+      "status": {
+        "enum": [
+          "answered",
+          "abstained"
+        ]
+      },
+      "answer": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4000,
+        "description": "answered only"
+      },
+      "sources": {
+        "type": "array",
+        "maxItems": 10,
+        "description": "answered only: the passages the answer relied on",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "page",
+            "text"
+          ],
+          "properties": {
+            "page": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "1-based page of the ORIGINAL PDF"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 2000,
+              "description": "the quoted passage, copied from that page (at least 6 non-space characters)"
+            }
+          }
+        }
+      },
+      "reason": {
+        "type": "string",
+        "maxLength": 2000,
+        "description": "abstained only"
+      }
+    }
+  },
+  "header": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "method_name": {
+        "type": "string"
+      },
+      "method_version": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    },
+    "description": "optional first line"
+  }
+}
