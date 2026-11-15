@@ -150,6 +150,8 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                 matches = conn.execute("SELECT hit_key, matched_text FROM submission_source_matches WHERE submission_id = %s", (sid,)).fetchall()
                 offline = bool(matches)
                 found = {k: t for k, t in matches if t is not None}
+                log_op("judge_source_filter", stage="judge", offered_hit_ids=sorted(found),
+                       excluded_hit_ids=[k for k, t in matches if t is None], reason="quote_not_found")
                 if offline:
                     item["hit_text"] = found
                     item["not_found"] = len(matches) - len(found)

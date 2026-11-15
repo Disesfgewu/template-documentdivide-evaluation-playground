@@ -236,7 +236,7 @@ WHOLE_PAGE = ((0.0, 0.0, 1.0, 1.0), "page")
 def locate(quote: str, page_index: int, by_page: dict) -> Located:
     loc = _locate_inner(quote, page_index, by_page)
     if not loc.found:
-        log_alarm("locate", f"quote not found on page {page_index}: {quote[:80]!r}", stage="external_submission")
+        log_alarm("locate", "quote_not_found", stage="external_submission", page_index=page_index, quote=quote)
     return loc
 
 

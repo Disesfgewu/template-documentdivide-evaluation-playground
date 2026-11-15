@@ -156,7 +156,7 @@ class AppLogTests(unittest.TestCase):
         stats.drop("check:contract_invalid")
 
         lines = self.read_lines()
-        self.assertTrue(any("[ALARM]" in l and "quote not found" in l for l in lines), lines)
+        self.assertTrue(any("[ALARM]" in l and "quote_not_found" in l for l in lines), lines)
         self.assertTrue(any("[ALARM]" in l and "reply dropped: check:contract_invalid" in l for l in lines), lines)
         for line in lines:
             self.assertRegex(line, LOG_LINE_REGEX)
@@ -199,12 +199,12 @@ class AppLogTests(unittest.TestCase):
         # Large dict
         large_dict = {f"k{i}": i for i in range(50)}
         bounded_dict = bound_value(large_dict)
-        self.assertIn("<dict len=50", bounded_dict)
+        self.assertIn("len=50", bounded_dict)
 
         # Large list
         large_list = list(range(50))
         bounded_list = bound_value(large_list)
-        self.assertIn("<list len=50", bounded_list)
+        self.assertIn("len=50", bounded_list)
 
     def test_lab_app_log_off_writes_nothing(self):
         os.environ["LAB_APP_LOG"] = "off"

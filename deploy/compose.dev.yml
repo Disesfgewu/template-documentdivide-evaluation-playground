@@ -64,6 +64,7 @@ services:
     volumes:
       - lab-artifacts:/var/lib/lab/artifacts
       - ../logs:/var/log/lab
+    group_add: ["${LAB_LOG_GID:-1000}"]
     depends_on:
       db:
         condition: service_healthy
@@ -100,6 +101,7 @@ services:
     volumes:
       - lab-artifacts:/var/lib/lab/artifacts
       - ../logs:/var/log/lab
+    group_add: ["${LAB_LOG_GID:-1000}"]
     depends_on:
       db:
         condition: service_healthy
@@ -143,6 +145,7 @@ services:
     volumes:
       - lab-artifacts:/var/lib/lab/artifacts      # the answering method reads the original PDF and stores its submissions
       - ../logs:/var/log/lab
+    group_add: ["${LAB_LOG_GID:-1000}"]
     depends_on:
       db:
         condition: service_healthy

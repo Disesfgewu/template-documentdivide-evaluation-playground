@@ -10,7 +10,10 @@ Where:
 """
 from __future__ import annotations
 
-import asyncio
+import dataclasses
+import itertools
+import re
+import uuid
 import contextvars
 import fcntl
 import functools
@@ -89,99 +92,81 @@ class ContextScope:
             var.reset(token)
 
 
+_SENSITIVE = re.compile(r"key|token|secret|password|passwd|auth|url|dsn|cookie|credential|header", re.I)
+_RAW = {"text", "system", "user", "prompt", "reply", "stdout", "stderr", "data", "shown_text", "quote", "content", "file_content", "body", "by_page", "response", "payload", "raw", "raw_text", "normalized_text"}
+_DSN = re.compile(r"(?i)postgres(?:ql)?(?:\+[a-z0-9]+)?://[^\s\"'<>]+")
+
+
+def _clean(value: str) -> str:
+    return _DSN.sub("[REDACTED]", redact(value))
+
+
+def _digest(value) -> str:
+    data = value.encode("utf-8", errors="replace") if isinstance(value, str) else bytes(value)
+    return f"<{len(value)} {'chars' if isinstance(value, str) else 'bytes'} sha256:{hashlib.sha256(data).hexdigest()[:16]}>"
+
+
+def _field(name, value, depth=0):
+    if _SENSITIVE.search(name):
+        return "'[REDACTED]'"
+    if (name.lower() in _RAW or name.lower().endswith("_text")) and isinstance(value, (str, bytes, bytearray)):
+        return _digest(value)
+    return bound_value(value, depth=depth)
+
+
 def bound_value(val: Any, max_str_chars: int = 300, max_items: int = 8, depth: int = 0) -> str:
-    """Format and bound a value with mandatory secret redaction."""
+    """Bound every traversal; never invoke application objects' repr/str methods."""
     try:
         if depth > 4:
             return "..."
-        if val is None:
-            return "None"
-        if isinstance(val, (int, float, bool)):
+        if val is None or type(val) in (int, float, bool):
+            return str(val)[:100]
+        if isinstance(val, uuid.UUID):
             return str(val)
-        if isinstance(val, (bytes, bytearray)):
-            h = hashlib.sha256(val).hexdigest()[:16]
-            return f"<{len(val)} bytes sha256:{h}>"
-        if isinstance(val, str):
-            clean = redact(val)
-            if len(clean) > max_str_chars:
-                h = hashlib.sha256(val.encode("utf-8", errors="replace")).hexdigest()[:16]
-                prefix = clean[:120]
-                return f"<{len(clean)} chars sha256:{h}>{prefix}"
-            return repr(clean)
-        if isinstance(val, dict):
-            if len(val) > max_items:
-                keys = list(val.keys())[:max_items]
-                return f"<dict len={len(val)} keys={[str(k) for k in keys]}>"
+        if type(val) in (bytes, bytearray):
+            return _digest(val)
+        if type(val) is str:
+            clean = _clean(val)
+            return _digest(val) + repr(clean[:120]) if len(clean) > max_str_chars else repr(clean)
+        if type(val) is dict:
             items = []
-            for k, v in val.items():
-                k_str = str(k)
-                if any(sec in k_str.lower() for sec in ("key", "token", "secret", "password", "auth", "url")):
-                    items.append(f"{k!r}: '[REDACTED]'")
-                else:
-                    items.append(f"{k!r}: {bound_value(v, max_str_chars, max_items, depth + 1)}")
-            return "{" + ", ".join(items) + "}"
-        if isinstance(val, (list, tuple, set)):
-            v_list = list(val)
-            if len(v_list) > max_items:
-                first = bound_value(v_list[0], max_str_chars, max_items, depth + 1)
-                return f"<{type(val).__name__} len={len(v_list)} [{first}, ...]>"
-            inner = ", ".join(bound_value(item, max_str_chars, max_items, depth + 1) for item in v_list)
-            if isinstance(val, tuple):
-                return f"({inner},)" if len(v_list) == 1 else f"({inner})"
-            if isinstance(val, set):
-                return f"{{{inner}}}"
-            return f"[{inner}]"
-        # generic object fallback
-        clean_repr = redact(repr(val))
-        if len(clean_repr) > max_str_chars:
-            h = hashlib.sha256(clean_repr.encode("utf-8", errors="replace")).hexdigest()[:16]
-            return f"<{len(clean_repr)} chars sha256:{h}>{clean_repr[:120]}"
-        return clean_repr
+            for k, v in itertools.islice(val.items(), max_items):
+                name = k if type(k) is str else "field"
+                items.append(f"{_clean(name[:80])!r}: {_field(name, v, depth + 1)}")
+            suffix = f", ... len={len(val)}" if len(val) > max_items else ""
+            return "{" + ", ".join(items) + suffix + "}"
+        if type(val) in (list, tuple, set, frozenset):
+            items = [bound_value(v, max_str_chars, max_items, depth + 1) for v in itertools.islice(val, max_items)]
+            suffix = f", ... len={len(val)}" if len(val) > max_items else ""
+            return "[" + ", ".join(items) + suffix + "]"
+        if dataclasses.is_dataclass(val) and not isinstance(val, type):
+            fields = {f.name: getattr(val, f.name) for f in itertools.islice(dataclasses.fields(val), max_items)}
+            return bound_value(fields, max_str_chars, max_items, depth + 1)
+        return "<object>"
     except Exception:
         global _LOG_FAILURES
         _LOG_FAILURES += 1
         return "<unserializable>"
 
 
-def _rotate_file(path: str) -> None:
-    for i in range(BACKUP_COUNT - 1, 0, -1):
-        src = f"{path}.{i}"
-        dst = f"{path}.{i+1}"
-        if os.path.exists(src):
-            try:
-                os.replace(src, dst)
-            except OSError:
-                pass
-    if os.path.exists(path):
-        try:
-            os.replace(path, f"{path}.1")
-        except OSError:
-            pass
-
-
 def _write_log_line(line: str) -> None:
     global _LOG_FAILURES
     try:
         path = get_log_path()
-        dir_name = os.path.dirname(os.path.abspath(path))
-        os.makedirs(dir_name, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.seek(0, os.SEEK_END)
-                size = f.tell()
-                encoded = (line + "\n").encode("utf-8")
-                if size + len(encoded) > MAX_BYTES:
-                    f.flush()
-                    _rotate_file(path)
-                    with open(path, "a", encoding="utf-8") as f2:
-                        f2.write(line + "\n")
-                        f2.flush()
-                else:
-                    f.write(line + "\n")
-                    f.flush()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), mode=0o700, exist_ok=True)
+        # The lock inode never rotates. Open the data file only AFTER acquiring it.
+        fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(fd, "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            encoded = (line.replace("\n", "\\n").replace("\r", "\\r")[:16384] + "\n").encode("utf-8")
+            if os.path.exists(path) and os.path.getsize(path) + len(encoded) > MAX_BYTES:
+                for i in range(BACKUP_COUNT - 1, 0, -1):
+                    if os.path.exists(f"{path}.{i}"):
+                        os.replace(f"{path}.{i}", f"{path}.{i+1}")
+                os.replace(path, path + ".1")
+            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o640)
+            with os.fdopen(fd, "ab") as out:
+                out.write(encoded)
     except Exception:
         _LOG_FAILURES += 1
 
@@ -196,32 +181,21 @@ def format_log_line(mode: str, func_name: str, args_repr: str, status: str, retu
 
 def log_event(mode: str, func_name: str, status: str, return_val: Any = None,
               stage: str | None = None, is_stage: bool = False, **params) -> None:
-    lvl = get_log_level()
-    if lvl == "off":
-        return
-    if lvl == "stages" and not is_stage and stage is None and mode not in ("ALARM", "ERROR"):
-        return
-
-    # Redact parameters
-    bound_params = []
-    if stage is not None and "stage" not in params:
-        bound_params.append(f"stage={stage!r}")
-    for k, v in params.items():
-        if any(sec in k.lower() for sec in ("key", "token", "secret", "password", "auth", "url", "header")):
-            bound_params.append(f"{k}='[REDACTED]'")
-        else:
-            bound_params.append(f"{k}={bound_value(v)}")
-    args_str = ", ".join(bound_params)
-
-    ret_str = bound_value(return_val) if mode == "RETURN" and return_repr_needed(return_val) else (
-        bound_value(return_val) if mode == "RETURN" else None
-    )
-    line = format_log_line(mode, func_name, args_str, status, ret_str)
-    _write_log_line(line)
-
-
-def return_repr_needed(val: Any) -> bool:
-    return True
+    global _LOG_FAILURES
+    try:
+        lvl = get_log_level()
+        if lvl not in ("stages", "full"):
+            return
+        if lvl == "stages" and not is_stage and stage is None and mode not in ("ALARM", "ERROR"):
+            return
+        parts = [f"stage={stage!r}"] if stage is not None else []
+        for k, v in itertools.islice(params.items(), 32):
+            parts.append(f"{k}={_field(k, v)}")
+        ret = bound_value(return_val) if mode == "RETURN" else None
+        line = format_log_line(mode, func_name, ", ".join(parts), _clean(status), ret)
+        _write_log_line(_clean(line))
+    except Exception:
+        _LOG_FAILURES += 1
 
 
 def log_op(op_name: str, status: str = "ok", stage: str | None = None, **details) -> None:
@@ -234,6 +208,14 @@ def log_alarm(func_name: str, message: str, stage: str | None = None, **details)
 
 def log_error(func_name: str, exc_type: str, reason_code: str, stage: str | None = None, **details) -> None:
     log_event("ERROR", func_name, f"{exc_type}: {reason_code}", stage=stage, **details)
+
+
+def _reason(exc):
+    try:
+        code = getattr(exc, "code", None)
+        return code if type(code) is str and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else "operation_failed"
+    except Exception:
+        return "operation_failed"
 
 
 def app_traced(stage: str | None = None, is_stage: bool = False):
@@ -273,14 +255,14 @@ def app_traced(stage: str | None = None, is_stage: bool = False):
                 if lvl == "off":
                     return await fn(*args, **kwargs)
                 params = _extract_params(args, kwargs)
-                log_event("CALL", name, "started", stage=stage, is_stage=is_stage, **params)
+                log_event("CALL", name, "started", stage=stage, is_stage=is_stage, inputs=params)
                 try:
                     res = await fn(*args, **kwargs)
-                    log_event("RETURN", name, "ok", return_val=res, stage=stage, is_stage=is_stage, **params)
+                    log_event("RETURN", name, "ok", return_val=res, stage=stage, is_stage=is_stage, inputs=params)
                     return res
                 except Exception as exc:
-                    code = getattr(exc, "code", getattr(exc, "reason", type(exc).__name__))
-                    log_event("ERROR", name, f"{type(exc).__name__}: {code}", stage=stage, is_stage=is_stage, **params)
+                    code = _reason(exc)
+                    log_event("ERROR", name, f"{type(exc).__name__}: {code}", stage=stage, is_stage=is_stage, inputs=params)
                     raise
             return async_wrapper
 
@@ -290,14 +272,16 @@ def app_traced(stage: str | None = None, is_stage: bool = False):
             if lvl == "off":
                 return fn(*args, **kwargs)
             params = _extract_params(args, kwargs)
-            log_event("CALL", name, "started", stage=stage, is_stage=is_stage, **params)
+            log_event("CALL", name, "started", stage=stage, is_stage=is_stage, inputs=params)
             try:
-                res = fn(*args, **kwargs)
-                log_event("RETURN", name, "ok", return_val=res, stage=stage, is_stage=is_stage, **params)
+                with ContextScope(job_id=params.get("job_id"), run_id=params.get("run_id"),
+                                  service=("parse-worker" if stage == "parse" else "generate-worker") if name.startswith("process_") else None):
+                    res = fn(*args, **kwargs)
+                log_event("RETURN", name, "ok", return_val=res, stage=stage, is_stage=is_stage, inputs=params)
                 return res
             except Exception as exc:
-                code = getattr(exc, "code", getattr(exc, "reason", type(exc).__name__))
-                log_event("ERROR", name, f"{type(exc).__name__}: {code}", stage=stage, is_stage=is_stage, **params)
+                code = _reason(exc)
+                log_event("ERROR", name, f"{type(exc).__name__}: {code}", stage=stage, is_stage=is_stage, inputs=params)
                 raise
         return sync_wrapper
 

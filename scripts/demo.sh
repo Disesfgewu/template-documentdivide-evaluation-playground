@@ -19,6 +19,8 @@ repo_head() { ls db/lab_db/schema/versions/[0-9]*.py | sed 's#.*/\([0-9]*\)_.*#\
 
 up() {
   mkdir -p logs
+  chmod 2770 logs
+  export LAB_LOG_GID="$(id -g)"
   "${compose[@]}" up -d --wait db
   "${compose[@]}" --profile tools build migrate
   "${compose[@]}" --profile tools run --rm -e LAB_MIGRATION_DATABASE_URL=postgresql://lab:lab-dev-only@db:5432/lab \
@@ -121,8 +123,13 @@ ui() {
 
 logs() {
   mkdir -p logs
-  touch logs/app.log
-  tail -f logs/app.log
+  chmod 2770 logs
+  export LAB_LOG_GID="$(id -g)"
+  if [[ ! -e logs/app.log ]]; then
+    touch logs/app.log
+    chmod 0660 logs/app.log
+  fi
+  tail -F logs/app.log
 }
 
 down() { "${compose[@]}" --profile demo --profile tools --profile generate down -v; }

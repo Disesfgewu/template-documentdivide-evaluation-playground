@@ -269,9 +269,8 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
             jobs.finish(conn, project_id, lease, "queued", error)
             return ParseOutcome(job_id, "queued", error)
         return _fail(conn, project_id, lease, error)
-    if batch is not None:
-        for p in getattr(batch, "pages", []):
-            log_op("parse_page", status="parsed", page_index=getattr(p, "page_index", None), stage="parse")
+    for page in batch.result.pages:
+        log_op("parse_page", status=page.status, page_index=page.page_index, diagnostics=page.diagnostics, stage="parse")
     if batch.quarantine_reason is not None:
         return _fail(conn, project_id, lease, "quarantined:" + batch.quarantine_reason)
     try:

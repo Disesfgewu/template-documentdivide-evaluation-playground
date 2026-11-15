@@ -48,19 +48,19 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
 
     @app.middleware("http")
     async def app_log_middleware(request: Request, call_next):
-        req_id = request.headers.get("X-Request-Id", "req-1")
+        req_id = "req-" + __import__("uuid").uuid4().hex
         with ContextScope(service="api", request_id=req_id, stage="api"):
             log_event("CALL", "api_request", "started", stage="api", is_stage=True,
-                      method=request.method, path=request.url.path)
+                      method=request.method, route=getattr(request.scope.get("route"), "path", "unmatched"))
             try:
                 response = await call_next(request)
                 log_event("RETURN", "api_request", "ok", return_val={"status_code": response.status_code},
-                          stage="api", is_stage=True, method=request.method, path=request.url.path)
+                          stage="api", is_stage=True, method=request.method, route=getattr(request.scope.get("route"), "path", "unmatched"))
                 return response
             except Exception as exc:
-                code = getattr(exc, "code", getattr(exc, "reason", type(exc).__name__))
+                code = "request_failed"
                 log_event("ERROR", "api_request", f"{type(exc).__name__}: {code}",
-                          stage="api", is_stage=True, method=request.method, path=request.url.path)
+                          stage="api", is_stage=True, method=request.method, route=getattr(request.scope.get("route"), "path", "unmatched"))
                 raise
 
     @app.exception_handler(ApiError)

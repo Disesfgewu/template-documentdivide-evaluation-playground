@@ -163,8 +163,10 @@ class Worker:
     def _handle(self, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome | None:
         outcome = None
         try:
-            with self.connect() as conn:
-                outcome = self._process(conn, project_id, job_id)
+            from .app_log import ContextScope
+            with ContextScope(service="generate-worker" if self.__class__.__name__ == "GenerateWorker" else "parse-worker", job_id=job_id):
+                with self.connect() as conn:
+                    outcome = self._process(conn, project_id, job_id)
         except jobs.LeaseUnavailable:
             LOG.info("job %s not claimable", job_id)  # someone else took it first
         except Exception as exc:
