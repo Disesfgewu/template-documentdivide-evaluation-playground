@@ -34,6 +34,7 @@ import psycopg
 from lab_db import jobs
 from lab_db.generation import record_llm_calls, request_sha256, reserve_batch, worst_case_micros
 from lab_api.parse_worker import ParseOutcome, _Heartbeat, _stopped, _unreachable, is_infrastructure
+from .app_log import app_traced, log_op, log_alarm, log_error, ContextScope
 
 LOG = logging.getLogger("lab.generate_worker")
 
@@ -230,6 +231,7 @@ def _released_rows(reserved: Sequence[tuple[CallSpec, int]], model: str, reason:
             for c, _ in reserved]
 
 
+@app_traced(stage="generate", is_stage=True)
 def process_generate_job(conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID, *, worker: str,
                          lab_gen_cmd: Sequence[str], cfg: GenModelConfig, build_calls: GenBuilder,
                          connect: Callable[[], psycopg.Connection], api_key: Optional[str],
@@ -377,6 +379,8 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
         jobs.finish(conn, project_id, lease, "failed", "lab_gen_failed", hook=failed_hook)
         return ParseOutcome(job_id, "failed", "lab_gen_failed")
     rows = parsed["calls"]
+    for r in rows:
+        log_op("lab_gen_call_outcome", call_id=r.get("id"), status=r.get("status"), stage="generate")
     ok = parsed["status"] == "ok"
     plain = [{k: v for k, v in r.items() if k != "text"} for r in rows]
 

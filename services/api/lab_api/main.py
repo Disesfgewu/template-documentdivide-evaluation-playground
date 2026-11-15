@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .audit import router as audit_router
+from .app_log import ContextScope, log_event
 from .benchmark_baseline import router as benchmark_baseline_router
 from .benchmark_build import router as benchmark_build_router
 from .benchmark_freeze import router as benchmark_freeze_router
@@ -44,6 +45,23 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
     app = FastAPI(title="document-seperater-playground LAB API", version=API_VERSION)
     app.add_middleware(DownloadAdmissionMiddleware)
     app.state.settings = settings
+
+    @app.middleware("http")
+    async def app_log_middleware(request: Request, call_next):
+        req_id = request.headers.get("X-Request-Id", "req-1")
+        with ContextScope(service="api", request_id=req_id, stage="api"):
+            log_event("CALL", "api_request", "started", stage="api", is_stage=True,
+                      method=request.method, path=request.url.path)
+            try:
+                response = await call_next(request)
+                log_event("RETURN", "api_request", "ok", return_val={"status_code": response.status_code},
+                          stage="api", is_stage=True, method=request.method, path=request.url.path)
+                return response
+            except Exception as exc:
+                code = getattr(exc, "code", getattr(exc, "reason", type(exc).__name__))
+                log_event("ERROR", "api_request", f"{type(exc).__name__}: {code}",
+                          stage="api", is_stage=True, method=request.method, path=request.url.path)
+                raise
 
     @app.exception_handler(ApiError)
     async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:

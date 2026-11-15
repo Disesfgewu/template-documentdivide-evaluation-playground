@@ -26,7 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 # .documents puts db/ and contracts/ on sys.path, so it is imported before lab_db.
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db, resolve_project_id
 from .material_plan import build_material_plan
-from lab_contracts.benchmark import target_counts  # noqa: E402
+from lab_contracts.benchmark import target_counts
+from .app_log import app_traced, log_op  # noqa: E402
 from lab_db.promote import PromoteConflict, PromoteError, RESIDUAL_LIMIT, promote_parse_result  # noqa: E402
 from lab_db.repo import Change, NotFound, PermissionDenied, authorize, record_change  # noqa: E402
 
@@ -139,6 +140,7 @@ def _report(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.
     return plan
 
 
+@app_traced(stage="promote", is_stage=True)
 def _plan(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int,
           body: PlanRequest) -> dict:
     missing = ApiError(404, "not_found", "benchmark revision not found")

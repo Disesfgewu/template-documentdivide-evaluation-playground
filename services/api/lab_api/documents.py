@@ -39,6 +39,7 @@ from .pdf_body import (
 )
 from .preview import DEFAULT_PREVIEW_TIMEOUT_S, PreviewError, render_preview_in_subprocess
 from .readiness import connect
+from .app_log import app_traced, log_op, log_alarm
 
 DEFAULT_MAX_PDF_PAGES = 2000
 
@@ -479,6 +480,7 @@ def _replay_body(status: int, stored: dict, request_id: str) -> tuple[int, dict]
 _UNSET = object()
 
 
+@app_traced(stage="upload", is_stage=True)
 def _upload_core(
     conn: psycopg.Connection,
     store: LocalArtifactStore,

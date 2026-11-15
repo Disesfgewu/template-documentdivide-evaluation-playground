@@ -21,6 +21,7 @@ from typing import Annotated
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db, resolve_project_id
 from .benchmark_build import MAX_BODY_BYTES, _find
 from lab_db.repo import NotFound, PermissionDenied, authorize
+from .app_log import app_traced, log_op
 
 router = APIRouter()
 BUILD_ACTION = "build_edit_freeze"
@@ -115,6 +116,7 @@ def _review(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID
                                     "model was shown, and (2) with a second model call whether the question can be answered from that text alone"}
 
 
+@app_traced(stage="export", is_stage=True)
 def _export(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int) -> tuple[dict, list[dict]]:
     """(header, questions) of the whole benchmark: gold included, so owner/maintainer only."""
     _authorize(conn, project_id, actor_id, owner_only=False)
@@ -135,6 +137,7 @@ def _export(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID
     return header, items
 
 
+@app_traced(stage="exclusion", is_stage=True)
 def _exclude(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int,
              question_id: uuid.UUID, body: ExclusionRequest) -> dict:
     _authorize(conn, project_id, actor_id, owner_only=True)

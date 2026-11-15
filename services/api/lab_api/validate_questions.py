@@ -23,6 +23,7 @@ from psycopg.types.json import Jsonb
 
 from lab_api.generate_prompts import DEFAULT_PAGE_CHARS, shown_by_page
 from lab_api.generate_worker import CallSpec
+from .app_log import app_traced, log_op
 
 LOG = logging.getLogger("lab.validate_questions")
 
@@ -71,6 +72,7 @@ def _neutralise(text: str) -> str:
     return _TAG.sub(lambda m: m.group(0).replace("<", "＜"), text)
 
 
+@app_traced(stage="validate")
 def code_checks(shown_text: str, reference_answer: str, facts: Sequence[str]) -> dict:
     """Free grounding checks against the text that was actually shown. Words are matched after NFKC + case-folding."""
     page = _norm(shown_text)
@@ -105,6 +107,7 @@ def parse_validator_reply(text: str):
     return obj["supported"], obj["answerable_from_evidence"], obj["needs_outside_context"]
 
 
+@app_traced(stage="validate")
 def verdict_for(checks: dict, reply) -> tuple[str, str]:
     """(verdict, reason). ``pass`` needs BOTH the code checks and the validator; unknown is never a pass."""
     if not checks["passed"]:
@@ -171,6 +174,7 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
 
 
 def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
+    @app_traced(stage="validate", is_stage=True)
     def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict],
                    job_id: uuid.UUID) -> dict:
         actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE job_id = %s", (job_id,)).fetchone()[0]

@@ -25,6 +25,7 @@ from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db,
 from .benchmark_build import MAX_BODY_BYTES, _find
 from lab_db.jobs import ACTIVE_JOB_STATUSES
 from lab_db.repo import FreezeIneligible, NotFound, PermissionDenied, StaleVersion, authorize, transition_benchmark
+from .app_log import app_traced, log_op
 
 router = APIRouter()
 BUILD_ACTION = "build_edit_freeze"
@@ -41,6 +42,7 @@ class FreezeRequest(BaseModel):
     compliance: str = Field(pattern="^partial$")
 
 
+@app_traced(stage="freeze", is_stage=True)
 def _freeze(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int) -> dict:
     missing = ApiError(404, "not_found", "benchmark revision not found")
     try:

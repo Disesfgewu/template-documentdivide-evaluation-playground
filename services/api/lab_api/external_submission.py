@@ -34,6 +34,7 @@ from lab_db.storage import LocalArtifactStore, store_and_register
 from lab_api import baseline_eval as be
 from lab_api.method_answer import failure_response
 from lab_api.validate_questions import content_tokens
+from .app_log import app_traced, log_op, log_alarm
 
 ACTION = "register_method_and_submit"
 MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -90,6 +91,7 @@ def _problem(problems: list, line: int, code: str) -> None:
         problems.append({"line": line, "code": code})
 
 
+@app_traced(stage="external_submission")
 def parse_file(text: str, question_keys: set, page_count: int) -> Parsed:
     """Validate the whole file. Never raises on content: every problem is a (line, code) pair."""
     problems: list = []
@@ -230,7 +232,15 @@ class Located:
 WHOLE_PAGE = ((0.0, 0.0, 1.0, 1.0), "page")
 
 
+@app_traced(stage="external_submission")
 def locate(quote: str, page_index: int, by_page: dict) -> Located:
+    loc = _locate_inner(quote, page_index, by_page)
+    if not loc.found:
+        log_alarm("locate", f"quote not found on page {page_index}: {quote[:80]!r}", stage="external_submission")
+    return loc
+
+
+def _locate_inner(quote: str, page_index: int, by_page: dict) -> Located:
     page_units = by_page.get(page_index, [])
     whole = [(page_index, WHOLE_PAGE[0], WHOLE_PAGE[1])]
     if not page_units:
@@ -283,6 +293,7 @@ def slug(name: str) -> str:
     return (s or "method")[:64]
 
 
+@app_traced(stage="external_submission", is_stage=True)
 def import_submission(conn: psycopg.Connection, store: LocalArtifactStore, project_id: uuid.UUID, benchmark_id: uuid.UUID,
                       actor_id: uuid.UUID, *, file_bytes: bytes, method_name: str, method_version: Optional[str] = None,
                       notes: Optional[str] = None, accept_partial: bool = False) -> dict:

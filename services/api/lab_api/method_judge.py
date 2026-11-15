@@ -17,6 +17,7 @@ import re
 from typing import Optional, Sequence
 
 from lab_api.generate_worker import CallSpec
+from .app_log import app_traced, log_op
 
 __all__ = ["JUDGE_PROMPT_REVISION", "JUDGE_PROMPT_SHA256", "JUDGE_LIMITATION", "JUDGE_GRADER_SUFFIX", "MAX_JUDGED_CLAIMS",
            "JudgeVerdict", "build_judge_call", "parse_judge_reply", "parse_judge_reply_ex", "check_verdict", "check_verdict_ex"]
@@ -58,6 +59,7 @@ def _neutralise(text: str) -> str:
     return _TAG.sub(lambda m: m.group(0).replace("<", "＜"), text)
 
 
+@app_traced(stage="judge")
 def build_judge_call(call_id: str, fact_statements: Sequence[str], answer_text: str,
                      claims: Sequence[tuple[str, str, Sequence[str]]], hit_text: dict[str, str]) -> CallSpec:
     """One call. ``claims`` = (claim id, claim text, cited hit ids); ``hit_text`` maps hit id -> its content. Only hits some claim

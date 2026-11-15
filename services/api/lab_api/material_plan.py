@@ -14,6 +14,7 @@ verified questions can be written, and never a compliance verdict.
 from __future__ import annotations
 
 from lab_contracts.benchmark import target_counts
+from .app_log import app_traced
 
 PLAN_VERSION = "material-plan-1"
 VISUAL_KINDS = ("table", "figure", "image")
@@ -22,6 +23,7 @@ HUMAN_REVIEW_NOTE = ("Human review was skipped by the owner's scope. This is 'pa
                      "must say skipped, and only the owner may freeze.")
 
 
+@app_traced(stage="plan", is_stage=True)
 def build_material_plan(page_count: int, promoted_pages: list[int], skipped_pages: dict[int, str],
                         units_by_page: dict[int, dict[str, int]], residual_limit: str) -> dict:
     """``units_by_page``: promoted page index -> {region kind: number of evidence units}."""
