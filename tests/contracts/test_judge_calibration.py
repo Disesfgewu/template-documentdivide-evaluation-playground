@@ -712,6 +712,89 @@ class CalibrationAnnotatorAdjudicationAndStabilityTests(unittest.TestCase):
         self.assertEqual(rep_cherry.status, "ineligible")
         self.assertIn("first_valid_judge_output_mismatch", rep_cherry.blocking_reasons)
 
+    def test_repeat_run_partial_score_without_rubric_rejected_across_repeats_and_retained_with_stability_review(self):
+        # 1. rubric=false + second repeat (run_index=2) 0.5 -> rejected even with authorized stability review
+        bundle = build_valid_40_case_bundle()
+        raw = json.loads(bundle.model_dump_json())
+        raw["cases"][0]["facts"][0]["partial_rubric_defined"] = False
+        out = raw["judge_outputs"][0]
+        out["repeat_runs"][1]["fact_scores"]["f1"] = 0.5
+        out["repeat_runs"][1]["correctness_score"] = 50.0
+        out.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_run2 = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_run2.status, "ineligible")
+        self.assertIn("partial_score_without_rubric", rep_run2.blocking_reasons)
+        self.assertTrue(
+            any("repeat_runs[2].fact_scores[f1]" in d.path for d in rep_run2.diagnostics if d.code == "partial_score_without_rubric")
+        )
+
+        # 2. rubric=false + third repeat (run_index=3) 0.5 -> rejected even with authorized stability review
+        raw_r3 = json.loads(bundle.model_dump_json())
+        raw_r3["cases"][0]["facts"][0]["partial_rubric_defined"] = False
+        out_r3 = raw_r3["judge_outputs"][0]
+        out_r3["repeat_runs"][2]["fact_scores"]["f1"] = 0.5
+        out_r3["repeat_runs"][2]["correctness_score"] = 50.0
+        out_r3.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_run3 = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw_r3)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_run3.status, "ineligible")
+        self.assertIn("partial_score_without_rubric", rep_run3.blocking_reasons)
+        self.assertTrue(
+            any("repeat_runs[3].fact_scores[f1]" in d.path for d in rep_run3.diagnostics if d.code == "partial_score_without_rubric")
+        )
+
+        # 3. Do not drop invalid run to pass when >=3 runs exist (e.g. 4 runs with run 2 invalid)
+        raw_4runs = json.loads(bundle.model_dump_json())
+        raw_4runs["cases"][0]["facts"][0]["partial_rubric_defined"] = False
+        out_4r = raw_4runs["judge_outputs"][0]
+        run4 = dict(out_4r["repeat_runs"][2])
+        run4["run_index"] = 4
+        out_4r["repeat_runs"].append(run4)
+        out_4r["repeat_runs"][1]["fact_scores"]["f1"] = 0.5
+        out_4r["repeat_runs"][1]["correctness_score"] = 50.0
+        out_4r.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_4runs = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw_4runs)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_4runs.status, "ineligible")
+        self.assertIn("partial_score_without_rubric", rep_4runs.blocking_reasons)
+
+        # 4. rubric=true + legitimate human stability review passes
+        raw_valid = json.loads(bundle.model_dump_json())
+        raw_valid["cases"][0]["facts"][0]["partial_rubric_defined"] = True
+        out_v = raw_valid["judge_outputs"][0]
+        out_v["repeat_runs"][1]["fact_scores"]["f1"] = 0.5
+        out_v["repeat_runs"][1]["correctness_score"] = 50.0
+        out_v.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_valid = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw_valid)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_valid.status, "eligible")
+        self.assertEqual(rep_valid.blocking_reasons, ())
+
     def test_duplicate_ids_and_revision_mismatches_block(self):
         bundle = build_valid_40_case_bundle()
         raw = json.loads(bundle.model_dump_json())

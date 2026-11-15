@@ -41,7 +41,7 @@ validates and enforces:
      against trusted identity storage. Exceptions or non-`True` returns block
      eligibility without leaking internal error strings.
    - Partial credit (`0.5`) is rejected unless `partial_rubric_defined=True`
-     on that fact (SPEC 16.2, 16.5, T38).
+     on that fact across annotators, adjudications, primary judge outputs, and repeat runs (SPEC 16.2, 16.5, T38).
 
 3. **Judge Accuracy, Contradiction & Golden Rule Gates (SPEC 9.2, 16.5, 17.6)**
    - **Fact label agreement >= 90%**: Exact rational ratio of matching fact
@@ -63,10 +63,12 @@ validates and enforces:
      or skipped; they are counted in `missing_or_pending_cases` and block
      calibration eligibility (`judge_output_not_evaluated` / `missing_judge_output`).
    - **3x Fixed-Input Repeat Stability**: Each case requires at least 3 repeat
-     runs; the primary judge output must match the first valid run (forbidding
-     cherry-picking across repeats), and any case whose correctness spread
-     across repeats exceeds `10` points requires `stability_human_reviewed=True`
-     with a verified reviewer identity.
+     runs; every scored repeat run must satisfy fact/rubric validity (partial credit
+     requires `partial_rubric_defined=True`), with blocking diagnostics retained
+     even when human stability review is authorized; the primary judge output
+     must match the first valid run (forbidding cherry-picking across repeats),
+     and any case whose correctness spread across repeats exceeds `10` points
+     requires `stability_human_reviewed=True` with a verified reviewer identity.
 
 ## Usage
 

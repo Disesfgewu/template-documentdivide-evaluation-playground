@@ -915,6 +915,13 @@ def evaluate_judge_calibration(
                             f"repeat run {r.run_index} fact_ids do not match case facts",
                         )
                         continue
+                    for fid, fspec in expected_fact_specs.items():
+                        if r.fact_scores[fid] == 0.5 and not fspec.partial_rubric_defined:
+                            add_diag(
+                                f"{opath}.repeat_runs[{r.run_index}].fact_scores[{fid}]",
+                                "partial_score_without_rubric",
+                                f"repeat run {r.run_index} assigned 0.5 to fact {fid!r} without partial_rubric_defined",
+                            )
                     r_num = sum(
                         Fraction(Decimal(repr(expected_fact_specs[fid].weight)))
                         * Fraction(Decimal(repr(r.fact_scores[fid])))
