@@ -452,6 +452,156 @@ class CalibrationContradictionAndGoldenRulesTests(unittest.TestCase):
         self.assertEqual(rep.major_contradiction_full_correct_count, 1)
         self.assertIn("major_contradiction_scored_full_correct", rep.blocking_reasons)
 
+    def test_repeat_run_major_contradiction_scored_full_correct_rejected(self):
+        # 1. Second repeat (run_index=2) scores contradicted fact 1.0 -> rejected even with authorized stability review
+        bundle = build_valid_40_case_bundle()
+        raw = json.loads(bundle.model_dump_json())
+        contra_idx = next(i for i, c in enumerate(raw["cases"]) if c["facts"][0]["has_major_contradiction"])
+        out = raw["judge_outputs"][contra_idx]
+        out["repeat_runs"][1]["fact_scores"]["f1"] = 1.0
+        out["repeat_runs"][1]["correctness_score"] = 100.0
+        out.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_r2 = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_r2.status, "ineligible")
+        self.assertEqual(rep_r2.major_contradiction_full_correct_count, 1)
+        self.assertIn("major_contradiction_scored_full_correct", rep_r2.blocking_reasons)
+        self.assertTrue(
+            any("repeat_runs[2].fact_scores[f1]" in d.path for d in rep_r2.diagnostics if d.code == "major_contradiction_scored_full_correct")
+        )
+
+        # 2. Third repeat (run_index=3) scores contradicted fact 1.0 -> rejected
+        raw_r3 = json.loads(bundle.model_dump_json())
+        out_r3 = raw_r3["judge_outputs"][contra_idx]
+        out_r3["repeat_runs"][2]["fact_scores"]["f1"] = 1.0
+        out_r3["repeat_runs"][2]["correctness_score"] = 100.0
+        out_r3.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_r3 = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw_r3)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_r3.status, "ineligible")
+        self.assertEqual(rep_r3.major_contradiction_full_correct_count, 1)
+        self.assertIn("major_contradiction_scored_full_correct", rep_r3.blocking_reasons)
+        self.assertTrue(
+            any("repeat_runs[3].fact_scores[f1]" in d.path for d in rep_r3.diagnostics if d.code == "major_contradiction_scored_full_correct")
+        )
+
+        # 3. Fact-only contradiction (repeat run scores contradicted fact 1.0, but total correctness is partial, not 100%)
+        raw_fo = json.loads(bundle.model_dump_json())
+        case_fo = raw_fo["cases"][contra_idx]
+        case_fo["facts"][0]["weight"] = 1.0
+        case_fo["facts"].append({
+            "fact_id": "f2",
+            "weight": 1.0,
+            "partial_rubric_defined": False,
+            "has_major_contradiction": False,
+        })
+        case_fo["annotator_a"]["fact_labels"].append({"fact_id": "f2", "score": 0.0, "reason": "a"})
+        case_fo["annotator_b"]["fact_labels"].append({"fact_id": "f2", "score": 0.0, "reason": "b"})
+        if case_fo.get("adjudication"):
+            case_fo["adjudication"]["adjudicated_fact_labels"].append({"fact_id": "f2", "score": 0.0, "reason": "adj"})
+
+        out_fo = raw_fo["judge_outputs"][contra_idx]
+        out_fo["fact_outputs"][0]["score"] = 0.0
+        out_fo["fact_outputs"].append({
+            "fact_id": "f2",
+            "status": "scored",
+            "score": 0.0,
+            "reason_codes": ["fact_error"],
+            "rationale": "rationale f2",
+        })
+        out_fo["correctness_result"]["numerator"] = 0.0
+        out_fo["correctness_result"]["denominator"] = 2.0
+        out_fo["correctness_result"]["raw_value"] = 0.0
+        out_fo["correctness_result"]["display_value"] = "0.00"
+        for r in out_fo["repeat_runs"]:
+            r["fact_scores"]["f2"] = 0.0
+
+        out_fo["repeat_runs"][1]["fact_scores"]["f1"] = 1.0
+        out_fo["repeat_runs"][1]["fact_scores"]["f2"] = 0.0
+        out_fo["repeat_runs"][1]["correctness_score"] = 50.0
+        out_fo.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_fo = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw_fo)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_fo.status, "ineligible")
+        self.assertEqual(rep_fo.major_contradiction_full_correct_count, 1)
+        self.assertIn("major_contradiction_scored_full_correct", rep_fo.blocking_reasons)
+        self.assertTrue(
+            any("repeat_runs[2].fact_scores[f1]" in d.path for d in rep_fo.diagnostics if d.code == "major_contradiction_scored_full_correct")
+        )
+        self.assertFalse(
+            any("repeat_runs[2].correctness_score" in d.path for d in rep_fo.diagnostics if d.code == "major_contradiction_scored_full_correct")
+        )
+
+        # 4. Case-level confirmed contradiction (gold_major_contradiction=True, fact has_major_contradiction=False)
+        raw_cl = json.loads(bundle.model_dump_json())
+        raw_cl["cases"][contra_idx]["facts"][0]["has_major_contradiction"] = False
+        out_cl = raw_cl["judge_outputs"][contra_idx]
+        out_cl["repeat_runs"][1]["fact_scores"]["f1"] = 1.0
+        out_cl["repeat_runs"][1]["correctness_score"] = 100.0
+        out_cl.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_cl = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw_cl)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_cl.status, "ineligible")
+        self.assertEqual(rep_cl.major_contradiction_full_correct_count, 1)
+        self.assertIn("major_contradiction_scored_full_correct", rep_cl.blocking_reasons)
+        self.assertTrue(
+            any("repeat_runs[2].correctness_score" in d.path for d in rep_cl.diagnostics if d.code == "major_contradiction_scored_full_correct")
+        )
+        self.assertFalse(
+            any("repeat_runs[2].fact_scores[f1]" in d.path for d in rep_cl.diagnostics if d.code == "major_contradiction_scored_full_correct")
+        )
+
+        # 5. Even with extra valid repeats (4 runs total, run 2 invalid), does not drop invalid run
+        raw_extra = json.loads(bundle.model_dump_json())
+        out_extra = raw_extra["judge_outputs"][contra_idx]
+        run4 = dict(out_extra["repeat_runs"][2])
+        run4["run_index"] = 4
+        out_extra["repeat_runs"].append(run4)
+        out_extra["repeat_runs"][1]["fact_scores"]["f1"] = 1.0
+        out_extra["repeat_runs"][1]["correctness_score"] = 100.0
+        out_extra.update(
+            stability_human_reviewed=True,
+            stability_reviewer_id="human_dave",
+            stability_reviewed_at=TS_REV.isoformat(),
+        )
+        rep_extra = evaluate_judge_calibration(
+            CalibrationEvaluationInput.model_validate_json(json.dumps(raw_extra)),
+            authorize_human_identity=lambda *a: True,
+        )
+        self.assertEqual(rep_extra.status, "ineligible")
+        self.assertEqual(rep_extra.major_contradiction_full_correct_count, 1)
+        self.assertIn("major_contradiction_scored_full_correct", rep_extra.blocking_reasons)
+
+        # 6. Valid non-contradicted full cases and legitimate partial cases pass
+        rep_clean = evaluate_judge_calibration(bundle, authorize_human_identity=lambda *a: True)
+        self.assertEqual(rep_clean.status, "eligible")
+        self.assertEqual(rep_clean.major_contradiction_full_correct_count, 0)
+        self.assertEqual(rep_clean.blocking_reasons, ())
+
     def test_deterministic_source_or_rule_metric_mismatch_blocks(self):
         bundle = build_valid_40_case_bundle()
         raw = json.loads(bundle.model_dump_json())

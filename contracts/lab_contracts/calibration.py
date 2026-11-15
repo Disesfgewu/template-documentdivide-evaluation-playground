@@ -835,8 +835,6 @@ def evaluate_judge_calibration(
                 "major_contradiction_scored_full_correct",
                 "case has confirmed major contradiction but judge scored full correctness (100%)",
             )
-        if contradiction_scored_full:
-            major_contradiction_full_correct_count += 1
 
         # Deterministic source/rule metric equality check (SPEC 17.6: 100% match with golden)
         golden_metrics = {m.metric: m for m in case.golden_deterministic_metrics}
@@ -922,11 +920,29 @@ def evaluate_judge_calibration(
                                 "partial_score_without_rubric",
                                 f"repeat run {r.run_index} assigned 0.5 to fact {fid!r} without partial_rubric_defined",
                             )
+                        if fspec.has_major_contradiction and r.fact_scores[fid] == 1.0:
+                            contradiction_scored_full = True
+                            add_diag(
+                                f"{opath}.repeat_runs[{r.run_index}].fact_scores[{fid}]",
+                                "major_contradiction_scored_full_correct",
+                                f"fact {fid!r} has a major contradiction but repeat run {r.run_index} scored it 1.0",
+                            )
                     r_num = sum(
                         Fraction(Decimal(repr(expected_fact_specs[fid].weight)))
                         * Fraction(Decimal(repr(r.fact_scores[fid])))
                         for fid in expected_fact_specs
                     )
+                    if gold_major_contradiction and (
+                        r_num == den_frac
+                        or (r.correctness_score is not None and r.correctness_score >= 100.0)
+                        or all(r.fact_scores[fid] == 1.0 for fid in expected_fact_specs)
+                    ):
+                        contradiction_scored_full = True
+                        add_diag(
+                            f"{opath}.repeat_runs[{r.run_index}].correctness_score",
+                            "major_contradiction_scored_full_correct",
+                            f"case has confirmed major contradiction but repeat run {r.run_index} scored full correctness (100%)",
+                        )
                     r_expected = (r_num * 100) / den_frac
                     r_actual = Fraction(Decimal(repr(r.correctness_score)))
                     if abs(r_actual - r_expected) > Fraction(1, 1_000_000):
@@ -954,6 +970,9 @@ def evaluate_judge_calibration(
                                 f"{opath}.stability_reviewer_id",
                             ):
                                 repeat_instability_unreviewed += 1
+
+        if contradiction_scored_full:
+            major_contradiction_full_correct_count += 1
 
         evaluated_cases += 1
 

@@ -48,7 +48,8 @@ validates and enforces:
      labels across all evaluated cases must be $\ge 9/10$ (`90.00%`).
    - **Zero major contradictions scored fully correct**: Any fact with
      `has_major_contradiction=True` scored `1.0`, or any case with confirmed
-     major contradiction scored `100%` correctness, blocks the grader revision.
+     major contradiction scored `100%` correctness across primary outputs and repeat
+     runs, blocks the grader revision.
    - **100% deterministic source/rule metric equality & scored coverage**: Every
      case must carry golden `MetricResult` values for the 5 deterministic metrics
      (`recall_at_k`, `complete_at_k`, `textual_consistency`,
@@ -64,11 +65,12 @@ validates and enforces:
      calibration eligibility (`judge_output_not_evaluated` / `missing_judge_output`).
    - **3x Fixed-Input Repeat Stability**: Each case requires at least 3 repeat
      runs; every scored repeat run must satisfy fact/rubric validity (partial credit
-     requires `partial_rubric_defined=True`), with blocking diagnostics retained
-     even when human stability review is authorized; the primary judge output
-     must match the first valid run (forbidding cherry-picking across repeats),
-     and any case whose correctness spread across repeats exceeds `10` points
-     requires `stability_human_reviewed=True` with a verified reviewer identity.
+     requires `partial_rubric_defined=True`) and major contradiction false-full gates,
+     with blocking diagnostics retained even when human stability review is
+     authorized; the primary judge output must match the first valid run (forbidding
+     cherry-picking across repeats), and any case whose correctness spread across
+     repeats exceeds `10` points requires `stability_human_reviewed=True` with a
+     verified reviewer identity.
 
 ## Usage
 
