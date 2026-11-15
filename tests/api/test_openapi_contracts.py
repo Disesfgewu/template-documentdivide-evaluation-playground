@@ -609,7 +609,8 @@ class RuntimeHttpContractTests(unittest.TestCase):
             with self.subTest(request_id_length=len(request_id)):
                 response = self.client.post(path, headers={"Content-Type": "application/pdf", "X-Request-Id": request_id}, content=b"pdf")
                 self.assertEqual(response.status_code, 400)
-                self.assertEqual(response.json()["error"]["request_id"], request_id)
+                self.assertEqual(response.json()["error"]["request_id"], response.headers["x-request-id"])
+                self.assertNotEqual(response.json()["error"]["request_id"], request_id)
                 self._validate_schema(path, "post", 400, response.json())
         with unittest.mock.patch("lab_api.documents.authorize", return_value=Decision("owner", None)):
             response = self.client.post(path, params={"project_id": str(self.project_id)},

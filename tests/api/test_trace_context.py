@@ -25,6 +25,7 @@ from lab_api.trace_context import (
     TraceContextError,
     TraceContextMiddleware,
     TraceParent,
+    _CURRENT_TRACE_CONTEXT,
     current_trace_context,
     new_request_id,
     new_span_id,
@@ -674,6 +675,209 @@ class ASGIBoundaryAndConcurrencyTests(unittest.TestCase):
             self.assertEqual(body["parent_span_id"], pspan)
             self.assertEqual(headers["x-request-id"], body["request_id"])
             self.assertEqual(headers["traceparent"], f"00-{tid}-{body['span_id']}-00")
+
+
+class SameAsyncTaskContextVarRestorationTests(unittest.TestCase):
+    """Regressions for ContextVar restoration within the SAME async task.
+
+    Ensures that TraceContextMiddleware always restores _CURRENT_TRACE_CONTEXT
+    in the calling task across all completion modes:
+    - Normal returns (with and without preexisting outer context)
+    - Downstream application exceptions
+    - ASGI send failures (e.g. transport OSError on start/body)
+    - Task cancellations (asyncio.CancelledError)
+    """
+
+    def _make_dummy_scope(self) -> dict[str, Any]:
+        return {
+            "type": "http",
+            "method": "GET",
+            "path": "/test",
+            "headers": [(b"traceparent", VALID_TRACEPARENT_SAMPLED.encode("ascii"))],
+            "state": {},
+        }
+
+    def _make_outer_context(self) -> TraceContext:
+        return TraceContext(
+            schema_version=TRACE_SCHEMA_VERSION,
+            request_id="req_" + ("0" * 32),
+            trace_id="0" * 32,
+            span_id="0" * 16,
+            parent_span_id=None,
+            sampled=False,
+            ingress="accepted",
+        )
+
+    def test_same_task_restoration_on_normal_return(self):
+        async def run_scenario(preexisting_outer: bool):
+            observed_inside: list[TraceContext | None] = []
+
+            async def inner_app(scope, receive, send):
+                observed_inside.append(current_trace_context())
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+                await send({"type": "http.response.body", "body": b"ok"})
+
+            mw = TraceContextMiddleware(inner_app, trust_remote_traceparent=True)
+            scope = self._make_dummy_scope()
+
+            async def dummy_receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def dummy_send(_msg):
+                pass
+
+            outer_ctx = self._make_outer_context() if preexisting_outer else None
+            token = _CURRENT_TRACE_CONTEXT.set(outer_ctx) if preexisting_outer else None
+            try:
+                self.assertEqual(current_trace_context(), outer_ctx)
+                await mw(scope, dummy_receive, dummy_send)
+                # SAME async task: immediately after await mw(...)
+                self.assertEqual(current_trace_context(), outer_ctx)
+            finally:
+                if token is not None:
+                    _CURRENT_TRACE_CONTEXT.reset(token)
+
+            self.assertEqual(len(observed_inside), 1)
+            self.assertIsNotNone(observed_inside[0])
+            self.assertNotEqual(observed_inside[0], outer_ctx)
+
+        for has_outer in (False, True):
+            with self.subTest(has_outer=has_outer):
+                asyncio.run(run_scenario(has_outer))
+
+    def test_same_task_restoration_on_downstream_app_exception(self):
+        async def run_scenario(preexisting_outer: bool):
+            expected_err = RuntimeError("inner app exploded")
+            observed_inside: list[TraceContext | None] = []
+
+            async def failing_app(scope, receive, send):
+                observed_inside.append(current_trace_context())
+                raise expected_err
+
+            mw = TraceContextMiddleware(failing_app, trust_remote_traceparent=True)
+            scope = self._make_dummy_scope()
+
+            async def dummy_receive():
+                return {}
+
+            async def dummy_send(_msg):
+                pass
+
+            outer_ctx = self._make_outer_context() if preexisting_outer else None
+            token = _CURRENT_TRACE_CONTEXT.set(outer_ctx) if preexisting_outer else None
+            try:
+                self.assertEqual(current_trace_context(), outer_ctx)
+                with self.assertRaises(RuntimeError) as cm:
+                    await mw(scope, dummy_receive, dummy_send)
+                self.assertIs(cm.exception, expected_err)
+                # SAME async task: immediately after catching the exception
+                self.assertEqual(current_trace_context(), outer_ctx)
+            finally:
+                if token is not None:
+                    _CURRENT_TRACE_CONTEXT.reset(token)
+
+            self.assertEqual(len(observed_inside), 1)
+            self.assertIsNotNone(observed_inside[0])
+            self.assertNotEqual(observed_inside[0], outer_ctx)
+
+        for has_outer in (False, True):
+            with self.subTest(has_outer=has_outer):
+                asyncio.run(run_scenario(has_outer))
+
+    def test_same_task_restoration_on_send_failure(self):
+        async def run_scenario(preexisting_outer: bool, fail_at: str):
+            transport_err = OSError("client connection reset by peer")
+            observed_inside: list[TraceContext | None] = []
+
+            async def app_with_send(scope, receive, send):
+                observed_inside.append(current_trace_context())
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+                await send({"type": "http.response.body", "body": b"data"})
+
+            async def failing_send(msg):
+                if msg.get("type") == fail_at:
+                    raise transport_err
+
+            mw = TraceContextMiddleware(app_with_send, trust_remote_traceparent=True)
+            scope = self._make_dummy_scope()
+
+            async def dummy_receive():
+                return {}
+
+            outer_ctx = self._make_outer_context() if preexisting_outer else None
+            token = _CURRENT_TRACE_CONTEXT.set(outer_ctx) if preexisting_outer else None
+            try:
+                self.assertEqual(current_trace_context(), outer_ctx)
+                with self.assertRaises(OSError) as cm:
+                    await mw(scope, dummy_receive, failing_send)
+                self.assertIs(cm.exception, transport_err)
+                # SAME async task: immediately after catching the send failure
+                self.assertEqual(current_trace_context(), outer_ctx)
+            finally:
+                if token is not None:
+                    _CURRENT_TRACE_CONTEXT.reset(token)
+
+            self.assertEqual(len(observed_inside), 1)
+            self.assertIsNotNone(observed_inside[0])
+            self.assertNotEqual(observed_inside[0], outer_ctx)
+
+        for has_outer in (False, True):
+            for fail_at in ("http.response.start", "http.response.body"):
+                with self.subTest(has_outer=has_outer, fail_at=fail_at):
+                    asyncio.run(run_scenario(has_outer, fail_at))
+
+    def test_same_task_restoration_on_task_cancellation(self):
+        async def run_scenario(preexisting_outer: bool):
+            started = asyncio.Event()
+            hang = asyncio.Event()
+            observed_inside: list[TraceContext | None] = []
+            same_task_ctx_after_cancel: list[TraceContext | None] = []
+
+            async def hanging_app(scope, receive, send):
+                observed_inside.append(current_trace_context())
+                started.set()
+                await hang.wait()
+
+            mw = TraceContextMiddleware(hanging_app, trust_remote_traceparent=True)
+            scope = self._make_dummy_scope()
+
+            async def dummy_receive():
+                return {}
+
+            async def dummy_send(_msg):
+                pass
+
+            outer_ctx = self._make_outer_context() if preexisting_outer else None
+
+            async def target_task():
+                token = _CURRENT_TRACE_CONTEXT.set(outer_ctx) if preexisting_outer else None
+                try:
+                    self.assertEqual(current_trace_context(), outer_ctx)
+                    try:
+                        await mw(scope, dummy_receive, dummy_send)
+                    except asyncio.CancelledError:
+                        # In the SAME async task upon cancellation:
+                        same_task_ctx_after_cancel.append(current_trace_context())
+                        raise
+                finally:
+                    if token is not None:
+                        _CURRENT_TRACE_CONTEXT.reset(token)
+
+            task = asyncio.create_task(target_task())
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            self.assertEqual(len(observed_inside), 1)
+            self.assertIsNotNone(observed_inside[0])
+            self.assertNotEqual(observed_inside[0], outer_ctx)
+            self.assertEqual(len(same_task_ctx_after_cancel), 1)
+            self.assertEqual(same_task_ctx_after_cancel[0], outer_ctx)
+
+        for has_outer in (False, True):
+            with self.subTest(has_outer=has_outer):
+                asyncio.run(run_scenario(has_outer))
 
 
 if __name__ == "__main__":
