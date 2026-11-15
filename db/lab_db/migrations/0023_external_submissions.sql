@@ -8,7 +8,8 @@
 --   * external_submissions: one row per upload (the file's sha256 and artifact, who, method name/version/notes, the validation report);
 --     a re-upload is a NEW run, nothing is overwritten;
 --   * submission_source_matches: for every submitted source passage, where the quote was found on the cited page of the system parse
---     (match_quality) or that it was NOT found (text_found false): a fabricated quote is a visible fact.
+--     (match_quality) or that it was NOT found (text_found false): a fabricated quote is a visible fact, and the judge only ever sees
+--     the system's own text of the matched units, never a quote that was not found.
 
 ALTER TABLE method_revisions DROP CONSTRAINT method_revisions_execution_mode_check;
 ALTER TABLE method_revisions ADD CONSTRAINT method_revisions_execution_mode_check CHECK (execution_mode IN ('http', 'jsonl', 'offline_file'));
@@ -44,6 +45,10 @@ CREATE TABLE submission_source_matches (
     match_quality   text NOT NULL CHECK (match_quality IN ('exact_in_unit', 'exact_in_page', 'not_found', 'page_without_text')),
     text_found      boolean NOT NULL,
     quote_coverage  double precision NOT NULL CHECK (quote_coverage BETWEEN 0 AND 1),   -- share of the quote's content words that are on the page
+    -- the text of the matched unit(s) FROM THE SYSTEM PARSE (what the judge may see); NULL exactly when the quote was not found. The
+    -- developer's own string is never evidence: for a quote that is not on the cited page the judge sees nothing of it.
+    matched_text    text CHECK (matched_text IS NULL OR length(matched_text) BETWEEN 1 AND 8000),
+    CHECK (text_found = (matched_text IS NOT NULL)),
     PRIMARY KEY (submission_id, hit_key),
     FOREIGN KEY (submission_id, hit_key) REFERENCES retrieved_hits(submission_id, hit_key) ON DELETE RESTRICT,
     CHECK (text_found = (match_quality IN ('exact_in_unit', 'exact_in_page')))

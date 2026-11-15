@@ -180,6 +180,96 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
         est = self.get(owner, project, f"{BASE}/estimate?phase=judge&run_id={run}")
         self.assertEqual(est.status_code, 200, est.text)
 
+    # --- the judge never sees a quote that was not found, and an invented source earns no judged credit -----------------------------
+
+    FAKE = "ZZQ an invented sentence about cheese and tax law"
+
+    def judged_file(self, owner, project, sources_for_first):
+        """Question 0 answered with the given sources (a function of its gold page and text); every other question abstains."""
+        gold = self.gold(owner, project)
+        keys = sorted(gold)
+        page, text, answer = gold[keys[0]]
+        lines = [json.dumps({"question_id": keys[0], "status": "answered", "answer": answer, "sources": sources_for_first(page, text)})]
+        lines += [json.dumps({"question_id": k, "status": "abstained", "reason": "skip"}) for k in keys[1:]]
+        return "\n".join(lines) + "\n", keys[0], text
+
+    def judge_with_capture(self, owner, project, run, mode="judge_ok"):
+        import os
+        import tempfile
+        cap = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl")
+        cap.close()
+        self.addCleanup(os.unlink, cap.name)
+        j = self.client.post(f"/api/v1/runs/{run}/judge-runs?project_id={project}", headers=self.headers(owner), json={"model": "fake-model", "budget_cap_micros": 50_000_000})
+        self.assertEqual(j.status_code, 202, j.text)
+        w = self.worker(mode)
+        w.extra_env = {**w.extra_env, "FAKE_LAB_GEN_CAPTURE": cap.name}
+        w.run_once()
+        with open(cap.name, encoding="utf-8") as fh:
+            prompts = [json.loads(x) for x in fh.read().splitlines() if x.strip()]
+        results = self.client.get(f"/api/v1/runs/{run}/results", headers=self.headers(owner)).json()
+        return prompts, {m["metric_name"]: m for m in results["metrics"]}, results
+
+    def test_a_correct_answer_that_cites_only_an_invented_quote_is_judged_on_its_answer_but_earns_no_source_credit(self):
+        project, owner = self.frozen()
+        content, key, _ = self.judged_file(owner, project, lambda page, text: [{"page": page, "text": self.FAKE}])
+        run = self.upload(owner, project, content).json()["run_id"]
+        prompts, metrics, results = self.judge_with_capture(owner, project, run)
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("ZZQ", prompts[0]["user"])                      # the judge never saw the invented quote
+        self.assertNotIn("cheese", prompts[0]["user"])
+        self.assertIn('cites=""', prompts[0]["user"])                    # the claim has no passage to be supported by
+        self.assertAlmostEqual(metrics["correctness"]["mean"], 100.0 / 18, places=6)     # the ANSWER is still judged: 1 of 18 at 100, the 17 abstentions score 0
+        with self.connect() as c:
+            row = c.execute("SELECT raw_value FROM question_scores s JOIN questions q ON q.id = s.question_id WHERE s.evaluation_id = %s "
+                            "AND q.question_key = %s AND s.metric_name = 'correctness'", (results["evaluation"]["id"], key)).fetchone()
+        self.assertEqual(row[0], 100.0)
+        for name in ("faithfulness", "citation_precision", "citation_completeness"):
+            self.assertEqual((metrics[name]["scored"], metrics[name]["mean"]), (1, 0.0), name)       # nothing real supports it: 0, whatever the model said
+        sc = results["source_checks"]
+        self.assertEqual((sc["total"], sc["found"], sc["not_found"], sc["excluded_from_judge"], sc["page_only_retrieval_credit"]), (1, 0, 1, 1, 1))
+        self.assertIn("excluded from the judge", sc["note"])
+        self.assertEqual(results["judge"]["judged_questions"], 1)
+
+    def test_a_mixed_answer_keeps_only_the_found_source_the_system_text_not_the_developers_and_the_invented_citation_counts_against_precision(self):
+        project, owner = self.frozen()
+        content, key, text = self.judged_file(owner, project, lambda page, t: [
+            {"page": page, "text": t.upper().replace(" ", "  ")},          # found (case and spacing differ)
+            {"page": page, "text": self.FAKE}])                             # not found
+        run = self.upload(owner, project, content).json()["run_id"]
+        prompts, metrics, results = self.judge_with_capture(owner, project, run)
+        user = prompts[0]["user"]
+        self.assertNotIn("ZZQ", user)
+        self.assertIn(text, user)                                           # the system parse's own text of the matched unit
+        self.assertNotIn(text.upper().replace(" ", "  "), user)             # not the developer's version of it
+        self.assertIn('cites="s1"', user)                                   # only the found source is offered to the judge
+        self.assertEqual(metrics["faithfulness"]["mean"], 100.0)            # the claim IS supported by the real passage
+        self.assertEqual(metrics["citation_precision"]["mean"], 50.0)       # 1 of its 2 citations supports it; the invented one counts against
+        self.assertEqual(metrics["citation_completeness"]["mean"], 100.0)
+        sc = results["source_checks"]
+        self.assertEqual((sc["total"], sc["found"], sc["not_found"]), (2, 1, 1))
+        listed = self.get(owner, project, f"{BASE}/submissions").json()["items"][0]
+        self.assertEqual(listed["source_checks"]["not_found"], 1)
+
+    def test_when_every_source_is_found_nothing_is_excluded_and_the_judge_sees_the_system_text(self):
+        project, owner = self.frozen()
+        content, key, text = self.judged_file(owner, project, lambda page, t: [{"page": page, "text": t}])
+        run = self.upload(owner, project, content).json()["run_id"]
+        prompts, metrics, results = self.judge_with_capture(owner, project, run)
+        self.assertIn(text, prompts[0]["user"])
+        self.assertEqual([metrics[n]["mean"] for n in ("faithfulness", "citation_precision", "citation_completeness")], [100.0, 100.0, 100.0])
+        self.assertEqual(results["source_checks"]["excluded_from_judge"], 0)
+
+    def test_an_answer_without_any_source_is_unsupported_and_a_builtin_run_has_no_source_checks(self):
+        project, owner = self.frozen()
+        content, key, _ = self.judged_file(owner, project, lambda page, text: [])
+        run = self.upload(owner, project, content).json()["run_id"]
+        prompts, metrics, results = self.judge_with_capture(owner, project, run)
+        self.assertEqual(metrics["faithfulness"]["mean"], 0.0)
+        self.assertEqual(metrics["citation_precision"]["mean"], 0.0)       # answerable, no citations: 0
+        self.assertIsNone(results["source_checks"])                        # no sources were submitted at all
+        baseline = self.api("post", owner, f"{BASE}/baseline-run", project, {}).json()["run_id"]
+        self.assertIsNone(self.client.get(f"/api/v1/runs/{baseline}/results", headers=self.headers(owner)).json()["source_checks"])
+
     def test_a_file_with_problems_imports_nothing_until_the_owner_accepts_the_valid_lines(self):
         project, owner = self.frozen()
         good = self.file(owner, project, skip={4})
@@ -196,7 +286,7 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertEqual(report["problem_count"], 4)
         self.assertNotIn("q-unknown", res.text)
         with self.connect() as c:
-            self.assertEqual(c.execute("SELECT count(*) FROM external_submissions").fetchone()[0], 0)       # nothing was imported
+            self.assertEqual(c.execute("SELECT count(*) FROM external_submissions WHERE project_id = %s", (project,)).fetchone()[0], 0)       # nothing was imported
         self.assertEqual(self.get(owner, project, f"{BASE}/submissions").json()["items"], [])
         ok = self.upload(owner, project, bad, accept_partial=True)
         self.assertEqual(ok.status_code, 201, ok.text)

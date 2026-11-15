@@ -1122,6 +1122,8 @@ export type RunResultsResponse = {
     method_failures: Record<string, number>;
   };
   judge?: JudgeSummary | null;
+  /** An uploaded developer file: how its quoted sources fared against the system parse. */
+  source_checks?: { total: number; found: number; not_found: number; page_without_text: number; excluded_from_judge: number; page_only_retrieval_credit: number; note: string } | null;
   excluded_questions?: { ordinal: number; reason: string }[];
 };
 

@@ -34,7 +34,11 @@
    **找不到 → region 是整頁，並記錄 `text_found = false`、`match_quality = not_found`、該頁有多少比例的字詞出現過（`quote_coverage`）**；那一頁系統沒有解析出文字則是 `page_without_text`。
    捏造或抄錯的引文會被數出來、逐題顯示，不會被默默接受。
 4. **評分**：規則式指標（recall／complete／localization）和內建方法同一個評分器；`correctness`、`citation_*`、`faithfulness` 在評分模型跑之前是 `pending`。
-   `POST /api/v1/runs/{run_id}/judge-runs` 對上傳的 run 一樣可用（評分模型看到的是他的答案和他附的段落；同一家模型、沒校準、暫定）。
+   `POST /api/v1/runs/{run_id}/judge-runs` 對上傳的 run 一樣可用（同一家模型、沒校準、暫定）。**評分模型只看得到「在引用的頁面上真的找得到」的來源，而且看到的是系統自己解析出的那段原文（`submission_source_matches.matched_text`），不是開發人員寫的字串**：
+   - 找不到的引文（含該頁系統沒有文字）完全不給評分模型看；它們不替答案加分，但**仍算在 citation precision 的分母裡**（那筆引用是「不支持」）；
+   - 一個沒有任何可看來源的主張（引文全找不到，或根本沒附來源）**依定義就是不被支持**（faithfulness 0、citation precision 0），不論模型怎麼說；答案本身仍然會對照標準答案評 `correctness`；
+   - 混合的情況只保留找得到的來源；
+   - `GET /runs/{id}/results` 的 `source_checks`：`total`／`found`／`not_found`／`page_without_text`／`excluded_from_judge`，以及 `page_only_retrieval_credit`——找不到的引文的 region 是整頁，所以它們的檢索分數只是「整頁命中」，不是找到了那段文字。網頁在分數旁邊與比較表都顯示「N 段已從評分排除」。
 5. **紀錄**：每次上傳是**新的 run**（方法的 `execution_mode` 是 `offline_file`，`visibility` 是 `declared_only`），重傳不會蓋掉舊的；檔案存成 artifact，記錄 sha256、上傳者、方法名稱／版本／備註與檢查報告（`external_submissions`，只能新增）。
 
 ## 看結果

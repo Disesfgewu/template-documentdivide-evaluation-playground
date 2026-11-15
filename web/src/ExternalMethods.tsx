@@ -282,14 +282,18 @@ function ComparisonTable({ uploads, results }: { uploads: UploadedMethod[]; resu
               {uploads.map((u) => <td key={u.run_id}>{u.counts.not_submitted}</td>)}
             </tr>
             <tr>
-              <td>找不到的引文</td>
-              {uploads.map((u) => <td key={u.run_id} className={u.source_checks && u.source_checks.not_found > 0 ? "tone-bad" : undefined}>{u.source_checks ? `${u.source_checks.not_found} / ${u.source_checks.total}` : "—"}</td>)}
+              <td>沒被採信的引文（已從評分排除）</td>
+              {uploads.map((u) => {
+                const bad = u.source_checks ? u.source_checks.total - u.source_checks.found : 0;
+                return <td key={u.run_id} className={bad > 0 ? "tone-bad" : undefined}>{u.source_checks ? `${bad} / ${u.source_checks.total}` : "—"}</td>;
+              })}
             </tr>
           </tbody>
         </table>
       </div>
       <p className="muted small">
         每個指標各自比較，不加總、不排名。{graders.size > 1 ? "這些方法的評分狀態不同（有的已用評分模型評分、有的還沒），不同狀態的欄位不能直接比較。" : ""}
+        在引用的頁面找不到的引文不會被評分模型看到（它只看系統自己解析出的原文），所以不會替答案加分；每個方法被排除了幾段，在上面那一列。
         答案品質的分數由同一家模型評出、沒有用人工標註校準，都是暫定的。
       </p>
     </div>
@@ -354,8 +358,11 @@ function UploadCard({ u, result, common, onChanged }: { u: UploadedMethod; resul
         <span className="muted small"> ｜ {new Date(u.uploaded_at).toLocaleString()} ｜ 答案 {answered}、棄答 {u.counts.abstained}、未提交 {u.counts.not_submitted}
           {u.imported_only_valid_lines ? "｜只匯入了沒有問題的行" : ""} ｜ sha256 {u.file_sha256.slice(0, 12)}…</span>
       </p>
-      {u.source_checks && u.source_checks.not_found > 0 && (
-        <p className="tone-bad small" style={{ margin: "0.25rem 0" }}>有 {u.source_checks.not_found} 段引文在它引用的那一頁找不到。</p>
+      {u.source_checks && u.source_checks.total - u.source_checks.found > 0 && (
+        <p className="tone-bad small" style={{ margin: "0.25rem 0" }} data-testid="not-found-note">
+          有 {u.source_checks.total - u.source_checks.found} 段引文沒有被採信（在它引用的那一頁找不到，或那一頁系統沒有解析出文字）：它們已從評分模型排除，
+          不會替答案加分、反而算在引用精準度的分母裡；它們在檢索分數上只是「整頁命中」，不是找到了那段文字。
+        </p>
       )}
       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap", marginTop: "0.25rem" }}>
         <button type="button" disabled={judging || answered === 0} onClick={() => void judge()}
@@ -369,7 +376,14 @@ function UploadCard({ u, result, common, onChanged }: { u: UploadedMethod; resul
           {showDetail ? "收起每一題" : "看每一題"}
         </button>
       </div>
-      {result?.judge && <p className="muted small" data-testid="judge-limit">限制：{result.judge.limitation}</p>}
+      {result?.judge && (
+        <p className="muted small" data-testid="judge-limit">
+          限制：{result.judge.limitation}
+          {result.source_checks && result.source_checks.excluded_from_judge > 0 && (
+            <strong className="tone-bad" data-testid="judge-excluded"> ｜ {result.source_checks.excluded_from_judge} 段引文在引用的頁面找不到，已從評分排除（共 {result.source_checks.total} 段）</strong>
+          )}
+        </p>
+      )}
       {msg && <div role="alert" className="box box-error">{msg}</div>}
       {showDetail && detail && (
         <div className="table-wrap" data-testid="upload-detail">

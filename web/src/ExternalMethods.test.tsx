@@ -61,7 +61,8 @@ function backend(opts: { uploads?: unknown[]; uploadReply?: (body: Record<string
     for (const run of [RUN1, RUN2]) {
       if (u.includes(`/api/v1/runs/${run}/results`)) {
         const judged = (opts.judgedRuns ?? []).includes(run) || calls.some((c) => c.url.includes("/judge-runs"));
-        return json({ ...results(run === RUN1 ? 75 : 60, judged), run_id: run });
+        return json({ ...results(run === RUN1 ? 75 : 60, judged), run_id: run,
+          source_checks: { total: 15, found: 12, not_found: 2, page_without_text: 1, excluded_from_judge: 3, page_only_retrieval_credit: 3, note: "x" } });
       }
     }
     return json({ error: { message: "not found" } }, 404);
@@ -167,8 +168,10 @@ describe("DeveloperUploads (step 9)", () => {
     expect(table).toContain("已用評分模型評分");
     expect(table).toContain("還沒評分模型評分");
     expect(table).toContain("尚未評分");                     // beta has no judge scores: pending, never a number
-    expect(table).toContain("2 / 15");                       // alpha's quotes that were not found
+    expect(table).toContain("3 / 15");                       // alpha: 2 not found + 1 on a page without text = 3 sources the judge never sees
     expect(table).toContain("0 / 18");
+    expect(table).toContain("沒被採信的引文（已從評分排除）");
+    expect(table).toContain("不會被評分模型看到");
     expect(table).toContain("不加總、不排名");
     expect(table).toContain("不同狀態的欄位不能直接比較");
     expect(table).not.toMatch(/總分|排名第/);
@@ -187,6 +190,9 @@ describe("DeveloperUploads (step 9)", () => {
     fireEvent.click(screen.getByRole("button", { name: "用評分模型評分" }));
     await waitFor(() => expect(screen.getByTestId("judge-limit")).toBeTruthy(), { timeout: 8000 });
     expect(screen.getByTestId("judge-limit").textContent).toContain("uncalibrated");
+    expect(screen.getByTestId("judge-excluded").textContent).toContain("3 段引文在引用的頁面找不到，已從評分排除（共 15 段）");
+    expect(screen.getByTestId("not-found-note").textContent).toContain("已從評分模型排除");
+    expect(screen.getByTestId("not-found-note").textContent).toContain("整頁命中");
     expect(JSON.parse(calls.find((c) => c.url.includes("/judge-runs"))!.body!)).toEqual({ model: "claude-haiku-4-5-20251001" });   // no price: derived
   }, 20000);
 });

@@ -42,6 +42,7 @@ MAX_SOURCES = 10
 MAX_SOURCE_CHARS = 2000
 MIN_SOURCE_CHARS = 6                # fewer non-space characters would match almost anywhere
 MAX_REASON_CHARS = 2000
+MAX_SYSTEM_TEXT = 6000               # the matched system text a judge may see per source (as the answering prompt caps a hit)
 MAX_QUESTIONS = 250                 # scored inside one request, like the baseline
 MAX_PROBLEMS_LISTED = 200
 BUDGET_PROFILE = "offline-file"
@@ -219,6 +220,7 @@ class Located:
     quality: str                     # exact_in_unit | exact_in_page | not_found | page_without_text
     regions: list                    # [(page_index, bbox, kind)]
     coverage: float                  # share of the quote's content words found on the page
+    system_text: Optional[str] = None   # the text of the matched unit(s) in the SYSTEM parse (None when not found): the only text a judge may see
 
     @property
     def found(self) -> bool:
@@ -236,7 +238,7 @@ def locate(quote: str, page_index: int, by_page: dict) -> Located:
     q = norm_strip(quote)
     for u in page_units:
         if q in u.text:
-            return Located("exact_in_unit", [r for r in u.regions if r[0] == page_index][:64], 1.0)
+            return Located("exact_in_unit", [r for r in u.regions if r[0] == page_index][:64], 1.0, u.raw[:MAX_SYSTEM_TEXT])
     joined, spans, pos = "", [], 0
     for u in page_units:
         spans.append((pos, pos + len(u.text), u))
@@ -245,8 +247,9 @@ def locate(quote: str, page_index: int, by_page: dict) -> Located:
     at = joined.find(q)
     if at >= 0:
         end = at + len(q)
-        hit = [r for s, e, u in spans if s < end and e > at for r in u.regions if r[0] == page_index]
-        return Located("exact_in_page", hit[:64], 1.0)
+        over = [u for s, e, u in spans if s < end and e > at]
+        hit = [r for u in over for r in u.regions if r[0] == page_index]
+        return Located("exact_in_page", hit[:64], 1.0, "\n".join(u.raw for u in over)[:MAX_SYSTEM_TEXT])
     page_words = set(content_tokens(" ".join(u.raw for u in page_units)))
     words = content_tokens(quote)
     coverage = (sum(1 for w in words if w in page_words) / len(words)) if words else 0.0
@@ -378,8 +381,9 @@ def import_submission(conn: psycopg.Connection, store: LocalArtifactStore, proje
                 conn.execute("INSERT INTO citations (submission_id, claim_key, hit_key, region_indices) VALUES (%s, %s, %s, %s)",
                              (submission_id, cit.claim_id, cit.hit_id, list(cit.region_indices)))
             for hit_key, page, loc in matches:
-                conn.execute("INSERT INTO submission_source_matches (submission_id, hit_key, cited_page, match_quality, text_found, quote_coverage) "
-                             "VALUES (%s, %s, %s, %s, %s, %s)", (submission_id, hit_key, page, loc.quality, loc.found, loc.coverage))
+                conn.execute("INSERT INTO submission_source_matches (submission_id, hit_key, cited_page, match_quality, text_found, quote_coverage, "
+                             "matched_text) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                             (submission_id, hit_key, page, loc.quality, loc.found, loc.coverage, loc.system_text))
                 checks["total"] += 1
                 checks["found" if loc.found else loc.quality] += 1
             for result in be._score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_code=code):
