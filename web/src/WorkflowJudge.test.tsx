@@ -99,7 +99,7 @@ describe("Workflow: the judge step", () => {
     const { f, calls } = backend();
     await runUntilFrozen(f);
     expect(judgeButton().disabled).toBe(true);
-    expect(screen.getByTestId("judge-help").textContent).toContain("先在步驟 8");
+    expect(screen.getByTestId("judge-help").textContent).toContain("先在「參考 baseline」區");
     fireEvent.click(screen.getByRole("button", { name: "詞彙 baseline" }));
     await waitFor(() => expect(screen.getByTestId("results-table")).toBeTruthy());
     expect(judgeButton().disabled).toBe(true);

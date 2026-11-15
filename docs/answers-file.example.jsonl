@@ -1,0 +1,3 @@
+{"method_name": "my-rag", "method_version": "0.3", "notes": "bm25 + reranker"}
+{"question_id": "q-8f3a1c", "status": "answered", "answer": "The annual fee is 120 EUR, due in May.", "sources": [{"page": 3, "text": "The annual fee of the Gold plan is 120 EUR and is due in May."}]}
+{"question_id": "q-b02d77", "status": "abstained", "reason": "the document does not say"}

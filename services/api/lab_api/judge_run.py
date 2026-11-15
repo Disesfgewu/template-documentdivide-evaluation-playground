@@ -72,9 +72,12 @@ def start_judge_run(conn: psycopg.Connection, project_id: uuid.UUID, run_id: uui
             raise JudgeRunError("benchmark_is_not_frozen")
         if run_status not in ("completed", "completed_with_errors"):
             raise JudgeRunError("the_run_is_not_finished")
-        if conn.execute("SELECT 1 FROM generate_jobs WHERE project_id = %s AND run_id = %s AND phase = 'answer'",
-                        (project_id, run_id)).fetchone() is None:
-            raise JudgeRunError("only_an_answering_method_run_can_be_judged")
+        answering = conn.execute("SELECT 1 FROM generate_jobs WHERE project_id = %s AND run_id = %s AND phase = 'answer'",
+                                 (project_id, run_id)).fetchone()
+        uploaded = conn.execute("SELECT 1 FROM runs r JOIN method_revisions m ON m.id = r.method_revision_id WHERE r.id = %s "
+                                "AND m.execution_mode = 'offline_file'", (run_id,)).fetchone()
+        if answering is None and uploaded is None:      # a model-answering run or an uploaded developer file; a retrieval-only baseline has no answer
+            raise JudgeRunError("only_a_run_with_answers_can_be_judged")
         active = conn.execute(
             "SELECT 1 FROM generate_jobs g JOIN jobs j ON j.project_id = g.project_id AND j.id = g.job_id "
             "WHERE g.project_id = %s AND g.benchmark_id = %s AND g.phase IN ('judge', 'answer') AND j.status::text = ANY(%s) LIMIT 1",

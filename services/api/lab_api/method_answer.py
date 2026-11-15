@@ -24,7 +24,7 @@ __all__ = ["ANSWER_PROMPT_VERSION", "AnswerReply", "FAILURE_CODES", "METHOD_LIMI
            "failure_response", "parse_answer_reply"]
 
 ANSWER_PROMPT_VERSION = "answer-v1"
-FAILURE_CODES = ("budget_exhausted", "provider_error", "invalid_model_reply", "outcome_unknown")
+FAILURE_CODES = ("budget_exhausted", "provider_error", "invalid_model_reply", "outcome_unknown", "not_submitted")
 MAX_HIT_CHARS = 6000
 MAX_REASON_CHARS = 400
 METHOD_LIMITS = [

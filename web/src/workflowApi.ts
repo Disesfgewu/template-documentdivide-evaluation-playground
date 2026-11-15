@@ -1353,11 +1353,11 @@ export async function getRunEstimate(ref: {
 // -----------------------------------------------------------------------------
 export type DownloadResult = { ok: true; blob: Blob; filename: string } | { ok: false; error: { message: string; status?: number } };
 
-export async function downloadBenchmark(ref: BenchRef & { format: "json" | "jsonl" }): Promise<DownloadResult> {
+async function downloadFrom(ref: BenchRef, path: string, format: "json" | "jsonl"): Promise<DownloadResult> {
   const bad = checkRef(ref);
   if (bad) return { ok: false, error: bad.ok ? { message: "請求無效" } : bad.error };
   const token = ref.token.trim();
-  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/export?project_id=${encodeURIComponent(ref.projectId.trim())}&format=${ref.format}`;
+  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/${path}?project_id=${encodeURIComponent(ref.projectId.trim())}&format=${format}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ref.timeoutMs ?? 60_000);
   try {
@@ -1374,10 +1374,150 @@ export async function downloadBenchmark(ref: BenchRef & { format: "json" | "json
     }
     const blob = await res.blob();
     const m = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "");
-    return { ok: true, blob, filename: m ? m[1] : `benchmark.${ref.format}` };
+    return { ok: true, blob, filename: m ? m[1] : `benchmark.${format}` };
   } catch (err) {
     return { ok: false, error: { message: sanitizeErrorMessage(`下載失敗（${err instanceof Error ? err.message : String(err)}）`, token) } };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The whole benchmark, gold included (owner / maintainer). */
+export async function downloadBenchmark(ref: BenchRef & { format: "json" | "jsonl" }): Promise<DownloadResult> {
+  return downloadFrom(ref, "export", ref.format);
+}
+
+/** The PARTICIPANT package of a frozen benchmark: the questions only, no gold. */
+export async function downloadQuestionsPackage(ref: BenchRef & { format: "json" | "jsonl" }): Promise<DownloadResult> {
+  return downloadFrom(ref, "questions/export", ref.format);
+}
+
+// -----------------------------------------------------------------------------
+// A method developer's answers (Issue #189)
+// -----------------------------------------------------------------------------
+export type SubmissionFormatDoc = {
+  format: string;
+  description: string[];
+  example_lines: string[];
+  line_schema: Record<string, unknown>;
+  header_schema: Record<string, unknown>;
+};
+
+export type UploadProblem = { line: number; code: string };
+
+export type UploadReport = {
+  file_sha256: string;
+  lines: number;
+  questions_in_benchmark: number;
+  answered: number;
+  abstained: number;
+  not_submitted: number;
+  problems: UploadProblem[];
+  problem_count: number;
+  source_checks?: { total: number; found: number; not_found: number; page_without_text: number };
+};
+
+export type UploadResponse = {
+  run_id: string;
+  evaluation_id: string;
+  method_name: string;
+  method_revision: number;
+  status: string;
+  evaluation_status: string;
+  report: UploadReport;
+  limits: string[];
+};
+
+export type UploadResult =
+  | { ok: true; data: UploadResponse }
+  | { ok: false; status?: number; message: string; report?: UploadReport };
+
+export async function getSubmissionFormat(ref: Pick<BenchRef, "token" | "fetchFn" | "signal" | "baseUrl">): Promise<ApiResult<SubmissionFormatDoc>> {
+  const token = ref.token.trim();
+  if (!token) return { ok: false, error: { message: "未提供認證 Token", status: 401, code: "unauthorized" } };
+  return executeFetch<SubmissionFormatDoc>(`${ref.baseUrl ?? ""}/api/v1/submission-format`, { method: "GET", headers: { Authorization: `Bearer ${token}` } },
+    token, DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);
+}
+
+/** Upload the file's text. A 422 keeps the validation report (nothing was imported); the owner may resend with acceptPartial. */
+export async function uploadAnswers(ref: BenchRef & { methodName: string; methodVersion?: string; notes?: string; fileContent: string; acceptPartial?: boolean }): Promise<UploadResult> {
+  const bad = checkRef(ref);
+  if (bad) return { ok: false, message: bad.ok ? "請求無效" : bad.error.message };
+  const token = ref.token.trim();
+  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/submissions?project_id=${encodeURIComponent(ref.projectId.trim())}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ref.timeoutMs ?? 180_000);
+  try {
+    const res = await (ref.fetchFn ?? fetch)(endpoint, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        method_name: ref.methodName.trim(), file_content: ref.fileContent, accept_partial: Boolean(ref.acceptPartial),
+        ...(ref.methodVersion?.trim() ? { method_version: ref.methodVersion.trim() } : {}), ...(ref.notes?.trim() ? { notes: ref.notes.trim() } : {}),
+      }),
+      signal: ref.signal ?? controller.signal,
+    });
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    if (res.ok) return { ok: true, data: body as UploadResponse };
+    const err = (body as { error?: { message?: string; details?: { report?: UploadReport } } } | null)?.error;
+    return { ok: false, status: res.status, message: sanitizeErrorMessage(err?.message ?? `上傳失敗（HTTP ${res.status}）`, token), report: err?.details?.report };
+  } catch (e) {
+    return { ok: false, message: sanitizeErrorMessage(`上傳失敗（${e instanceof Error ? e.message : String(e)}）`, token) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export type UploadedMethod = {
+  run_id: string;
+  method_name: string;
+  method_version: string | null;
+  notes: string | null;
+  file_sha256: string;
+  uploaded_at: string;
+  imported_only_valid_lines: boolean;
+  run_status: string;
+  evaluation_id: string | null;
+  grader_revision: string | null;
+  judged: boolean;
+  counts: { answered: number; abstained: number; not_submitted: number; problem_count: number };
+  source_checks: { total: number; found: number; not_found: number; page_without_text: number } | null;
+};
+
+export async function listUploads(ref: BenchRef): Promise<ApiResult<{ items: UploadedMethod[]; benchmark_status: string }>> {
+  const bad = checkRef(ref);
+  if (bad) return bad;
+  const token = ref.token.trim();
+  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/submissions?project_id=${encodeURIComponent(ref.projectId.trim())}`;
+  return executeFetch(endpoint, { method: "GET", headers: { Authorization: `Bearer ${token}` } }, token, ref.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    ref.fetchFn ?? fetch, ref.signal);
+}
+
+export type SubmissionDetailItem = {
+  question_id: string;
+  ordinal: number;
+  question_text: string;
+  status: string;
+  failure_reason: string | null;
+  their_answer: string | null;
+  their_reason: string | null;
+  their_sources: { page: number | null; text: string; match_quality?: string; text_found?: boolean; quote_coverage?: number }[];
+  scores: Record<string, { status: string; value: number | null; reason_codes: string[] }>;
+  gold: { reference_answer: string | null; required_facts: { statement: string }[] | null };
+};
+
+export async function getSubmissionDetails(ref: { runId: string; projectId: string; token: string; fetchFn?: typeof fetch; signal?: AbortSignal; baseUrl?: string }):
+  Promise<ApiResult<{ items: SubmissionDetailItem[]; method_name: string }>> {
+  const token = ref.token.trim();
+  if (!token) return { ok: false, error: { message: "未提供認證 Token", status: 401, code: "unauthorized" } };
+  if (!validateUuid(ref.runId) || !validateUuid(ref.projectId.trim())) {
+    return { ok: false, error: { message: "ID 格式錯誤（須為 UUID）", status: 400, code: "bad_request" } };
+  }
+  return executeFetch(`${ref.baseUrl ?? ""}/api/v1/runs/${ref.runId}/submission-details?project_id=${encodeURIComponent(ref.projectId.trim())}`,
+    { method: "GET", headers: { Authorization: `Bearer ${token}` } }, token, 60_000, ref.fetchFn ?? fetch, ref.signal);
 }

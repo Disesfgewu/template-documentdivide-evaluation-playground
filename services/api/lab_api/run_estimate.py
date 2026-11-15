@@ -117,6 +117,9 @@ def estimate_judge(conn: psycopg.Connection, settings: Settings, project_id: uui
                    max_output_tokens: int = MAX_OUTPUT_TOKENS) -> dict:
     n = conn.execute("SELECT count(*) FROM submissions WHERE run_id = %s AND status = 'accepted' AND answer_status = 'answered' "
                      "AND failure_reason IS NULL", (run_id,)).fetchone()[0]
-    per_call = _bound_worst(settings, len(JUDGE_SYSTEM.encode("utf-8")) + JUDGE_FIXED_BYTES + _largest_pages_bytes(conn, project_id, benchmark_id),
-                            max_output_tokens)
+    uploaded = conn.execute("SELECT 1 FROM runs r JOIN method_revisions m ON m.id = r.method_revision_id WHERE r.id = %s "
+                            "AND m.execution_mode = 'offline_file'", (run_id,)).fetchone() is not None
+    # an uploaded file: the judge sees at most 10 submitted passages of 2000 characters (up to 3 bytes each) and a 4000-character answer
+    shown = (10 * 2000 + 4000) * 3 if uploaded else _largest_pages_bytes(conn, project_id, benchmark_id)
+    per_call = _bound_worst(settings, len(JUDGE_SYSTEM.encode("utf-8")) + JUDGE_FIXED_BYTES + shown, max_output_tokens)
     return _result("judge", int(n), int(n) * per_call, {"bound": True})

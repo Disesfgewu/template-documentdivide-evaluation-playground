@@ -253,7 +253,9 @@ FROM target_eval te
     # provider, contract, unknown outcome: a fixed code) are three different things and are counted separately.
     # A run with no model behind it (the lexical baseline only returns pages) answers nothing: its submissions are reported as
     # "no_answer_retrieval_only", never as a model's abstention (Issue #7: the baseline showed 'abstained_by_model: 9').
-    answering = conn.execute("SELECT EXISTS (SELECT 1 FROM generate_jobs WHERE run_id = %s AND phase = 'answer')", (run_id,)).fetchone()
+    answering = conn.execute("SELECT EXISTS (SELECT 1 FROM generate_jobs WHERE run_id = %s AND phase = 'answer') OR EXISTS ("
+                             "SELECT 1 FROM runs r JOIN method_revisions m ON m.id = r.method_revision_id WHERE r.id = %s "
+                             "AND m.execution_mode = 'offline_file')", (run_id, run_id)).fetchone()
     retrieval_only = answering is not None and answering[0] is False
     counts = {"answered": 0, "abstained_by_model": 0, "no_answer_retrieval_only": 0}
     method_failures: dict[str, int] = {}

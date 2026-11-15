@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { QuestionsPanel } from "./QuestionsPanel";
 import { QuestionReview } from "./QuestionReview";
 import { BenchmarkDownload } from "./BenchmarkDownload";
+import { DeveloperPackage, DeveloperUploads } from "./ExternalMethods";
 import {
   cancelJob,
   createBenchmark,
@@ -126,6 +127,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
   const [methodModel, setMethodModel] = useState("claude-haiku-4-5-20251001");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeEvalId, setActiveEvalId] = useState<string | null>(null);
+  // The real flow (Issue #189): the questions go to a method developer, the developer's answers come back
+  const [packageDownloaded, setPackageDownloaded] = useState(false);
+  const [uploadedAnswers, setUploadedAnswers] = useState(false);
   const [activeRunKind, setActiveRunKind] = useState<"baseline" | "model" | null>(null);
 
   // Step 9: Results & Judge
@@ -817,8 +821,8 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     { key: "generate", label: "出題", state: genStatus },
     { key: "validate", label: "驗題", state: valStatus },
     { key: "freeze", label: "凍結", state: freezeStatus },
-    { key: "method", label: "作答", state: methodStatus },
-    { key: "results", label: "結果", state: resultsStatus },
+    { key: "method", label: "給開發人員", state: (packageDownloaded ? "success" : "idle") as StepState },
+    { key: "results", label: "上傳答案", state: (uploadedAnswers ? "success" : "idle") as StepState },
   ];
   const firstOpen = steps.find((st) => !(done(st.state) || (st.key === "freeze" && st.state === "conflict_409")));
   const failed = steps.find((st) => st.state === "error");
@@ -831,9 +835,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     generate: "在步驟 5 按「開始生成題目」。這一步會呼叫真實模型、會花一點錢（幾分錢美金）。",
     validate: "在步驟 6 按「開始自動驗題」，讓模型檢查每一題是否有根據。",
     freeze: "在步驟 7 凍結題庫。只有每一題都通過驗題才會成功；沒過的不會被刪掉。",
-    method: "在步驟 8 讓一個方法回答所有題目（詞彙 baseline 不花錢；模型回答方法會花錢）。",
-    results: "在步驟 9 看評分結果。",
-    done: "下面的結果與逐題得分就是這次評測。分數都是暫定的（provisional），人工審查尚未進行。",
+    method: "在步驟 8 下載題目檔（只有題目、沒有答案），交給要被評測的方法的開發人員。",
+    results: "開發人員把答案檔回傳後，在步驟 9 上傳；系統會核對他引用的原文是否真的在那一頁，然後評分。",
+    done: "下面有每個上傳方法的分數與比較。分數都是暫定的（provisional），人工審查尚未進行；答案品質的分數由同一家模型評出，沒有校準。",
   };
   const nextHint = failed ? `「${failed.label}」這一步失敗了，請看該步驟的錯誤訊息後重試。` : NEXT_HINTS[nextStepKey];
 
@@ -1338,10 +1342,44 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         </div>
       </div>
 
+      {/* Step 8: the questions go to a method developer (no gold) */}
+      <div style={cardStyle}>
+        <div style={headerStyle}>
+          <h3 style={{ margin: 0 }}>步驟 8: 給開發人員（下載題目檔）</h3>
+          <span style={{ ...badgeStyle, ...getStatusStyle(freezeStatus === "success" ? (packageDownloaded ? "success" : "idle") : "idle") }}>
+            {freezeStatus === "success" ? (packageDownloaded ? "已下載" : "可以下載") : "凍結後才能下載"}
+          </span>
+        </div>
+        <div style={{ marginTop: "0.75rem" }}>
+          {freezeStatus === "success" && benchLogicalId ? (
+            <DeveloperPackage fetchFn={fetchFn} token={token} projectId={projectId} logicalId={benchLogicalId} onDownloaded={() => setPackageDownloaded(true)} />
+          ) : <p className="muted small">先在步驟 7 凍結題庫；凍結之後才能把題目交出去。</p>}
+        </div>
+      </div>
+
+      {/* Step 9: the developer's answers come back */}
+      <div style={cardStyle}>
+        <div style={headerStyle}>
+          <h3 style={{ margin: 0 }}>步驟 9: 上傳開發人員的答案</h3>
+          <span style={{ ...badgeStyle, ...getStatusStyle(uploadedAnswers ? "success" : "idle") }}>{uploadedAnswers ? "已上傳" : "未開始"}</span>
+        </div>
+        <div style={{ marginTop: "0.75rem" }}>
+          {freezeStatus === "success" && benchLogicalId ? (
+            <DeveloperUploads fetchFn={fetchFn} token={token} projectId={projectId} logicalId={benchLogicalId} onUploaded={() => setUploadedAnswers(true)} />
+          ) : <p className="muted small">先凍結題庫並把題目檔交給開發人員。</p>}
+        </div>
+      </div>
+
+      {/* The system's own demo methods: optional, clearly not the real use */}
+      <div data-testid="reference-baselines" style={{ borderTop: "2px dashed var(--border)", marginTop: "1.5rem", paddingTop: "0.75rem" }}>
+        <h3 style={{ margin: "0 0 0.25rem 0" }}>選用：參考 baseline（系統自己的示範方法）</h3>
+        <p className="muted small" style={{ marginTop: 0 }}>
+          這裡的兩個方法（詞彙檢索 baseline、模型回答方法）是系統內建的示範，用來對照、也用來測試流程；真正要評測的方法請走上面的步驟 8、9。
+        </p>
       {/* Step 8 Card: Run Methods */}
       <div style={cardStyle}>
         <div style={headerStyle}>
-          <h3 style={{ margin: 0 }}>步驟 8: 執行評測方法 (Run Method)</h3>
+          <h3 style={{ margin: 0 }}>示範方法：執行 (Run Method)</h3>
           <span style={{ ...badgeStyle, ...getStatusStyle(methodStatus) }}>
             {getStatusLabel(methodStatus)}
           </span>
@@ -1414,7 +1452,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
       {/* Step 9 Card: Results */}
       <div style={cardStyle}>
         <div style={headerStyle}>
-          <h3 style={{ margin: 0 }}>步驟 9: 評分結果 (Results)</h3>
+          <h3 style={{ margin: 0 }}>示範方法：評分結果 (Results)</h3>
           <span style={{ ...badgeStyle, ...getStatusStyle(resultsStatus) }}>
             {getStatusLabel(resultsStatus)}
           </span>
@@ -1435,9 +1473,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
             <EstimateLine est={judgeEst} label="評分這一步" testId="judge-estimate" />
             <p className="help" data-testid="judge-help">
               {activeRunKind === "baseline"
-                ? "目前這個 run 是詞彙 baseline，沒有模型答案，不能評分。要評分請在步驟 8 執行「模型回答方法」。"
+                ? "目前這個 run 是詞彙 baseline，沒有模型答案，不能評分。要評分請在上面的「參考 baseline」區執行「模型回答方法」。"
                 : activeRunKind !== "model" || (methodStatus !== "success" && methodStatus !== "error")
-                  ? "先在步驟 8 執行「模型回答方法」，答完才能評分。"
+                  ? "先在「參考 baseline」區執行「模型回答方法」，答完才能評分。"
                   : "評分模型和答題模型是同一家（同模型家族），沒有用人工標註校準，所以分數是暫定的。沒有作答的題目（棄答、失敗）不會呼叫評分模型。"}
             </p>
             {judgeStatus === "running" && <p role="status" style={{ color: "#0066cc" }}>評分中…（每個作答的題目一次呼叫）</p>}
@@ -1555,9 +1593,10 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
           )}
 
           {!resultsData && resultsStatus !== "running" && !resultsError && (
-            <p style={{ color: "#666", fontSize: "0.9rem" }}>尚未取得評分結果。請先於步驟 8 執行方法。</p>
+            <p style={{ color: "#666", fontSize: "0.9rem" }}>尚未取得評分結果。請先在上面執行一個示範方法。</p>
           )}
         </div>
+      </div>
       </div>
     </section>
   );
