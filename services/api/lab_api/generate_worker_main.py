@@ -78,6 +78,20 @@ class GenerateWorker(Worker):
         self.extra_env = extra_env      # tests only (the fake child's mode); production passes nothing
         self.build_calls, self.on_results = make_build_calls(), make_on_results()
         self.validate_build_calls, self.validate_on_results = validate_questions.make_build_calls(), validate_questions.make_on_results()
+        self._phases: dict[uuid.UUID, str] = {}
+
+    def _handle(self, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome | None:
+        try:
+            return super()._handle(project_id, job_id)
+        finally:
+            # Includes queued, lease-lost, not-claimable and exception exits.
+            self._phases.pop(job_id, None)
+
+    def _outcome_log_reason(self, job_id: uuid.UUID, outcome: ParseOutcome) -> str:
+        phase = self._phases.pop(job_id, None)
+        if outcome.status == "succeeded" and phase in ("validate", "answer", "judge"):
+            return phase
+        return outcome.reason
 
     STATUS_EVERY_SECONDS = 15.0
 
@@ -102,6 +116,7 @@ class GenerateWorker(Worker):
         row = conn.execute("SELECT phase, run_id FROM generate_jobs WHERE project_id = %s AND job_id = %s",
                            (project_id, job_id)).fetchone()
         phase = row[0] if row else "generate"
+        self._phases[job_id] = phase
         if phase == "answer":
             if self.store is None:
                 raise RuntimeError("the artifact store is required for answer jobs (LAB_ARTIFACT_ROOT)")

@@ -32,6 +32,7 @@ from lab_api.generate_worker import CallSpec
 from lab_api.method_judge import (JUDGE_GRADER_SUFFIX, JUDGE_LIMITATION, JUDGE_PROMPT_REVISION, JUDGE_PROMPT_SHA256, MAX_JUDGED_CLAIMS,
                                   build_judge_call, check_verdict_ex, parse_judge_reply_ex)
 from lab_scoring import rules
+from .app_log import app_traced, log_op
 
 ACTION = "register_method_and_submit"
 RULE_METRICS = ("recall_at_k", "complete_at_k", "localization_precision", "textual_consistency")
@@ -149,6 +150,8 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                 matches = conn.execute("SELECT hit_key, matched_text FROM submission_source_matches WHERE submission_id = %s", (sid,)).fetchall()
                 offline = bool(matches)
                 found = {k: t for k, t in matches if t is not None}
+                log_op("judge_source_filter", stage="judge", offered_hit_ids=sorted(found),
+                       excluded_hit_ids=[k for k, t in matches if t is None], reason="quote_not_found")
                 if offline:
                     item["hit_text"] = found
                     item["not_found"] = len(matches) - len(found)
@@ -164,6 +167,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
     def judgeable(it) -> bool:
         return it["response"] is not None and it["facts"] is not None and len(it["claims"]) <= MAX_JUDGED_CLAIMS
 
+    @app_traced(stage="judge")
     def build_calls(conn, project_id, benchmark_id) -> Sequence[CallSpec]:
         calls = []
         for it in load(conn, benchmark_id):
@@ -171,6 +175,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                 calls.append(build_judge_call(it["call_id"], it["facts"], it["response"].answer.text, it["claims"], it["hit_text"]))
         return calls
 
+    @app_traced(stage="judge")
     def derive(it, verdict, grader) -> list:
         qkey = it["qkey"]
         score = {label: Fraction(1) if v == "stated" else Fraction(0) for label, v in verdict.facts}
@@ -190,6 +195,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                 rules.citation_precision(qkey, citations, True, grader),
                 rules.citation_completeness(qkey, len(supported), fully, grader)]
 
+    @app_traced(stage="judge", is_stage=True)
     def on_results(conn, project_id, benchmark_id, rows, job_id) -> dict:
         row = conn.execute("SELECT model, requested_by FROM generate_jobs WHERE job_id = %s", (job_id,)).fetchone()
         model, actor = row

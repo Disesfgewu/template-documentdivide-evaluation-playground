@@ -72,6 +72,10 @@ def _frozen_benchmark(conn: psycopg.Connection, project_id, logical_id, revision
     return benchmark_id, doc_version_id, status, page_count
 
 
+from .app_log import app_traced
+
+
+@app_traced(stage="export", is_stage=True)
 def _questions_package(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int) -> tuple[dict, list]:
     _authorize(conn, project_id, actor_id, owner_only=False)
     benchmark_id, doc_version_id, status, page_count = _frozen_benchmark(conn, project_id, logical_id, revision)

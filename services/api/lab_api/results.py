@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from .documents import ApiError, _run_blocking, get_authenticated_actor, get_db
 from .runs import GOLD_READERS
 from lab_db.repo import NotFound, PermissionDenied, authorize  # noqa: E402
+from .app_log import app_traced, log_op
 
 router = APIRouter()
 DEFAULT_LIMIT, MAX_LIMIT = 50, 200
@@ -140,6 +141,7 @@ def _authorize_results(conn: psycopg.Connection, actor_id: uuid.UUID, run_id: uu
     raise ApiError(403, "permission_denied", "scores are not available to this role yet")
 
 
+@app_traced(stage="results", is_stage=True)
 def _get_results(conn: psycopg.Connection, actor_id: uuid.UUID, run_id: uuid.UUID, q: dict) -> dict:
     project_id, benchmark_id = _authorize_results(conn, actor_id, run_id)
     missing = ApiError(404, "not_found", "run not found")

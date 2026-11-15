@@ -66,7 +66,7 @@ class NegativeTests(Fixture):
         self.assertTrue(any("|| true" in e for e in errs))
 
     def test_tracked_credential_shaped_files_are_rejected_but_example_templates_are_allowed(self):
-        for rel in (".env", ".env.local", "services/api/.env", "services/api/.env.production", "deploy/server.pem", "id.key"):
+        for rel in (".env", ".env.local", "services/api/.env", "services/api/.env.production", "deploy/server.pem", "id.key", "logs/app.log", "debug.log"):
             with self.subTest(rel):
                 self.write(rel, "placeholder\n")
                 errs = check_repo.run_all(self.tmp)

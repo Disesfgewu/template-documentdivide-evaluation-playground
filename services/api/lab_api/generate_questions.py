@@ -38,6 +38,7 @@ from lab_api.generate_prompts import (CONFUSABLE_PROMPT_VERSION, CROSS_PAGE_PROM
                                       select_pages, shown_pieces, read_skip, reply_shape)
 from lab_api.generate_worker import CallSpec
 from lab_api.validate_questions import code_checks
+from .app_log import app_traced, log_op, log_alarm
 
 __all__ = ["GenerationStats", "confusable_target", "cross_page_target", "general_target", "load_clean_pages", "make_build_calls", "make_on_results",
            "question_hash"]
@@ -65,6 +66,7 @@ class GenerationStats:
 
     def drop(self, code: str) -> None:
         self.reasons[code] = self.reasons.get(code, 0) + 1
+        log_alarm("generate_questions", f"reply dropped: {code}", stage="generate")
 
     def decline(self, bucket: str, pages, shown_chars: int) -> None:
         self.declined += 1
@@ -161,6 +163,7 @@ def parse_call_id(cid: str) -> tuple[int, int]:
 
 
 def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
+    @app_traced(stage="generate")
     def build_calls(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID,
                     requested: tuple[int, int, int] | None = None) -> Sequence[CallSpec]:
         """The calls of a generation job. ``requested`` = (general, cross_page, confusable) questions to reach; None = what the newest
@@ -298,6 +301,7 @@ def select_distractors(units: Sequence, question: str, facts: Sequence[str]) -> 
 
 
 def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
+    @app_traced(stage="generate")
     def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict],
                    job_id: uuid.UUID) -> GenerationStats:
         page_count, pages, doc_id = load_clean_pages(conn, project_id, benchmark_id)

@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .audit import router as audit_router
+from .app_log_http import AppLogMiddleware
 from .benchmark_baseline import router as benchmark_baseline_router
 from .benchmark_build import router as benchmark_build_router
 from .benchmark_freeze import router as benchmark_freeze_router
@@ -44,6 +45,8 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
     app = FastAPI(title="document-seperater-playground LAB API", version=API_VERSION)
     app.add_middleware(DownloadAdmissionMiddleware)
     app.state.settings = settings
+
+    app.add_middleware(AppLogMiddleware)
 
     @app.exception_handler(ApiError)
     async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:

@@ -18,6 +18,9 @@ compose=(docker compose --env-file /dev/null -f deploy/compose.dev.yml)
 repo_head() { ls db/lab_db/schema/versions/[0-9]*.py | sed 's#.*/\([0-9]*\)_.*#\1#' | sort | tail -n1; }
 
 up() {
+  mkdir -p logs
+  chmod 2770 logs
+  export LAB_LOG_GID="$(id -g)"
   "${compose[@]}" up -d --wait db
   "${compose[@]}" --profile tools build migrate
   "${compose[@]}" --profile tools run --rm -e LAB_MIGRATION_DATABASE_URL=postgresql://lab:lab-dev-only@db:5432/lab \
@@ -118,6 +121,17 @@ ui() {
   echo "stop the backend with: scripts/demo.sh down"
 }
 
+logs() {
+  mkdir -p logs
+  chmod 2770 logs
+  export LAB_LOG_GID="$(id -g)"
+  if [[ ! -e logs/app.log ]]; then
+    touch logs/app.log
+    chmod 0660 logs/app.log
+  fi
+  tail -F logs/app.log
+}
+
 down() { "${compose[@]}" --profile demo --profile tools --profile generate down -v; }
 
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0      # sourced (tests): only the functions
@@ -128,5 +142,6 @@ case "${1:-}" in
   all) trap down EXIT; up; run ;;
   generate) generate ;;
   ui) ui ;;
-  *) echo "usage: $0 up|run|down|all|generate|ui" >&2; exit 2 ;;
+  logs) logs ;;
+  *) echo "usage: $0 up|run|down|all|generate|ui|logs" >&2; exit 2 ;;
 esac

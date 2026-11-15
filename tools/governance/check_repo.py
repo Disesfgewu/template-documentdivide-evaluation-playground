@@ -212,19 +212,20 @@ def check_secrets(root: Path, files: list[Path]) -> list[str]:
     return errors
 
 
-FORBIDDEN_SUFFIXES = (".pem", ".key")
+FORBIDDEN_SUFFIXES = (".pem", ".key", ".log")
 ALLOWED_ENV_TEMPLATES = (".example",)
 
 
 def check_forbidden_files(root: Path, files: list[Path]) -> list[str]:
-    """Credential-shaped files must never be tracked: ``.env``/``.env.*`` (only ``*.example`` templates are
-    allowed) and ``*.pem``/``*.key``. The file names are reported, never their contents."""
+    """Credential-shaped files and operational log files must never be tracked: ``.env``/``.env.*`` (only ``*.example`` templates are
+    allowed), ``*.pem``/``*.key``, and ``*.log`` / ``logs/``. The file names are reported, never their contents."""
     errors = []
     for path in files:
         name = path.name
         is_env = name == ".env" or (name.startswith(".env.") and not name.endswith(ALLOWED_ENV_TEMPLATES))
-        if is_env or name.endswith(FORBIDDEN_SUFFIXES):
-            errors.append(f"{path.relative_to(root)}: credential-shaped file is tracked (only *.example templates are allowed)")
+        is_log = name.endswith(".log") or "logs" in path.relative_to(root).parts
+        if is_env or name.endswith(FORBIDDEN_SUFFIXES) or is_log:
+            errors.append(f"{path.relative_to(root)}: credential-shaped or log file is tracked (only *.example templates are allowed)")
     return errors
 
 

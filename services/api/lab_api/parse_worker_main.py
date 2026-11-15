@@ -157,11 +157,16 @@ class Worker:
             ttl_seconds=self.ttl, python=self.python, run=self._run_with_abort(),
             shutdown=self.abort.is_set)
 
+    def _outcome_log_reason(self, job_id: uuid.UUID, outcome: ParseOutcome) -> str:
+        return outcome.reason
+
     def _handle(self, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome | None:
         outcome = None
         try:
-            with self.connect() as conn:
-                outcome = self._process(conn, project_id, job_id)
+            from .app_log import ContextScope
+            with ContextScope(service="generate-worker" if self.__class__.__name__ == "GenerateWorker" else "parse-worker", job_id=job_id):
+                with self.connect() as conn:
+                    outcome = self._process(conn, project_id, job_id)
         except jobs.LeaseUnavailable:
             LOG.info("job %s not claimable", job_id)  # someone else took it first
         except Exception as exc:
@@ -175,7 +180,7 @@ class Worker:
             with self._lock:
                 self.backoff.clear(job_id)
             key = f"{outcome.status}:{outcome.reason}"
-            LOG.info("job %s %s (%s)", job_id, outcome.status, outcome.reason)
+            LOG.info("job %s %s (%s)", job_id, outcome.status, self._outcome_log_reason(job_id, outcome))
         else:  # not claimable, queued again, or abandoned: never retried before its backoff
             reason = "not_claimable" if outcome is None else outcome.reason
             key = f"{'queued' if outcome is None else outcome.status}:{reason}"

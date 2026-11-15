@@ -29,6 +29,7 @@ from lab_db.repo import Change, NotFound, PermissionDenied, authorize, record_ch
 from lab_db.storage import LocalArtifactStore, store_and_register
 from lab_parser import local_methods
 from lab_scoring import rules
+from .app_log import app_traced, log_op
 
 GRADER_REVISION = "rule-based-scorer-1"
 PENDING_METRICS = ("correctness", "citation_precision", "citation_completeness", "faithfulness")
@@ -139,6 +140,7 @@ def run_local_baseline(conn: psycopg.Connection, store: LocalArtifactStore, proj
             "evaluation_status": "provisional", "pending_metrics": list(PENDING_METRICS)}
 
 
+@app_traced(stage="rule_scoring", is_stage=True)
 def _score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_code=None) -> list[MetricResult]:
     source = conn.execute("SELECT payload FROM gold_answers WHERE question_id = %s AND kind = 'source'", (qid,)).fetchone()
     if source is None:
@@ -163,6 +165,9 @@ def _score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_cod
         out += [_pending(qkey, m) for m in PENDING_METRICS]
     else:       # the METHOD failed (budget, provider, contract): an error with its code, never a pending score or an abstention
         out += [rules._error(qkey, m, GRADER_REVISION, [failure_code]) for m in PENDING_METRICS]
+    metrics_summary = [(m.metric, str(m.numerator), str(m.denominator)) for m in out]
+    log_op("score_rule_metrics", question_key=qkey, gold_sets=gold_sets, matched_units=list(matched),
+           metrics=metrics_summary, stage="rule_scoring")
     return out
 
 

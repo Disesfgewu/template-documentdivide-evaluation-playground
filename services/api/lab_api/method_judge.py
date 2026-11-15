@@ -17,6 +17,7 @@ import re
 from typing import Optional, Sequence
 
 from lab_api.generate_worker import CallSpec
+from .app_log import app_traced, log_op
 
 __all__ = ["JUDGE_PROMPT_REVISION", "JUDGE_PROMPT_SHA256", "JUDGE_LIMITATION", "JUDGE_GRADER_SUFFIX", "MAX_JUDGED_CLAIMS",
            "JudgeVerdict", "build_judge_call", "parse_judge_reply", "parse_judge_reply_ex", "check_verdict", "check_verdict_ex"]
@@ -58,6 +59,7 @@ def _neutralise(text: str) -> str:
     return _TAG.sub(lambda m: m.group(0).replace("<", "＜"), text)
 
 
+@app_traced(stage="judge")
 def build_judge_call(call_id: str, fact_statements: Sequence[str], answer_text: str,
                      claims: Sequence[tuple[str, str, Sequence[str]]], hit_text: dict[str, str]) -> CallSpec:
     """One call. ``claims`` = (claim id, claim text, cited hit ids); ``hit_text`` maps hit id -> its content. Only hits some claim
@@ -65,11 +67,13 @@ def build_judge_call(call_id: str, fact_statements: Sequence[str], answer_text: 
     facts = "\n".join(f'<fact id="f{i}">{_neutralise(s)}</fact>' for i, s in enumerate(fact_statements, start=1))
     cl = "\n".join(f'<claim id="{cid}" cites="{",".join(ids)}">{_neutralise(text)}</claim>' for cid, text, ids in claims)
     shown = sorted({h for _, _, ids in claims for h in ids})
+    log_op("judge_sources", stage="judge", offered_hit_ids=shown, excluded_hit_ids=sorted(set(hit_text) - set(shown)))
     hits = "\n".join(f'<hit id="{h}">\n{_neutralise(hit_text.get(h, "")[:MAX_HIT_CHARS])}\n</hit>' for h in shown)
     user = f"{facts}\n<answer>\n{_neutralise(answer_text)}\n</answer>\n{cl}\n{hits}"
     return CallSpec(id=call_id, system=SYSTEM, user=user)
 
 
+@app_traced(stage="judge")
 def parse_judge_reply_ex(text: str) -> tuple[Optional[dict], str]:
     """(verdict as a plain dict, "") or (None, code). The ENVELOPE is read like the question generator's replies (prose before or after the
     JSON, a code fence anywhere; see ``generate_prompts.read_json_object``); the CONTENT stays strict: exactly the fact and claim entries with
@@ -110,6 +114,7 @@ def _id_problems(got: Sequence[str], want: Sequence[str], kind: str) -> str:
     return "+".join(problems)
 
 
+@app_traced(stage="judge")
 def check_verdict_ex(obj: dict, n_facts: int, claims: Sequence[tuple[str, str, Sequence[str]]]
                      ) -> tuple[Optional[JudgeVerdict], Optional[str], Optional[str]]:
     """Match the verdict to the question: EXACTLY the fact labels f1..fN and EXACTLY the submission's claim ids, once each, and
