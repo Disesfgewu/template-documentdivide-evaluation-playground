@@ -109,9 +109,22 @@ def _digest(value) -> str:
 def _field(name, value, depth=0):
     if _SENSITIVE.search(name):
         return "'[REDACTED]'"
-    if (name.lower() in _RAW or name.lower().endswith("_text")) and isinstance(value, (str, bytes, bytearray)):
-        return _digest(value)
+    if name.lower() in _RAW or name.lower().endswith("_text"):
+        return _raw_value(value, depth)
     return bound_value(value, depth=depth)
+
+
+def _raw_value(value, depth=0):
+    """Raw-named mappings (e.g. hit_text) must not expose short text leaves."""
+    if type(value) in (str, bytes, bytearray):
+        return _digest(value)
+    if depth > 4:
+        return "<raw omitted>"
+    if type(value) in (dict, list, tuple):
+        values = value.values() if type(value) is dict else value
+        parts = [_raw_value(v, depth + 1) for v in itertools.islice(values, 8)]
+        return f"<raw {type(value).__name__} len={len(value)} values=[" + ", ".join(parts) + "]>"
+    return "<raw omitted>"
 
 
 def bound_value(val: Any, max_str_chars: int = 300, max_items: int = 8, depth: int = 0) -> str:

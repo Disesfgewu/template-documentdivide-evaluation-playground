@@ -99,3 +99,13 @@ class SafetyTests(unittest.TestCase):
             self.assertIn("parse_page", text)
             self.assertIn("page_index=2", text)
             self.assertIn("partial", text)
+
+    def test_judge_nested_document_passages_are_digest_only(self):
+        from lab_api.method_judge import build_judge_call
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, LAB_APP_LOG="full", LAB_APP_LOG_FILE=d + "/app.log"):
+            call = build_judge_call("judge-1", ["a fact"], "an answer", [("c1", "a claim", ["h1"])],
+                                    {"h1": "SHORT_RAW_DOCUMENT_SENTINEL"})
+            self.assertIn("SHORT_RAW_DOCUMENT_SENTINEL", call.user)
+            text = Path(d + "/app.log").read_text()
+            self.assertNotIn("SHORT_RAW_DOCUMENT_SENTINEL", text)
+            self.assertIn("sha256:", text)
