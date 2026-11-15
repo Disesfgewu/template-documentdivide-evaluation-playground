@@ -16,6 +16,9 @@ class Fixture(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         for rel in check_repo.REQUIRED_FILES + [
             ".github/workflows/ci.yml",
+            "docs/BENCHMARK_TRANSFER.md",
+            "docs/PDF_FIXTURE_ACCEPTANCE.md",
+            "docs/RELEASE_EVIDENCE.md",
             "tools/governance/verified_identities.txt",
         ]:
             dst = self.tmp / rel
@@ -61,6 +64,25 @@ class NegativeTests(Fixture):
         errs = check_repo.check_workflows(self.tmp)
         self.assertTrue(any("continue-on-error" in e for e in errs))
         self.assertTrue(any("|| true" in e for e in errs))
+
+    def test_tracked_credential_shaped_files_are_rejected_but_example_templates_are_allowed(self):
+        for rel in (".env", ".env.local", "services/api/.env", "services/api/.env.production", "deploy/server.pem", "id.key"):
+            with self.subTest(rel):
+                self.write(rel, "placeholder\n")
+                errs = check_repo.run_all(self.tmp)
+                self.assertTrue(any(e.startswith(rel + ":") and "credential-shaped" in e for e in errs), errs)
+                (self.tmp / rel).unlink()
+                subprocess.run(["git", "add", "-A"], cwd=self.tmp, check=True)
+        for rel in (".env.example", "services/api/.env.example"):
+            with self.subTest(rel):
+                self.write(rel, "LAB_DATABASE_URL=\n")
+                self.assertEqual([e for e in check_repo.run_all(self.tmp) if "credential-shaped" in e], [])
+                (self.tmp / rel).unlink()
+                subprocess.run(["git", "add", "-A"], cwd=self.tmp, check=True)
+
+    def test_the_error_never_contains_the_file_content(self):
+        self.write(".env", "SECRET_TOKEN=do-not-print-me\n")
+        self.assertFalse(any("do-not-print-me" in e for e in check_repo.run_all(self.tmp)))
 
     def test_no_workflow_rejected(self):
         (self.tmp / ".github/workflows/ci.yml").unlink()

@@ -158,3 +158,71 @@ scripts/check.sh --scope contracts
   - 刪除欄位。
 - 在同一版本內，只允許新增選填欄位，或不改變既有合法輸入的修正。
 - 擴充的值放在 `attributes`，不能用來覆寫核心語意。
+
+## Draft selection
+
+The deterministic candidate planner reuses the four-part contracts and
+returns selected IDs and visible quota deficits. See
+[draft benchmark planning](../docs/BENCHMARK_PLANNING.md) for its validation
+boundary and the remaining verifier/publishing gates.
+
+## Run-bound external JSONL preflight (#11 foundation)
+
+`lab_contracts.submission` validates an external JSONL file against explicit,
+trusted run metadata before ingestion. It uses the same `SubmissionLine`, strict
+JSON parsing and raw `lab-c14n-2` payload hashes as the method protocol. It does
+not persist answers, authorize callers or execute participant code.
+
+Convert the example response envelope to a single JSONL physical line:
+
+```bash
+python3 -c 'import json; print(json.dumps(json.load(open("contracts/examples/valid/SubmissionLine.spec_example.json"))))' > /tmp/lab-submission.jsonl
+PYTHONPATH=contracts python3 -m lab_contracts.submission \
+  --context contracts/examples/internal/SubmissionRunContext.json \
+  --input /tmp/lab-submission.jsonl
+```
+
+The internal context contains run/benchmark/method IDs, document SHA-256 and page
+counts, plus a `queries` list of `{attempt_id, request}` bindings. `request` is the
+existing public `QueryRequest`; no gold/context/evidence is needed. Each
+(attempt_id, question_id) pair must be unique. Multiple transport attempts for
+one question can have distinct request/index bindings. The service must derive
+this metadata from authorized, frozen run records; participant-supplied context
+is useful for local checks but is not an authorization boundary.
+
+`preflight_jsonl(body, context)` returns each line's `report` and its validated
+`submission` (or `None` on rejection). Batch encoding/size/100-line failures reject
+the whole file. Other errors remain per-line, including the first line: a wrong
+envelope cannot bind later valid lines. Identical validated resends return
+`duplicate_of`; changed payloads for the same attempt/question are rejected.
+Hashing precedes numeric model conversion and retains exact decimal identity.
+
+A structurally valid answer with an unknown document, wrong hash or out-of-range
+physical page keeps its original answer, hits and citations. `invalid_regions`
+identifies each hit/region and reason; downstream source scoring must exclude
+those regions while preserving independent answer scoring. Page zero is valid.
+The CLI prints only diagnostics/hashes, never answer/quote text, and marks
+`persisted:false`. Exit 0 means every line validated (some source regions may
+still be invalid); 1 means line rejection; 2 means batch/input/context rejection.
+The complete diagnostic report is capped at 16 MiB before writing stdout.
+Both inputs must be bounded regular files; special files cannot block the read.
+
+Validation command: `scripts/check.sh --scope "contracts fixtures governance"`.
+`tests/contracts/test_submission.py` exercises the deterministic R09/R10/R22,
+T33–T36 input-binding/source-diagnostic subset. A13/A15/A16/A19 end-to-end
+acceptance remains open. Durable per-line PostgreSQL transactions, cross-batch
+idempotency, run/finalize locks, first-terminal selection, authorization,
+audit/outbox, late/cancel handling and HTTP/grader equivalence remain #5/#6/#11/#12
+integration gates. This preflight is not a submission endpoint or a completed run.
+## Private benchmark transfer
+
+The callable codec and CLI `python -m lab_contracts.transfer` preserve the four
+parts plus evidence/validation snapshots with versioned hashes and bounded
+strict import. Its separate participant projection has an explicit three-field
+allowlist. See [benchmark transfer](../docs/BENCHMARK_TRANSFER.md) for format,
+commands, limits and the remaining authorization/freeze/API gates.
+
+
+## Generation control
+
+The deterministic accept / regenerate / needs_review routing with attempt and cost caps, and the quota-deficit scheduling decision, are in `lab_contracts/generation_control.py`. See [generation control](../docs/GENERATION_CONTROL.md) for the rules and their limits.

@@ -6,6 +6,31 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      probe:
+        description: "Also run the CI-only Unstructured probe (Issue #7 item 4)"
+        type: boolean
+        default: false
+      e2e:
+        description: "Also run the real end-to-end parse acceptance (Issue #7)"
+        type: boolean
+        default: false
+      worker_image:
+        description: "Also build and smoke-test the parse worker container image (Issue #7)"
+        type: boolean
+        default: false
+      demo:
+        description: "Also run the quickstart demo end to end on a clean runner (docs/QUICKSTART_DEMO.md)"
+        type: boolean
+        default: false
+      load:
+        description: "Also run the 500/600 page load measurement (Issue #7)"
+        type: boolean
+        default: false
+      llm_smoke:
+        description: "Also run the real LLM provider smoke (needs secrets; fails as BLOCKED without them)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,14 +60,40 @@ jobs:
         with:
           node-version: "22.23.4"
       - name: Install pinned dependencies
-        run: python -m pip install -r requirements-dev.txt -r services/api/requirements.lock -r services/parser/requirements.lock -r contracts/requirements.lock
+        run: python -m pip install -r requirements-dev.txt -r services/api/requirements.lock -r services/parser/requirements.lock -r contracts/requirements.lock -r db/requirements.lock
       - name: Start PostgreSQL + pgvector (deploy/compose.dev.yml)
         run: docker compose -f deploy/compose.dev.yml up -d --wait
+      - name: Runtime container images smoke test (API & Parser)
+        env:
+          LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+          LAB_SMOKE_REPORT_DIR: ${{ runner.temp }}/smoke-report
+        run: python -m deploy.runtime_smoke
+      - name: Build web distribution
+        run: cd web && npm ci && npm run build
+      - name: Docker migration job (Alembic in the migrate image)
+        run: |
+          set -euo pipefail
+          compose="docker compose -f deploy/compose.dev.yml"
+          expected="$(ls db/lab_db/migrations/*.sql | wc -l)"
+          $compose exec -T db psql -U lab -d lab -v ON_ERROR_STOP=1 -c 'CREATE DATABASE lab_migrate_check'
+          $compose --profile tools run --rm \
+            -e LAB_MIGRATION_DATABASE_URL=postgresql://lab:lab-dev-only@db:5432/lab_migrate_check \
+            migrate -x deployment=ci upgrade head
+          $compose --profile tools run --rm \
+            -e LAB_MIGRATION_DATABASE_URL=postgresql://lab:lab-dev-only@db:5432/lab_migrate_check \
+            migrate -x deployment=ci upgrade head   # a second run changes nothing
+          rows="$($compose exec -T db psql -U lab -d lab_migrate_check -tA -c 'SELECT count(*) FROM schema_migrations')"
+          head="$($compose exec -T db psql -U lab -d lab_migrate_check -tA -c 'SELECT version_num FROM alembic_version')"
+          test "$rows" = "$expected" && test "$head" = "$(printf '%04d' "$expected")" \
+            || { echo "unexpected schema state: rows=$rows head=$head expected=$expected"; exit 1; }
+          $compose exec -T db psql -U lab -d lab -v ON_ERROR_STOP=1 -c 'DROP DATABASE lab_migrate_check'
       - name: Scoped checks (PR)
         env:
           LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
           GH_TOKEN: ${{ github.token }}
           LAB_TEST_REPORT_DIR: ${{ runner.temp }}/test-reports
+          LAB_PDF_FIXTURE_REPORT_DIR: ${{ runner.temp }}/pdf-fixture-evidence
+          LAB_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/browser-acceptance-evidence
         if: github.event_name == 'pull_request'
         run: scripts/check.sh --scope auto --base "origin/${{ github.base_ref }}"
       - name: Full checks (main / manual)
@@ -50,6 +101,8 @@ jobs:
           LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
           GH_TOKEN: ${{ github.token }}
           LAB_TEST_REPORT_DIR: ${{ runner.temp }}/test-reports
+          LAB_PDF_FIXTURE_REPORT_DIR: ${{ runner.temp }}/pdf-fixture-evidence
+          LAB_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/browser-acceptance-evidence
         if: github.event_name != 'pull_request'
         run: scripts/check.sh --scope all
       - name: Upload per-test reports (traceability execution evidence)
@@ -60,6 +113,430 @@ jobs:
           path: ${{ runner.temp }}/test-reports/
           if-no-files-found: warn
           retention-days: 90
+      - name: Upload browser acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-acceptance-evidence
+          path: ${{ runner.temp }}/browser-acceptance-evidence/
+          if-no-files-found: ignore
+          retention-days: 90
+      - name: Upload synthetic PDFium fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-fixture-evidence
+          path: ${{ runner.temp }}/pdf-fixture-evidence/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Upload runtime container smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-container-smoke-report
+          path: ${{ runner.temp }}/smoke-report/
+          if-no-files-found: warn
+          retention-days: 90
       - name: Stop database
+        if: always()
+        run: docker compose -f deploy/compose.dev.yml down -v
+
+  worker-agentflow:
+    name: worker-agentflow (Go, public agentKit pin, local fakes only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the agentKit pin (the repository is public; no credential is involved)
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+          git submodule update --init --checkout -- third_party/agentkit
+          test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/worker/agentflow/go.mod
+          cache: false
+      - name: Vet and test the agentflow module (never calls a real model; the real smoke is the manual llm-smoke job)
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          cd services/worker/agentflow
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -count=1 -race -skip '^TestRealProviderSmoke$' ./...
+
+  unstructured-probe:
+    name: unstructured-probe (synthetic, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Throwaway venv with the pinned package
+        run: |
+          python -m venv "$RUNNER_TEMP/probe-venv"
+          "$RUNNER_TEMP/probe-venv/bin/pip" install -r services/parser/requirements.lock -r contracts/requirements.lock
+          "$RUNNER_TEMP/probe-venv/bin/pip" install "unstructured[pdf]==0.27.36"
+          "$RUNNER_TEMP/probe-venv/bin/pip" freeze > "$RUNNER_TEMP/probe-freeze.txt"
+      - name: Run the probe
+        env:
+          PYTHONPATH: contracts:services/parser
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/probe-venv/bin/python" -I -c "import sys; sys.path[:0]=['contracts','services/parser','.']; import runpy; runpy.run_path('deploy/unstructured_probe.py', run_name='__main__')" | tee "$RUNNER_TEMP/probe-report.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unstructured-probe
+          path: |
+            ${{ runner.temp }}/probe-report.json
+            ${{ runner.temp }}/probe-freeze.txt
+
+  e2e-parse:
+    name: e2e-parse (synthetic, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.e2e }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start PostgreSQL + pgvector (deploy/compose.dev.yml)
+        run: docker compose -f deploy/compose.dev.yml up -d --wait
+      - name: Throwaway venv with the repo locks and the pinned package
+        run: |
+          python -m venv "$RUNNER_TEMP/e2e-venv"
+          "$RUNNER_TEMP/e2e-venv/bin/pip" install -r services/api/requirements.lock -r services/parser/requirements.lock -r contracts/requirements.lock -r db/requirements.lock
+          "$RUNNER_TEMP/e2e-venv/bin/pip" install "unstructured[pdf]==0.27.36"
+          "$RUNNER_TEMP/e2e-venv/bin/pip" freeze > "$RUNNER_TEMP/e2e-freeze.txt"
+      - name: Lost-text guard against the real failure (read-only site-packages, no spaCy model yet)
+        run: |
+          set -euo pipefail
+          site="$("$RUNNER_TEMP/e2e-venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          chmod -R a-w "$site"
+          trap 'chmod -R u+w "$site"' EXIT
+          LAB_E2E_READONLY_SITE=1 "$RUNNER_TEMP/e2e-venv/bin/python" -m unittest -v tests.e2e.test_parse_guard_real
+      - name: End-to-end acceptance
+        env:
+          LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+          LAB_E2E_REAL_UNSTRUCTURED: "1"
+        run: |
+          set -o pipefail
+          export LAB_E2E_REPORT="$RUNNER_TEMP/e2e-report.json"
+          "$RUNNER_TEMP/e2e-venv/bin/python" -m unittest -v tests.e2e.test_parse_e2e_real 2>&1 | tee "$RUNNER_TEMP/e2e-log.txt"
+          cat "$RUNNER_TEMP/e2e-report.json"
+      - name: Measure real fast output where pypdf and pdfminer may disagree
+        env:
+          LAB_E2E_REAL_UNSTRUCTURED: "1"
+        run: |
+          set -o pipefail
+          export LAB_E2E_DISAGREEMENT_REPORT="$RUNNER_TEMP/fast-disagreement.json"
+          "$RUNNER_TEMP/e2e-venv/bin/python" -m unittest -v tests.e2e.test_fast_disagreement_real 2>&1 | tee "$RUNNER_TEMP/disagreement-log.txt"
+          cat "$RUNNER_TEMP/fast-disagreement.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-parse
+          path: |
+            ${{ runner.temp }}/e2e-report.json
+            ${{ runner.temp }}/e2e-freeze.txt
+            ${{ runner.temp }}/e2e-log.txt
+            ${{ runner.temp }}/fast-disagreement.json
+            ${{ runner.temp }}/disagreement-log.txt
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker compose -f deploy/compose.dev.yml down -v
+
+  llm-smoke:
+    name: llm-smoke (real provider, manual)
+    # Secrets are only ever handed to code on main, through the protected environment 'llm-smoke'
+    # (configure required reviewers there): a dispatch on any other ref skips this job.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.llm_smoke && github.ref == 'refs/heads/main' }}
+    environment: llm-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require credentials (a missing one is BLOCKED, never a pass)
+        env:
+          LAB_LLM_SMOKE_API_KEY: ${{ secrets.LAB_LLM_SMOKE_API_KEY }}
+          LAB_LLM_SMOKE_BASE_URL: ${{ vars.LAB_LLM_SMOKE_BASE_URL }}
+          LAB_LLM_SMOKE_ALLOWED_HOST: ${{ vars.LAB_LLM_SMOKE_ALLOWED_HOST }}
+          LAB_LLM_SMOKE_MODEL: ${{ vars.LAB_LLM_SMOKE_MODEL }}
+          LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK }}
+          LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK }}
+        run: |
+          missing=""
+          for name in LAB_LLM_SMOKE_API_KEY LAB_LLM_SMOKE_BASE_URL LAB_LLM_SMOKE_ALLOWED_HOST LAB_LLM_SMOKE_MODEL \
+                      LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            printf '{"status":"blocked","reason":"blocked: no credentials or configuration (%s )","real":false}\n' "$missing" > "$RUNNER_TEMP/llm-smoke-report.json"
+            echo "::error::BLOCKED: no credentials or configuration:$missing"
+            exit 1
+          fi
+      - name: Check out the agentKit pin (the repository is public; no credential is involved)
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+          git submodule update --init --checkout -- third_party/agentkit
+          test "$(git rev-parse HEAD:third_party/agentkit)" = "$(git -C third_party/agentkit rev-parse HEAD)"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/worker/agentflow/go.mod
+          cache: false
+      - name: Real provider smoke
+        env:
+          GOTOOLCHAIN: local
+          LAB_LLM_SMOKE_API_KEY: ${{ secrets.LAB_LLM_SMOKE_API_KEY }}
+          LAB_LLM_SMOKE_BASE_URL: ${{ vars.LAB_LLM_SMOKE_BASE_URL }}
+          LAB_LLM_SMOKE_ALLOWED_HOST: ${{ vars.LAB_LLM_SMOKE_ALLOWED_HOST }}
+          LAB_LLM_SMOKE_MODEL: ${{ vars.LAB_LLM_SMOKE_MODEL }}
+          LAB_LLM_SMOKE_PROTOCOL: ${{ vars.LAB_LLM_SMOKE_PROTOCOL }}
+          LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_IN_MICROS_PER_MTOK }}
+          LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK: ${{ vars.LAB_LLM_SMOKE_PRICE_OUT_MICROS_PER_MTOK }}
+        run: |
+          set -euo pipefail
+          export LAB_LLM_SMOKE_REPORT="$RUNNER_TEMP/llm-smoke-report.json"
+          # Everything in the private-module package (this is the only CI path that compiles it, so the
+          # harness tests against local fakes run here too), then the real call.
+          (cd services/worker/agentflow && go vet ./... && go test -count=1 -skip '^TestRealProviderSmoke$' ./... && go test -count=1 -run '^TestRealProviderSmoke$' -v ./...)
+          python3 - "$LAB_LLM_SMOKE_REPORT" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          print(json.dumps(report, indent=2, sort_keys=True))
+          sys.exit(0 if report.get("status") == "passed" and report.get("real") is True else 1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: llm-smoke
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/llm-smoke-report.json
+
+  demo:
+    name: demo (quickstart, synthetic, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.demo }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Quickstart demo, exactly as documented (up, run, down)
+        run: |
+          set -euo pipefail
+          scripts/demo.sh up
+          scripts/demo.sh run 2>&1 | tee "$RUNNER_TEMP/demo-output.txt"
+          grep -q '^RESULT: PASS' "$RUNNER_TEMP/demo-output.txt"
+      - name: Container logs (fixed codes and ids only)
+        if: always()
+        run: |
+          docker compose -f deploy/compose.dev.yml --profile demo logs --no-color parse-worker api > "$RUNNER_TEMP/demo-logs.txt" 2>&1
+          tail -n 30 "$RUNNER_TEMP/demo-logs.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demo
+          path: |
+            ${{ runner.temp }}/demo-output.txt
+            ${{ runner.temp }}/demo-logs.txt
+      - name: Clean up
+        if: always()
+        run: scripts/demo.sh down
+
+  worker-image:
+    name: worker-image (synthetic, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start PostgreSQL and apply the schema
+        run: |
+          set -euo pipefail
+          compose="docker compose -f deploy/compose.dev.yml"
+          $compose up -d --wait db
+          $compose --profile tools run --rm -e LAB_MIGRATION_DATABASE_URL=postgresql://lab:lab-dev-only@db:5432/lab migrate -x deployment=ci upgrade head
+      - name: Build and start the worker service (read-only root, non-root, no capabilities)
+        run: |
+          set -euo pipefail
+          docker compose -f deploy/compose.dev.yml --profile worker up -d --build --wait --wait-timeout 300 parse-worker
+          cid="$(docker compose -f deploy/compose.dev.yml ps -q parse-worker)"
+          echo "$cid" > "$RUNNER_TEMP/worker-cid"
+          docker image inspect lab-dev-parse-worker --format 'image size bytes: {{.Size}}' | tee "$RUNNER_TEMP/worker-image.txt"
+          docker inspect "$cid" --format 'user={{.Config.User}} readonly={{.HostConfig.ReadonlyRootfs}} capdrop={{.HostConfig.CapDrop}} secopt={{.HostConfig.SecurityOpt}} memory={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}} health={{.State.Health.Status}}' | tee -a "$RUNNER_TEMP/worker-image.txt"
+          test "$(docker inspect "$cid" --format '{{.State.Health.Status}}')" = healthy
+          test "$(docker inspect "$cid" --format '{{.HostConfig.ReadonlyRootfs}}')" = true
+          test "$(docker inspect "$cid" --format '{{.Config.User}}')" = "10001:10001"
+      - name: The image carries no secrets
+        run: |
+          set -euo pipefail
+          if docker history --no-trunc lab-dev-parse-worker | grep -Ei 'secret|password|token|api[_-]?key'; then
+            echo "::error::a secret-looking string is in the image history"; exit 1
+          fi
+          if docker image inspect lab-dev-parse-worker --format '{{json .Config.Env}}' | grep -Ei 'lab_database_url|lab_auth_secret|password|token'; then
+            echo "::error::a secret-looking value is baked into the image environment"; exit 1
+          fi
+      - name: Real parse inside the running container (synthetic one-page PDF)
+        run: |
+          set -euo pipefail
+          cid="$(cat "$RUNNER_TEMP/worker-cid")"
+          docker exec -i "$cid" python - < deploy/worker_smoke.py | tee "$RUNNER_TEMP/worker-smoke.json"
+      - name: Graceful stop with the compose default grace period
+        run: |
+          set -euo pipefail
+          compose="docker compose -f deploy/compose.dev.yml --profile worker"
+          test "$($compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["parse-worker"]["stop_grace_period"])')" = "1m30s"
+          cid="$(cat "$RUNNER_TEMP/worker-cid")"
+          began=$(date +%s)
+          $compose stop parse-worker
+          echo "compose stop seconds: $(( $(date +%s) - began )); exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}')" | tee -a "$RUNNER_TEMP/worker-image.txt"
+          test "$(docker inspect "$cid" --format '{{.State.ExitCode}}')" = "0"
+      - name: Stop in the middle of a job (80-page synthetic parse; pins exit 0, one result, succeeded)
+        run: |
+          set -euo pipefail
+          compose="docker compose -f deploy/compose.dev.yml --profile worker"
+          sql() { docker compose -f deploy/compose.dev.yml exec -T db psql -U lab -d lab -At -c "$1"; }
+          $compose start parse-worker
+          cid="$($compose ps -q parse-worker)"
+          for _ in $(seq 1 60); do
+            test "$(docker inspect "$cid" --format '{{.State.Health.Status}}')" = healthy && break
+            sleep 2
+          done
+          report="$RUNNER_TEMP/worker-stop.txt"
+          docker exec -i "$cid" python - < deploy/worker_stop_smoke.py | tee "$report"
+          job="$(tail -n 1 "$report" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["job"])')"
+          echo "status just before stop: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          began=$(date +%s)
+          $compose stop parse-worker
+          echo "compose stop seconds: $(( $(date +%s) - began )); exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}')" | tee -a "$report"
+          stop_exit="$(docker inspect "$cid" --format '{{.State.ExitCode}}')"
+          echo "status right after stop: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results after stop: /' | tee -a "$report"
+          $compose start parse-worker
+          for _ in $(seq 1 150); do
+            st="$(sql "select status::text from jobs where id = '$job'")"
+            case "$st" in succeeded|failed|cancelled) break ;; esac
+            sleep 2
+          done
+          echo "final status after restart: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          sql "select reason from job_transitions where job_id = '$job' order by id" | sed 's/^/transition: /' | tee -a "$report"
+          sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results at the end: /' | tee -a "$report"
+          # Pinned safety properties (the rest of the report is informational): the stop exit code was 0 (not 137), exactly one stored result, the job finished.
+          test "$stop_exit" = "0"
+          test "$(sql "select count(*) from parse_results where job_id = '$job'")" = "1"
+          test "$(sql "select status::text from jobs where id = '$job'")" = "succeeded"
+      - name: Stop in the middle of a job that outlasts the grace period (400-page synthetic parse; pins release and immediate re-claim)
+        run: |
+          set -euo pipefail
+          compose="docker compose -f deploy/compose.dev.yml --profile worker"
+          sql() { docker compose -f deploy/compose.dev.yml exec -T db psql -U lab -d lab -At -c "$1"; }
+          $compose start parse-worker
+          cid="$($compose ps -q parse-worker)"
+          for _ in $(seq 1 60); do
+            test "$(docker inspect "$cid" --format '{{.State.Health.Status}}')" = healthy && break
+            sleep 2
+          done
+          report="$RUNNER_TEMP/worker-stop-long.txt"
+          docker exec -i "$cid" python - 400 < deploy/worker_stop_smoke.py | tee "$report"
+          job="$(tail -n 1 "$report" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["job"])')"
+          echo "status just before stop: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          began=$(date +%s)
+          $compose stop parse-worker
+          echo "compose stop seconds (job longer than --grace 60): $(( $(date +%s) - began )); exit code: $(docker inspect "$cid" --format '{{.State.ExitCode}}')" | tee -a "$report"
+          stop_exit="$(docker inspect "$cid" --format '{{.State.ExitCode}}')"
+          after_stop="$(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")"
+          echo "status right after stop: $after_stop" | tee -a "$report"
+          sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results after stop: /' | tee -a "$report"
+          $compose start parse-worker
+          # Release on shutdown (PM-DECISION A): the new worker must claim the job at once, with no lease-expiry wait (ttl 60 s).
+          claimed=""
+          for _ in $(seq 1 20); do
+            claimed="$(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")"
+            case "$claimed" in "running attempt=2"|succeeded*) break ;; esac
+            sleep 2
+          done
+          echo "40 s after restart: $claimed" | tee -a "$report"
+          for _ in $(seq 1 240); do
+            st="$(sql "select status::text from jobs where id = '$job'")"
+            case "$st" in succeeded|failed|cancelled) break ;; esac
+            sleep 2
+          done
+          echo "final status after restart: $(sql "select status::text || ' attempt=' || attempt from jobs where id = '$job'")" | tee -a "$report"
+          sql "select reason from job_transitions where job_id = '$job' order by id" | sed 's/^/transition: /' | tee -a "$report"
+          sql "select count(*) from parse_results where job_id = '$job'" | sed 's/^/stored results at the end: /' | tee -a "$report"
+          # Pinned safety properties (the rest of the report is informational): the stop exit code was 0 (not 137), exactly one stored result, the job finished.
+          test "$stop_exit" = "0"
+          test "$after_stop" = "queued attempt=1"
+          case "$claimed" in "running attempt=2"|succeeded*) ;; *) echo "::error::the job was not claimed within 40 s of the restart: $claimed"; exit 1 ;; esac
+          test "$(sql "select count(*) from job_transitions where job_id = '$job' and reason = 'released: worker shutdown'")" = "1"
+          test "$(sql "select attempt from jobs where id = '$job'")" = "2"
+          test "$(sql "select count(*) from parse_results where job_id = '$job'")" = "1"
+          test "$(sql "select status::text from jobs where id = '$job'")" = "succeeded"
+      - name: Container log (fixed codes and ids only)
+        if: always()
+        run: |
+          docker compose -f deploy/compose.dev.yml --profile worker logs --no-color parse-worker > "$RUNNER_TEMP/worker-log.txt" 2>&1
+          tail -n 40 "$RUNNER_TEMP/worker-log.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: worker-image
+          path: |
+            ${{ runner.temp }}/worker-image.txt
+            ${{ runner.temp }}/worker-smoke.json
+            ${{ runner.temp }}/worker-stop.txt
+            ${{ runner.temp }}/worker-stop-long.txt
+            ${{ runner.temp }}/worker-log.txt
+      - name: Clean up
+        if: always()
+        run: docker compose -f deploy/compose.dev.yml --profile worker --profile tools down -v
+
+  load-parse:
+    name: load-parse (synthetic, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.load }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start PostgreSQL + pgvector (deploy/compose.dev.yml)
+        run: docker compose -f deploy/compose.dev.yml up -d --wait
+      - name: Throwaway venv with the repo locks and the pinned package
+        run: |
+          python -m venv "$RUNNER_TEMP/load-venv"
+          "$RUNNER_TEMP/load-venv/bin/pip" install -r services/api/requirements.lock -r services/parser/requirements.lock -r contracts/requirements.lock -r db/requirements.lock
+          "$RUNNER_TEMP/load-venv/bin/pip" install "unstructured[pdf]==0.27.36"
+          "$RUNNER_TEMP/load-venv/bin/pip" freeze > "$RUNNER_TEMP/load-freeze.txt"
+      - name: Machine description
+        run: |
+          { echo "cpus: $(nproc)"; grep MemTotal /proc/meminfo; uname -sr; } | tee "$RUNNER_TEMP/load-machine.txt"
+      - name: Load measurement (own process so getrusage maxima belong to this run)
+        env:
+          LAB_TEST_DATABASE_URL: postgresql://lab:lab-dev-only@127.0.0.1:55432/lab
+          LAB_LOAD_REAL_UNSTRUCTURED: "1"
+        run: |
+          set -o pipefail
+          export LAB_LOAD_REPORT="$RUNNER_TEMP/load-report.json"
+          "$RUNNER_TEMP/load-venv/bin/python" -m unittest -v tests.e2e.test_parse_load_real 2>&1 | tee "$RUNNER_TEMP/load-log.txt"
+          cat "$RUNNER_TEMP/load-report.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-parse
+          path: |
+            ${{ runner.temp }}/load-report.json
+            ${{ runner.temp }}/load-freeze.txt
+            ${{ runner.temp }}/load-machine.txt
+            ${{ runner.temp }}/load-log.txt
+      - name: Stop PostgreSQL
         if: always()
         run: docker compose -f deploy/compose.dev.yml down -v

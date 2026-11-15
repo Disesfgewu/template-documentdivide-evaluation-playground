@@ -1,0 +1,70 @@
+{
+  "schema_version": "lab-derivation-1",
+  "derivation_id": "der1",
+  "operation_id": "op1",
+  "operands": [
+    {
+      "operand_id": "a",
+      "value": "0.3",
+      "unit": "ms",
+      "value_kind": "observed_label",
+      "evidence_ref": {
+        "evidence_id": "e-a",
+        "revision": "r1",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source_regions": [
+        {
+          "document_id": "d1",
+          "document_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "page_index": 0,
+          "bbox": [
+            0,
+            0,
+            1,
+            1
+          ],
+          "kind": "table",
+          "quote": null
+        }
+      ]
+    },
+    {
+      "operand_id": "b",
+      "value": "0.1",
+      "unit": "ms",
+      "value_kind": "observed_label",
+      "evidence_ref": {
+        "evidence_id": "e-b",
+        "revision": "r1",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source_regions": [
+        {
+          "document_id": "d1",
+          "document_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "page_index": 247,
+          "bbox": [
+            0,
+            0,
+            1,
+            1
+          ],
+          "kind": "table",
+          "quote": null
+        }
+      ]
+    }
+  ],
+  "formula": {
+    "op": "sub",
+    "args": [
+      {
+        "ref": "a"
+      },
+      {
+        "ref": "b"
+      }
+    ]
+  }
+}
