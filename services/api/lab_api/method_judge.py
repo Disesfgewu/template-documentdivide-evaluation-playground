@@ -24,7 +24,7 @@ from .app_log import app_traced, log_op
 __all__ = ["span_check", "span_in_answer", "normalise", "JUDGE_PROMPT_REVISION", "JUDGE_PROMPT_SHA256", "JUDGE_LIMITATION", "JUDGE_GRADER_SUFFIX", "MAX_JUDGED_CLAIMS",
            "JudgeVerdict", "build_judge_call", "parse_judge_reply", "parse_judge_reply_ex", "check_verdict", "check_verdict_ex"]
 
-JUDGE_PROMPT_REVISION = "judge-v3"
+JUDGE_PROMPT_REVISION = "judge-v3.1"
 JUDGE_GRADER_SUFFIX = "+llm-judge-1"
 MAX_HIT_CHARS = 6000          # same cap per cited hit as the answer prompt
 MAX_JUDGED_CLAIMS = 8         # a larger answer cannot fit the 500-token verdict (fact spans take room too): recorded as an error WITHOUT a call (no spend)
@@ -42,7 +42,8 @@ SYSTEM = (
     "to \"which alloy ...?\" the answer \"Ge2Sb2Te5\" asserts that this alloy is the one asked about). The span is the part of the answer that carries the value or name.\n"
     "- \"stated\": the answer itself, read as that reply, says it, with the same meaning: every number, unit, direction (higher/lower, more/less, increase/decrease) "
     "and entity must match; wording may differ. You MUST give \"answer_span\": the shortest piece of the ANSWER, copied word for word "
-    "(at most 30 words), that states the fact.\n"
+    "(at most 30 words), that states the fact. The span must be copied from inside the <answer> block ONLY: never from the passages, the claims, "
+    "the facts or the question, and never re-ordered or shortened in the middle.\n"
     "- \"contradicted\": the answer gives a different number or unit, the opposite direction, or attaches the value to another entity. "
     "\"answer_span\" is the copied piece that contradicts it.\n"
     "- \"missing\": the answer does not say it. Talking about the same topic is NOT stating the fact: if the answer lacks the specific "
@@ -296,20 +297,22 @@ def _polarity(toks: list, i: int) -> set[str]:
     return out
 
 
-def span_check(fact: str, span: str, question: str = "") -> tuple[str, str]:
-    """Check the judge's ``stated`` against the SPAN it copied from the answer (not the whole answer). Returns ("ok", ""), ("missing", code) or
-    ("contradicted", "opposite_direction").
+def span_check(fact: str, span: str, question: str = "", answer: str = "") -> tuple[str, str]:
+    """Check the judge's ``stated`` against the SPAN it copied from the answer. Returns ("ok", ""), ("missing", code) or ("contradicted", "opposite_direction").
     ``question`` is the question the answer replies to: a direct answer ("60%.", "Ge2Sb2Te5 (GST)") does not repeat what the question already names.
+    ``answer`` is the WHOLE answer: a number of the fact that stands anywhere in it satisfies PRESENCE (Issue #197: presence is never a demand to repeat).
     A fact WITHOUT a number: the span together with the question must contain at least ``SPAN_MIN_COVERAGE`` of its content words AND the span must
     itself carry at least one of the fact's words that the question does not have (the value or name), else ("missing", "span_does_not_carry_fact")
     (a judge that says "stated" for a fact the answer only talks around copies a span without the fact's words).
     A fact WITH numbers:
-    * every number must be in the span or be named by the question, else ("missing", "number_absent");
+    * every number must be in the span, or in the answer, or be named by the question, else ("missing", "number_absent");
     * at least one of the fact's subjects (named entities within 8 tokens of a number, either side, not the reference of a comparison such as
-      "than Baseline") must be in the span, else ("missing", "entity_absent");
-    * each number must sit in a clause (broken at , ; : . ( ) while whereas but) with one of those subjects (or, if its clause names no
-      subject, follow a clause that does), else ("missing", "number_other_entity"): the swapped-values case;
-    * a direction word within 3 tokens of that number that is the opposite of the fact's (and none of the same) gives ("contradicted", ...).
+      "than Baseline") must be in the span or the question, else ("missing", "entity_absent");
+    * BINDING, used only to catch a number attached to a DIFFERENT entity (the swapped values): a number in the span must not sit in a clause (broken at
+      , ; : . ( ) while whereas but) that names an entity but none of those subjects (a clause that names nobody is fine); a number that is
+      not in the span but elsewhere in the answer is bound in the answer's own clauses (some clause holding it must belong to one of the subjects);
+      a number only the question names is not bound at all;
+    * a direction word within 3 tokens of the bound number that is the opposite of the fact's (and none of the same) gives ("contradicted", ...).
     Heuristic: a number written in words is not found; a restated comparison ("B is 19% higher than A" for "A is 19% lower than B") is downgraded."""
     f = _tokens(fact)
     numbers = [(i, t) for i, (t, _) in enumerate(f) if _is_number(t)]
@@ -321,23 +324,29 @@ def span_check(fact: str, span: str, question: str = "") -> tuple[str, str]:
         return "ok", ""
     sp = _tokens(span)
     span_words = {t for t, _ in sp}
+    answer_numbers = {t for t, _ in _tokens(answer) if _is_number(t)}
     # a number the QUESTION itself names ("... published in 2015 ...?") is part of the reply even when the copied piece leaves it out
     question_numbers = {t for t, _ in _tokens(question) if _is_number(t)}
     # ... but only when the span itself brings no OTHER number: "Text on page 7" for a fact about page 1 is a different value, not a gap the question fills
     if {t for t in span_words if _is_number(t)} - {t for _, t in numbers} - question_numbers:
         question_numbers = set()
-    if any(t not in span_words and t not in question_numbers for _, t in numbers):
+    if any(t not in span_words and t not in answer_numbers and t not in question_numbers for _, t in numbers):
         return "missing", "number_absent"
     subjects = {s for i, _ in numbers for s in _subjects(f, i - _ENTITY_WINDOW, i + _ENTITY_WINDOW + 1)}
     question_words = {t for t, _ in _tokens(question)}
     if subjects and not subjects & (span_words | question_words):
         return "missing", "entity_absent"
-    clauses = _clauses(span)
+    span_clauses = _clauses(span)
+    answer_clauses = _clauses(answer) if answer else []
     worst = ""
     for fi, value in numbers:
-        if value not in span_words:          # supplied by the question: nothing in the span to bind or contradict
-            continue
         direction = _polarity(f, fi)
+        if value in span_words:
+            clauses = span_clauses
+        elif value in answer_numbers:
+            clauses = answer_clauses            # stated elsewhere in the answer: the same binding, over the answer's own clauses
+        else:
+            continue                            # named only by the question: nothing to bind or contradict
         passed = False
         for ci, clause in enumerate(clauses):
             for ai in [i for i, (t, _) in enumerate(clause) if t == value]:
@@ -346,8 +355,8 @@ def span_check(fact: str, span: str, question: str = "") -> tuple[str, str]:
                     entity_ok = True
                 elif owners:
                     entity_ok = bool(owners & subjects)
-                else:        # "Flip-N-Write, compared with Baseline, is 10% higher": the subject is in the clause before; "60%.": the question names it
-                    entity_ok = (ci > 0 and bool(_subjects(clauses[ci - 1], 0, len(clauses[ci - 1])) & subjects)) or bool(subjects & question_words)
+                else:        # a clause that names nobody ("60%.", "1986)", "is 10% higher"): nothing in it can be attached to a different entity
+                    entity_ok = True
                 here = _polarity(clause, ai)
                 opposite = bool(direction) and bool(here) and not (direction & here)
                 if entity_ok and not opposite:

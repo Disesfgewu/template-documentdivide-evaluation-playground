@@ -53,7 +53,7 @@ function backend(opts: { uploads?: unknown[]; uploadReply?: (body: Record<string
         { question_id: "q-1", ordinal: 0, question_text: "年費多少？", status: "answered", failure_reason: null, their_answer: "120 EUR", their_reason: null,
           their_sources: [{ page: 3, text: "年費為 120 EUR", match_quality: "exact_in_unit", text_found: true, quote_coverage: 1 },
                           { page: 2, text: "完全捏造的一句話", match_quality: "not_found", text_found: false, quote_coverage: 0.25 }],
-          scores: { recall_at_k: { status: "scored", value: 100, reason_codes: [] }, correctness: { status: "pending", value: null, reason_codes: [] } },
+          scores: { recall_at_k: { status: "scored", value: 100, reason_codes: [] }, correctness: { status: "scored", value: 0, reason_codes: ["judge_overruled_by_number_check", "fact_downgraded:f1:number_absent"] } },
           gold: { reference_answer: "120 EUR 五月到期", required_facts: [{ statement: "120 EUR" }] } },
         { question_id: "q-2", ordinal: 1, question_text: "到期日？", status: "abstained", failure_reason: "not_submitted", their_answer: null, their_reason: "method_failure:not_submitted",
           their_sources: [], scores: {}, gold: { reference_answer: "五月", required_facts: [] } }] });
@@ -187,6 +187,10 @@ describe("DeveloperUploads (step 9)", () => {
     const d = screen.getByTestId("upload-detail").textContent ?? "";
     for (const part of ["120 EUR", "年費為 120 EUR", "原文裡找得到", "完全捏造的一句話", "在這一頁找不到這段引文", "只有 25% 的字詞出現在該頁", "這一題沒有答案（未提交）", "120 EUR 五月到期"]) expect(d).toContain(part);
     expect(screen.getAllByTestId("quote-not-found").length).toBe(1);
+    // a score that is lower than the judge's own verdict says why, in words, with the request to report it (#197)
+    expect(screen.getByTestId("downgrade-0").textContent).toContain("要點 1：評分模型判定有說到，但程式檢查「找不到要點裡的數字」而降級");
+    expect(screen.getByTestId("downgrade-0").textContent).toContain("請把這一題回報");
+    expect(screen.queryByTestId("downgrade-1")).toBeNull();                                  // a question without a downgrade shows no note
     fireEvent.click(screen.getByRole("button", { name: "用評分模型評分" }));
     await waitFor(() => expect(screen.getByTestId("judge-limit")).toBeTruthy(), { timeout: 8000 });
     expect(screen.getByTestId("judge-limit").textContent).toContain("uncalibrated");

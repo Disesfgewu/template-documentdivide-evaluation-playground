@@ -1,3 +1,4 @@
+import { REPORT_HINT, downgradeNotes } from "./scoreReason";
 import { useCallback, useEffect, useState } from "react";
 import { browserSave } from "./BenchmarkDownload";
 import {
@@ -409,6 +410,12 @@ function UploadCard({ u, result, common, onChanged }: { u: UploadedMethod; resul
                       const sc = d.scores[k];
                       return <div key={k}>{k === "recall_at_k" ? "檢索命中" : "正確性"}：{sc ? (sc.status === "scored" && sc.value !== null ? `${sc.value.toFixed(0)}` : sc.status === "pending" ? "尚未評分" : sc.reason_codes[0] ?? sc.status) : "—"}</div>;
                     })}
+                    {downgradeNotes(d.scores.correctness?.reason_codes).length > 0 && (
+                      <div data-testid={`downgrade-${d.ordinal}`} className="tone-wait" style={{ marginTop: "0.25rem" }}>
+                        {downgradeNotes(d.scores.correctness?.reason_codes).map((line) => <div key={line}>{line}</div>)}
+                        <div className="muted">{REPORT_HINT}</div>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

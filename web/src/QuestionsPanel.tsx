@@ -1,3 +1,4 @@
+import { REPORT_HINT, downgradeNotes } from "./scoreReason";
 import { useEffect, useState } from "react";
 import { getRunResults, listQuestions, type PublicQuestion, type ResultItem } from "./workflowApi";
 
@@ -114,7 +115,17 @@ export function QuestionsPanel({ fetchFn = fetch, token, projectId, logicalId, r
                   <td>{i + 1}</td>
                   <td>{q.question_text}</td>
                   {showScores && <td className={`tone-${recall.tone}`}>{recall.text}</td>}
-                  {showScores && <td className={`tone-${corr.tone}`}>{corr.text}</td>}
+                  {showScores && (
+                    <td className={`tone-${corr.tone}`}>
+                      {corr.text}
+                      {downgradeNotes(byMetric["correctness"]?.[q.id]?.reason_codes).length > 0 && (
+                        <div data-testid={`downgrade-q${i + 1}`} className="small" style={{ marginTop: "0.25rem" }}>
+                          {downgradeNotes(byMetric["correctness"]?.[q.id]?.reason_codes).map((line) => <div key={line}>{line}</div>)}
+                          <div className="muted">{REPORT_HINT}</div>
+                        </div>
+                      )}
+                    </td>
+                  )}
                 </tr>
               );
             })}
