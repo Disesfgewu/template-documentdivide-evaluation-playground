@@ -218,6 +218,8 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertNotIn("ZZQ", prompts[0]["user"])                      # the judge never saw the invented quote
         self.assertNotIn("cheese", prompts[0]["user"])
         self.assertIn('cites=""', prompts[0]["user"])                    # the claim has no passage to be supported by
+        self.assertIn("NO PASSAGES WERE OFFERED", prompts[0]["user"])    # and the judge is told so: the facts are judged against the answer alone (#197)
+        self.assertIn("judge-v2", json.dumps(results["judge"]))
         self.assertAlmostEqual(metrics["correctness"]["mean"], 100.0 / 18, places=6)     # the ANSWER is still judged: 1 of 18 at 100, the 17 abstentions score 0
         with self.connect() as c:
             row = c.execute("SELECT raw_value FROM question_scores s JOIN questions q ON q.id = s.question_id WHERE s.evaluation_id = %s "
@@ -346,3 +348,60 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    # --- Issue #197: gold evidence is the units that support each fact; a located quote beats an invented one; a changed number is not "stated" ---
+
+    def score_of(self, evaluation, key, metric):
+        with self.connect() as c:
+            return c.execute("SELECT raw_value, reason_codes FROM question_scores s JOIN questions q ON q.id = s.question_id WHERE s.evaluation_id = %s "
+                             "AND q.question_key = %s AND s.metric_name = %s", (evaluation, key, metric)).fetchone()
+
+    def test_new_questions_have_fact_level_gold_and_the_results_say_so(self):
+        project, owner = self.frozen()
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT DISTINCT payload->>'gold_granularity' FROM questions").fetchall(), [("fact",)])
+        run = self.upload(owner, project, self.file(owner, project)).json()["run_id"]
+        results = self.client.get(f"/api/v1/runs/{run}/results", headers=self.headers(owner)).json()
+        self.assertEqual(results["retrieval_gold"]["fact_level_questions"], 18)
+        self.assertEqual(results["retrieval_gold"]["page_level_questions"], 0)
+        self.assertIn("fact-level gold", results["retrieval_gold"]["note"])
+
+    def test_an_invented_quote_earns_no_retrieval_credit_with_fact_level_gold_but_page_credit_with_page_level_gold(self):
+        project, owner = self.frozen()
+        content = self.file(owner, project, fabricate={0})
+        key = sorted(self.gold(owner, project))[0]
+        fact = self.upload(owner, project, content).json()
+        self.assertEqual(self.score_of(fact["evaluation_id"], key, "recall_at_k")[0], 0.0)       # was 100: the whole-page fallback covered every gold unit
+        self.assertEqual(self.score_of(fact["evaluation_id"], key, "complete_at_k")[0], 0.0)
+        with self.connect() as c:         # a benchmark frozen before #197 has no marker: its gold is page-level and says so
+            c.execute("UPDATE questions SET payload = payload - 'gold_granularity'")
+            c.commit()
+        legacy = self.upload(owner, project, content).json()
+        self.assertEqual(self.score_of(legacy["evaluation_id"], key, "recall_at_k")[0], 100.0)
+        results = self.client.get(f"/api/v1/runs/{legacy['run_id']}/results", headers=self.headers(owner)).json()
+        self.assertEqual(results["retrieval_gold"]["page_level_questions"], 18)
+        self.assertIn("PAGE-level gold", results["retrieval_gold"]["note"])
+        self.assertIn("new benchmark revision", results["retrieval_gold"]["note"])
+
+    def test_a_located_quote_beats_an_invented_one_on_retrieval(self):
+        project, owner = self.frozen()
+        run = self.upload(owner, project, self.file(owner, project, fabricate={0})).json()
+        key0, key1 = sorted(self.gold(owner, project))[:2]
+        self.assertGreater(self.score_of(run["evaluation_id"], key1, "recall_at_k")[0], self.score_of(run["evaluation_id"], key0, "recall_at_k")[0])
+
+    def test_a_changed_number_is_not_stated_even_when_the_judge_says_it_is(self):
+        project, owner = self.frozen()
+        gold = self.gold(owner, project)
+        key = sorted(gold)[0]
+        page, text, answer = gold[key]
+        wrong = answer.replace("1", "7").replace("2", "8").replace("3", "9")
+        self.assertNotEqual(wrong, answer, "the fixture's fact has a number to change")
+        lines = [json.dumps({"question_id": key, "status": "answered", "answer": wrong, "sources": [{"page": page, "text": text}]})]
+        lines += [json.dumps({"question_id": k, "status": "abstained", "reason": "skip"}) for k in sorted(gold)[1:]]
+        run = self.upload(owner, project, "\n".join(lines) + "\n").json()["run_id"]
+        prompts, metrics, results = self.judge_with_capture(owner, project, run, mode="judge_ok")        # the fake judge says every fact is "stated"
+        value, codes = self.score_of(results["evaluation"]["id"], key, "correctness")
+        self.assertEqual(value, 0.0)
+        self.assertIn("judge_overruled_by_number_check", codes)
+        self.assertEqual(results["judge"]["questions_overruled_by_number_check"], 1)

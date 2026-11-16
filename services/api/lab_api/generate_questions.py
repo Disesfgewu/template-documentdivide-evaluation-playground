@@ -38,6 +38,7 @@ from lab_api.generate_prompts import (CONFUSABLE_PROMPT_VERSION, CROSS_PAGE_PROM
                                       select_pages, shown_pieces, read_skip, reply_shape)
 from lab_api.generate_worker import CallSpec
 from lab_api.validate_questions import code_checks
+from lab_api.evidence_support import NotAttributable, boilerplate_ids, support_units
 from .app_log import app_traced, log_op, log_alarm
 
 __all__ = ["GenerationStats", "confusable_target", "cross_page_target", "general_target", "load_clean_pages", "make_build_calls", "make_on_results",
@@ -210,7 +211,14 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
     return build_calls
 
 
-def _derive(reply: ParsedReply, units: Sequence[EvidenceUnit], ordinal: int):
+def _support(statements: Sequence[str], units: Sequence[EvidenceUnit], boiler: frozenset[str]):
+    """([evidence ids per fact], union of them in reading order); raises ``NotAttributable`` (Issue #197)."""
+    per_fact = [[u.evidence_id for u in support_units(st, units, boiler)] for st in statements]
+    union = list(dict.fromkeys(i for ids in per_fact for i in ids))
+    return per_fact, union
+
+
+def _derive(reply: ParsedReply, units: Sequence[EvidenceUnit], ordinal: int, boiler: frozenset[str] = frozenset()):
     qhash = question_hash(reply.question)
     qid = f"q-{qhash[:24]}"
     question = Question(
@@ -224,15 +232,15 @@ def _derive(reply: ParsedReply, units: Sequence[EvidenceUnit], ordinal: int):
              for i, s in enumerate(reply.facts)]
     semantic = SemanticAnswer(question_id=qid, reference_answer=reply.reference_answer, required_facts=facts,
                               conditions=[], calculation=None)
-    ids = [u.evidence_id for u in units]
+    per_fact, ids = _support(reply.facts, units, boiler)
     source = SourceAnswer(
         question_id=qid, evidence_sets=[EvidenceSet(set_id=f"{qid}-s1", evidence_ids=ids)],
-        fact_support_sets=[FactSupportSet(fact_id=f.fact_id, support_sets=[ids]) for f in facts],
+        fact_support_sets=[FactSupportSet(fact_id=f.fact_id, support_sets=[sup]) for f, sup in zip(facts, per_fact)],
         distractors=[], validation_refs=[])
     return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
 
 
-def _derive_cross(reply: CrossReply, shown: dict[str, list[EvidenceUnit]], ordinal: int):
+def _derive_cross(reply: CrossReply, shown: dict[str, list[EvidenceUnit]], ordinal: int, boiler: frozenset[str] = frozenset()):
     """Question, answers and source for a cross_page question. ``shown`` = {"A": units of page A actually shown, "B": ...}.
     Each fact's support alternative is the units of the page the model attributed it to, so the contract's own check
     (no single page may support every fact; every evidence set spans >= 2 pages) decides whether it is truly cross-page."""
@@ -249,16 +257,17 @@ def _derive_cross(reply: CrossReply, shown: dict[str, list[EvidenceUnit]], ordin
              for i, (st, _) in enumerate(reply.facts)]
     semantic = SemanticAnswer(question_id=qid, reference_answer=reply.reference_answer, required_facts=facts,
                               conditions=[], calculation=None)
-    all_ids = [u.evidence_id for label in ("A", "B") for u in shown[label]]
+    per_fact = [[u.evidence_id for u in support_units(st, shown[src], boiler)] for st, src in reply.facts]
+    all_ids = list(dict.fromkeys(i for ids in per_fact for i in ids))
     source = SourceAnswer(
         question_id=qid, evidence_sets=[EvidenceSet(set_id=f"{qid}-s1", evidence_ids=all_ids)],
-        fact_support_sets=[FactSupportSet(fact_id=f.fact_id, support_sets=[[u.evidence_id for u in shown[src]]])
-                           for f, (_, src) in zip(facts, reply.facts)],
+        fact_support_sets=[FactSupportSet(fact_id=f.fact_id, support_sets=[sup]) for f, sup in zip(facts, per_fact)],
         distractors=[], validation_refs=[])
     return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
 
 
-def _derive_confusable(reply: ConfusableReply, answer_units: Sequence[EvidenceUnit], distractor_units: Sequence[EvidenceUnit], ordinal: int):
+def _derive_confusable(reply: ConfusableReply, answer_units: Sequence[EvidenceUnit], distractor_units: Sequence[EvidenceUnit], ordinal: int,
+                       boiler: frozenset[str] = frozenset()):
     """Question, answers and source for a confusable question: the gold is the units of page A that were shown; each distractor unit
     (the caller passes only the shown units of page B that overlap the question or the facts) carries the model's reason and
     disambiguating condition. The caller has checked, by code: facts and answer grounded in A, the condition grounded in A or
@@ -277,10 +286,10 @@ def _derive_confusable(reply: ConfusableReply, answer_units: Sequence[EvidenceUn
              for i, st in enumerate(reply.facts)]
     semantic = SemanticAnswer(question_id=qid, reference_answer=reply.reference_answer, required_facts=facts,
                               conditions=[reply.disambiguating_condition], calculation=None)
-    ids = [u.evidence_id for u in answer_units]
+    per_fact, ids = _support(reply.facts, answer_units, boiler)
     source = SourceAnswer(
         question_id=qid, evidence_sets=[EvidenceSet(set_id=f"{qid}-s1", evidence_ids=ids)],
-        fact_support_sets=[FactSupportSet(fact_id=f.fact_id, support_sets=[ids]) for f in facts],
+        fact_support_sets=[FactSupportSet(fact_id=f.fact_id, support_sets=[sup]) for f, sup in zip(facts, per_fact)],
         distractors=[Distractor(evidence_id=u.evidence_id, confusion_reason=reply.confusion_reason,
                                 disambiguating_condition=reply.disambiguating_condition) for u in distractor_units],
         validation_refs=[])
@@ -305,6 +314,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
     def on_results(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID, rows: list[dict],
                    job_id: uuid.UUID) -> GenerationStats:
         page_count, pages, doc_id = load_clean_pages(conn, project_id, benchmark_id)
+        boiler = boilerplate_ids(pages)
         actor = conn.execute("SELECT requested_by FROM generate_jobs WHERE job_id = %s", (job_id,)).fetchone()[0]
         # facts/evidence_sets/gold_answers are under gold RLS (0008): the write is made as the job's owner/maintainer
         conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
@@ -382,7 +392,11 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                             stats.drop("confusable:check:" + code)
                     continue
                 try:
-                    derived = _derive_confusable(reply, a_units, d_units, ordinal)
+                    derived = _derive_confusable(reply, a_units, d_units, ordinal, boiler)
+                except NotAttributable:
+                    stats.invalid += 1
+                    stats.drop("confusable:check:fact_not_attributable")
+                    continue
                 except Exception:
                     stats.invalid += 1
                     stats.drop("confusable:check:derive_error")
@@ -418,7 +432,11 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                     stats.drop("cross_page:check:fact_not_in_its_page")
                     continue
                 try:
-                    derived = _derive_cross(reply, shown, ordinal)
+                    derived = _derive_cross(reply, shown, ordinal, boiler)
+                except NotAttributable:
+                    stats.invalid += 1
+                    stats.drop("cross_page:check:fact_not_attributable")
+                    continue
                 except Exception:
                     stats.invalid += 1
                     stats.drop("cross_page:check:derive_error")
@@ -452,7 +470,11 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                     stats.drop("general:check:page_reference")
                     continue
                 try:
-                    derived = _derive(reply, units, ordinal)
+                    derived = _derive(reply, units, ordinal, boiler)
+                except NotAttributable:
+                    stats.invalid += 1
+                    stats.drop("general:check:fact_not_attributable")
+                    continue
                 except Exception:
                     stats.invalid += 1
                     stats.drop("general:check:derive_error")
@@ -502,7 +524,9 @@ def _write(conn, project_id, benchmark_id, unit_rows: dict, q: Question, sem: Se
         "INSERT INTO questions (id, benchmark_id, question_key, ordinal, question_text, question_hash, quota_bucket, payload) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (qrow, benchmark_id, q.question_id, q.ordinal, q.question_text, q.question_hash, q.quota_bucket.value,
-         Jsonb(json.loads(q.model_dump_json()))))
+         # gold_granularity: 'fact' = the evidence set is the units that support each fact (Issue #197); a question without the key
+         # (a benchmark frozen before) has PAGE-level gold: every unit shown from the page
+         Jsonb({**json.loads(q.model_dump_json()), "gold_granularity": "fact"})))
     for f in sem.required_facts:
         conn.execute("INSERT INTO facts (id, benchmark_id, question_id, fact_key, statement, weight, partial_credit_rule) "
                      "VALUES (%s, %s, %s, %s, %s, %s, NULL)",

@@ -197,7 +197,7 @@ usage 已知才依設定價格結算；usage 未知時 `charged_micros = -1`，�
   無法解析 → `invalid_judge_reply`；預算用盡 → `budget_exhausted`；provider 錯誤 → `provider_error`；結果未知 → `outcome_unknown`。
 - **不呼叫 judge 的題目**（不花錢）：模型棄答 → correctness 照既有棄答規則（0，reason `abstained`），其餘三個 `not_applicable`；方法失敗 → 沿用該失敗代碼的 `error`。
 - **紀錄**：judge 寫的是一個**新的 evaluation**（`provisional`，grader `rule-based-scorer-1+llm-judge-1`），舊 evaluation 的列完全不動；規則式指標（recall、complete、localization、textual）從上一個 evaluation 原樣複製。
-  由 judge 回覆產生的列都帶 `judge_model`、`judge_prompt_revision`（`judge-v1`）、`judge_prompt_sha256`（固定 prompt 的 sha256）與 `judge_limitation`（同一個 provider／模型家族出題、未用人工標註校準、provisional）——
+  由 judge 回覆產生的列都帶 `judge_model`、`judge_prompt_revision`（`judge-v2`（#197：數字、單位、方向、對象都要一致才算說到；另有程式檢查數字，不符記為 `judge_overruled_by_number_check`；詳見 docs/SCORING_TRUTH.md））、`judge_prompt_sha256`（固定 prompt 的 sha256）與 `judge_limitation`（同一個 provider／模型家族出題、未用人工標註校準、provisional）——
   四個欄位要嘛全有要嘛全空（CHECK），所以沒有限制說明就不可能存下 judge 的分數。再評一次就是再一個新 evaluation。
 - **回覆的解析**（PM 後續項目）：judge 回覆的「外殼」和出題回覆一樣寬容（JSON 前後有說明文字、任何位置的 code fence、外面多包一層陣列、無關的多餘頂層欄位都可以），但**內容仍然嚴格**：每個 fact／claim 的鍵與值都必須正確，不修、不猜。
   解析失敗的題目，四個指標都是 `error`，`reason_codes` 是 `["invalid_judge_reply", "<為什麼>"]`（`empty`／`reply_too_long`／`not_json`／`bad_keys`／`bad_facts_shape`／`bad_claims_shape`），不含任何模型文字；job 的失敗計數也帶同樣的代碼。

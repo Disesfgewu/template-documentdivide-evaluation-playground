@@ -89,8 +89,16 @@ for i, c in enumerate(inp["calls"]):
     if mode.startswith("answer") and c["id"].startswith("a"):
         import re as _re
         hit_ids = _re.findall(r'<hit id="([^"]+)"', c["user"])
-        good = {"status": "answered", "answer": "The page says so.",
-                "claims": [{"text": "The page says so.", "hit_ids": hit_ids[:1] or ["none"]}]}
+        hit_texts = _re.findall(r'<hit id="[^"]+"[^>]*>\s*(.*?)\s*</hit>', c["user"], _re.S)
+        asked = _re.search(r"<question>\s*(.*?)\s*</question>", c["user"], _re.S)
+        asked = asked.group(1) if asked else ""
+        # states what the passage that the question quotes says, numbers included (#197): the first hit is not always the right one
+        lines = [ln.strip() for t in hit_texts for ln in t.splitlines() if ln.strip()]
+        quoted = [ln for ln in lines if ln in asked]
+        fixture_fact = _re.search(r"Text on page \d+", asked)         # the fixture's own fact text, when the retrieved page is not the right one
+        said = (quoted or ([fixture_fact.group(0)] if fixture_fact else []) or lines or ["The page says so."])[0]
+        good = {"status": "answered", "answer": said,
+                "claims": [{"text": said, "hit_ids": hit_ids[:1] or ["none"]}]}
         kind = {"answer_ok": 0, "answer_abstain": 1, "answer_bad_json": 2, "answer_bad_citation": 3, "answer_no_claims": 4}.get(mode)
         if mode == "answer_mixed":
             kind = i % 5

@@ -109,7 +109,9 @@ class ResultsShapeTests(unittest.TestCase):
         def execute(sql, params=None):
             res = MagicMock()
             if "metric_name = 'correctness'" in sql:                  # the judge summary: nothing was judged here
-                res.fetchone.return_value = (0, 0, None, None, None)
+                res.fetchone.return_value = (0, 0, 0, None, None, None)
+            elif "gold_granularity" in sql:                           # fact-level vs page-level gold (Issue #197): all page-level here
+                res.fetchone.return_value = (0, 3)
             elif "submission_source_matches" in sql:                  # not an uploaded run: no source checks
                 res.fetchone.return_value = (0, 0, 0, 0)
             elif "FROM generate_jobs WHERE run_id" in sql:            # does an answering job back this run?

@@ -63,7 +63,8 @@ function backend(opts: Opts = {}) {
         metrics: [{ metric_name: "correctness", scored: judged ? 5 : 0, not_applicable: 0, pending: judged ? 0 : 5, error: 0, mean: judged ? 80 : null }],
         submissions: opts.submissions ?? { answered: 5, abstained_by_model: 0, method_failures: {} },
         excluded_questions: [{ ordinal: 3, reason: "不合格" }],
-        judge: judged ? { judged_questions: 5, questions_with_a_contradicted_fact: 1, model: "claude-haiku-4-5-20251001", prompt_revision: "judge-v1",
+        retrieval_gold: { fact_level_questions: 0, page_level_questions: 5, note: "page-level" },
+        judge: judged ? { judged_questions: 5, questions_with_a_contradicted_fact: 1, questions_overruled_by_number_check: 2, model: "claude-haiku-4-5-20251001", prompt_revision: "judge-v2",
           limitation: "Judged by the same provider/model family that generated the questions; uncalibrated; provisional." } : null,
       });
     }
@@ -123,6 +124,9 @@ describe("Workflow: the judge step", () => {
     expect(summary).toContain("claude-haiku-4-5-20251001");
     expect(summary).toContain("評了 5 題");
     expect(summary).toContain("1 題有被判定為與標準答案相反");
+    expect(summary).toContain("2 題因為數字與標準答案對不上");                                      // the code check overruled the judge (#197)
+    expect(summary).toContain("judge-v2");
+    expect(screen.getByTestId("page-level-gold-note").textContent).toContain("5 題的標準出處是整頁");
     expect(summary).toContain("same provider/model family");
     expect(screen.getByTestId("excluded-note").textContent).toContain("已排除 1 題");
     expect(screen.getByTestId("results-table").textContent).toContain("80.00");

@@ -30,9 +30,9 @@ from lab_db.storage import LocalArtifactStore
 from lab_api import baseline_eval as be
 from lab_api.generate_worker import CallSpec
 from lab_api.method_judge import (JUDGE_GRADER_SUFFIX, JUDGE_LIMITATION, JUDGE_PROMPT_REVISION, JUDGE_PROMPT_SHA256, MAX_JUDGED_CLAIMS,
-                                  build_judge_call, check_verdict_ex, parse_judge_reply_ex)
+                                  build_judge_call, check_verdict_ex, number_check, parse_judge_reply_ex)
 from lab_scoring import rules
-from .app_log import app_traced, log_op
+from .app_log import app_traced, log_op, set_question
 
 ACTION = "register_method_and_submit"
 RULE_METRICS = ("recall_at_k", "complete_at_k", "localization_precision", "textual_consistency")
@@ -129,6 +129,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
             "LEFT JOIN artifacts a ON a.id = s.payload_artifact_id WHERE q.benchmark_id = %s ORDER BY q.ordinal",
             (run_id, benchmark_id)).fetchall()
         for qid, qkey, ordinal, sid, status, failure, phash, object_key, size in subs:
+            set_question(qkey, ordinal)
             item = {"qid": qid, "qkey": qkey, "ordinal": ordinal, "sid": sid, "status": status, "failure": failure,
                     "call_id": f"j{ordinal:04d}", "facts": None, "weights": None, "response": None, "claims": None}
             gold = conn.execute("SELECT payload FROM gold_answers WHERE question_id = %s AND kind = 'semantic'", (qid,)).fetchone()
@@ -162,6 +163,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                 item["response"] = resp
                 item["claims"] = [(c.claim_id, c.text, list(dict.fromkeys(cited.get(c.claim_id, [])))) for c in resp.answer.claims]
             out.append(item)
+        set_question(None)
         return out
 
     def judgeable(it) -> bool:
@@ -172,13 +174,27 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         calls = []
         for it in load(conn, benchmark_id):
             if judgeable(it):
+                set_question(it["qkey"], it["ordinal"])
                 calls.append(build_judge_call(it["call_id"], it["facts"], it["response"].answer.text, it["claims"], it["hit_text"]))
+        set_question(None)
         return calls
 
     @app_traced(stage="judge")
     def derive(it, verdict, grader) -> list:
         qkey = it["qkey"]
-        score = {label: Fraction(1) if v == "stated" else Fraction(0) for label, v in verdict.facts}
+        # The judge's "stated" is only accepted when every number of the gold fact is in the answer, bound to the same entity and direction
+        # (Issue #197): otherwise the fact is "missing" and the row says judge_overruled_by_number_check.
+        final: list[tuple[str, str]] = []
+        overruled: list[tuple[str, str]] = []
+        for label, v in verdict.facts:
+            if v == "stated":
+                ok, why = number_check(it["facts"][int(label[1:]) - 1], it["response"].answer.text)
+                if not ok:
+                    v = "missing"
+                    overruled.append((label, why))
+                    log_op("judge_overruled_by_number_check", question_key=qkey, ordinal=it["ordinal"], fact=label, reason=why, stage="judge")
+            final.append((label, v))
+        score = {label: Fraction(1) if v == "stated" else Fraction(0) for label, v in final}
         facts = [(w, score[f"f{i}"]) for i, w in enumerate(it["weights"], start=1)]
         # A claim with no passage the judge could see (an uploaded answer whose every quote was not found, or that cited nothing) is
         # unsupported BY CONSTRUCTION, whatever the model says: faithfulness and citation scores never get credit from an invented source.
@@ -190,12 +206,20 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         fully = sum(1 for ok, hids in supported.values() if ok and hids)
         correctness = rules.correctness(qkey, facts, False, grader)
         contradicted = sum(1 for _, v in verdict.facts if v == "contradicted")
-        if contradicted:          # the rule scores a contradicted fact as 0 like a missing one; the row says it was contradicted
-            correctness = correctness.model_copy(update={"reason_codes": ["contradicted_fact"]})
-        return [correctness,
-                rules.faithfulness(qkey, len(supported), sum(1 for ok, _ in supported.values() if ok), grader),
-                rules.citation_precision(qkey, citations, True, grader),
-                rules.citation_completeness(qkey, len(supported), fully, grader)]
+        codes = (["contradicted_fact"] if contradicted else []) + (["judge_overruled_by_number_check"] if overruled else [])
+        if codes:          # the rule scores a contradicted fact as 0 like a missing one; the row says it was contradicted / overruled
+            correctness = correctness.model_copy(update={"reason_codes": codes})
+        out = [correctness,
+               rules.faithfulness(qkey, len(supported), sum(1 for ok, _ in supported.values() if ok), grader),
+               rules.citation_precision(qkey, citations, True, grader),
+               rules.citation_completeness(qkey, len(supported), fully, grader)]
+        # ONE line per question with everything that decided its scores (Issue #197): the judge's and the final fact verdicts, the claims, the scores
+        log_op("question_summary", question_key=qkey, ordinal=it["ordinal"], stage="judge",
+               fact_verdicts=[f"{l}={v}" for l, v in verdict.facts], final_fact_verdicts=[f"{l}={v}" for l, v in final],
+               overruled=[f"{l}:{why}" for l, why in overruled], claims_supported=f"{sum(1 for ok, _ in supported.values() if ok)}/{len(supported)}",
+               claims_without_passage=sorted(no_passage),
+               scores=[f"{m.metric}={m.raw_value if m.raw_value is not None else m.status}" for m in out])
+        return out
 
     @app_traced(stage="judge", is_stage=True)
     def on_results(conn, project_id, benchmark_id, rows, job_id) -> dict:
@@ -220,6 +244,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         counts: dict[str, int] = {}
         for it in items:
             qkey = it["qkey"]
+            set_question(qkey, it["ordinal"])
             judged = False
             if it["sid"] is None:
                 continue                                    # no submission for this question in the run: nothing to judge
@@ -263,6 +288,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                     counts[key] = counts.get(key, 0) + 1
             for r in results:
                 _store_score(conn, evaluation_id, run_id, benchmark_id, it["qid"], it["sid"], r, judged, model)
+        set_question(None)
         return {"evaluation_id": str(evaluation_id), "failures": counts}
 
     return build_calls, on_results

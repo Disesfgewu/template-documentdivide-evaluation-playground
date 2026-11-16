@@ -1020,6 +1020,7 @@ export type JudgeRunResponse = {
 export type JudgeSummary = {
   judged_questions: number;
   questions_with_a_contradicted_fact: number;
+  questions_overruled_by_number_check?: number;
   model: string;
   prompt_revision: string;
   limitation: string;
@@ -1124,6 +1125,7 @@ export type RunResultsResponse = {
   judge?: JudgeSummary | null;
   /** An uploaded developer file: how its quoted sources fared against the system parse. */
   source_checks?: { total: number; found: number; not_found: number; page_without_text: number; excluded_from_judge: number; page_only_retrieval_credit: number; note: string } | null;
+  retrieval_gold?: { fact_level_questions: number; page_level_questions: number; note: string } | null;
   excluded_questions?: { ordinal: number; reason: string }[];
 };
 
