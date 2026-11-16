@@ -179,6 +179,7 @@ _NEAR = 3          # tokens around a number in which a direction word belongs to
 _ENTITY_WINDOW = 8  # tokens either side of a number in the FACT in which a named entity belongs to it
 _STOP_NAMED = {"the", "a", "an", "in", "on", "at", "for", "of", "to", "and", "or", "but", "while", "whereas", "with", "by", "is", "are",
                "it", "its", "this", "that", "these", "those", "as", "from", "than", "both", "each", "when", "if", "however", "also"}
+_LOCATOR = re.compile(r"[A-Za-z]\d{1,3}")
 _CLAUSE_BREAK = re.compile(r"[;:()]|(?<!\d)[,.]|[,.](?!\d)|\b(?:while|whereas|whilst|but)\b", re.IGNORECASE)      # not the comma/point inside 1,000 or 2.5
 _COMPARATOR = {"than", "versus", "vs", "against"}
 
@@ -188,20 +189,39 @@ def normalise(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
-_SENTENCE_BREAK = re.compile(r"(?<=[.!?。！？])\s+|\n+")
+_SENTENCE_END = re.compile(r"[.!?。！？]+(?=\s)|\n+")
+_ABBREVIATIONS = {"fig", "figs", "eq", "eqs", "sec", "tab", "ref", "refs", "al", "vs", "etc", "dr", "mr", "ms", "mrs", "prof", "no", "approx", "cf", "e.g", "i.e",
+                  "inc", "ltd", "jr", "sr", "st", "vol", "pp"}
+
+
+def _sentences(text: str) -> list[str]:
+    """Split at sentence ends, but NOT after a single-letter initial ("Tyler H. McCormick"), a known abbreviation ("et al.", "Fig. 3"), or a point with
+    a lower-case word after it. A real break needs whitespace after the mark and an upper-case letter, digit or opening quote/bracket next."""
+    parts, start = [], 0
+    for m in _SENTENCE_END.finditer(text):
+        if text[m.start()] == "\n":
+            ok = True
+        else:
+            word = re.search(r"([^\W_][\w.]*)$", text[start:m.start()])
+            last = word.group(1).rstrip(".").casefold() if word else ""
+            nxt = text[m.end():].lstrip()[:1]
+            initial = len(last) == 1 and last.isalpha()
+            ok = not initial and last not in _ABBREVIATIONS and bool(nxt) and (nxt.isupper() or nxt.isdigit() or nxt in "\"'“‘([") if text[m.start()] == "." else True
+        if ok:
+            parts.append(text[start:m.end()].strip())
+            start = m.end()
+    parts.append(text[start:].strip())
+    return [p for p in parts if p]
 
 
 def expand_to_sentences(span: str, answer: str) -> str:
-    """The sentence(s) of ``answer`` that contain ``span`` (a condition stated before the copied piece belongs to the same sentence). The span
-    itself is still checked to be verbatim by ``span_in_answer``; this is only the text the number/entity check reads. Falls back to the span."""
+    """The sentence of ``answer`` that contains ``span`` (a condition stated before the copied piece belongs to the same sentence). The span itself is
+    still checked to be verbatim by ``span_in_answer``; this is only the text the number/entity check reads. Falls back to the span."""
     n = normalise(span)
     if not n:
         return span
-    parts = [x for x in _SENTENCE_BREAK.split(answer) if x.strip()]
-    hit = [x for x in parts if n in normalise(x)]
-    if hit:
-        return hit[0]
-    return span          # the span crosses a sentence break: it is checked as it is
+    hit = [x for x in _sentences(answer) if n in normalise(x)]
+    return hit[0] if hit else span          # a span that crosses a sentence break is checked as it is
 
 
 def span_in_answer(span: str, answer: str) -> bool:
@@ -237,6 +257,8 @@ def _named(tok: tuple[str, str], first: bool) -> bool:
     """An entity name: mixed case, all caps or hyphenated; a plain capitalised word only when it is not the first word of the text."""
     t, raw = tok
     if not raw or _is_number(t) or t in _STOP_NAMED:
+        return False
+    if _LOCATOR.fullmatch(raw):          # "A1", "B12" (as in "Table A2 lists ..."): where something is, not who or what the claim is about
         return False
     if any(c.isupper() for c in raw[1:]):          # PreSET, Flip-N-Write, SET-bit: a name; all-1s and write-back are ordinary words
         return True
@@ -282,7 +304,7 @@ def span_check(fact: str, span: str, question: str = "") -> tuple[str, str]:
     itself carry at least one of the fact's words that the question does not have (the value or name), else ("missing", "span_does_not_carry_fact")
     (a judge that says "stated" for a fact the answer only talks around copies a span without the fact's words).
     A fact WITH numbers:
-    * every number must be in the span, else ("missing", "number_absent");
+    * every number must be in the span or be named by the question, else ("missing", "number_absent");
     * at least one of the fact's subjects (named entities within 8 tokens of a number, either side, not the reference of a comparison such as
       "than Baseline") must be in the span, else ("missing", "entity_absent");
     * each number must sit in a clause (broken at , ; : . ( ) while whereas but) with one of those subjects (or, if its clause names no
@@ -299,7 +321,12 @@ def span_check(fact: str, span: str, question: str = "") -> tuple[str, str]:
         return "ok", ""
     sp = _tokens(span)
     span_words = {t for t, _ in sp}
-    if any(t not in span_words for _, t in numbers):
+    # a number the QUESTION itself names ("... published in 2015 ...?") is part of the reply even when the copied piece leaves it out
+    question_numbers = {t for t, _ in _tokens(question) if _is_number(t)}
+    # ... but only when the span itself brings no OTHER number: "Text on page 7" for a fact about page 1 is a different value, not a gap the question fills
+    if {t for t in span_words if _is_number(t)} - {t for _, t in numbers} - question_numbers:
+        question_numbers = set()
+    if any(t not in span_words and t not in question_numbers for _, t in numbers):
         return "missing", "number_absent"
     subjects = {s for i, _ in numbers for s in _subjects(f, i - _ENTITY_WINDOW, i + _ENTITY_WINDOW + 1)}
     question_words = {t for t, _ in _tokens(question)}
@@ -308,6 +335,8 @@ def span_check(fact: str, span: str, question: str = "") -> tuple[str, str]:
     clauses = _clauses(span)
     worst = ""
     for fi, value in numbers:
+        if value not in span_words:          # supplied by the question: nothing in the span to bind or contradict
+            continue
         direction = _polarity(f, fi)
         passed = False
         for ci, clause in enumerate(clauses):
