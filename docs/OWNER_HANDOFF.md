@@ -19,7 +19,7 @@
 
 ```bash
 LAB_GEN_API_KEY=你的key scripts/demo.sh generate     # 或讓腳本讀 ./.env 的 ANTHROPIC_API_KEY（只印「using the API key from ./.env (not shown)」）
-scripts/demo.sh down                                  # 看完清掉
+scripts/demo.sh stop                                  # 看完先停掉（資料保留；要刪除用 scripts/demo.sh down --wipe）
 ```
 
 - 會花錢：生成與驗證各約幾美分（預設每次上限 0.20 美元；價格是未經查證的牌價，可用 `LAB_GEN_PRICE_*` 覆寫）。

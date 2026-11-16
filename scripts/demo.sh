@@ -2,8 +2,11 @@
 # Quickstart demo driver (docs/QUICKSTART_DEMO.md, Refs #7). Needs Docker with compose v2 and nothing else.
 #   scripts/demo.sh up     build and start db + migrate + api + parse-worker (first run builds images: minutes)
 #   scripts/demo.sh run    upload a synthetic PDF, parse it, print the stored result, cancel a long job
-#   scripts/demo.sh down   stop everything and delete the demo database and artifacts
-#   scripts/demo.sh all    up, run, then down (exit status is the demo's)
+#   scripts/demo.sh stop   stop the containers, KEEP the database, artifacts and logs (Issue #194)
+#   scripts/demo.sh start  bring the stack back up on the existing data (rebuild images, migrate forward, check data, never wipe)
+#   scripts/demo.sh status print what the stack holds (documents, benchmarks, runs, uploads) and whether the volumes agree
+#   scripts/demo.sh down --wipe   DELETE the demo database and artifacts (refused without --wipe or DEMO_WIPE=1; prints what is lost)
+#   scripts/demo.sh all    up, run, then wipe (refused when the stack already holds data, unless DEMO_WIPE=1; exit status is the demo's)
 #   scripts/demo.sh generate  up, run INCLUDING question generation with the real model, then leave the stack up
 #                          (needs LAB_GEN_API_KEY in the environment; costs a few cents; without a key the step is SKIPPED, never passed)
 # Optional: DEMO_EXCLUDE_FAILED=1 scripts/demo.sh generate   excludes the questions that failed the automated validation (recorded with a reason, not deleted) so the freeze can go ahead
@@ -109,39 +112,120 @@ generate() {
 }
 
 ui() {
-  up
-  generate_up || { code=$?; [[ $code == 3 ]] || return $code; echo "no API key: upload/parse/benchmark work in the page, model steps will fail (not a pass)" >&2; }
+  start_stack || { code=$?; [[ $code == 6 ]] || return $code; echo "continuing although stored files are missing (see the warning above)" >&2; }
   session="$("${compose[@]}" --profile demo exec -T api python - < deploy/ui_session.py)"
   {
     echo "# written by scripts/demo.sh ui: local development session (git-ignored, do not share)"
     echo "VITE_LAB_DEV_PROJECT_ID=$(sed -n 's/^PROJECT_ID=//p' <<<"$session")"
     echo "VITE_LAB_DEV_TOKEN=$(sed -n 's/^TOKEN=//p' <<<"$session")"
   } > web/.env.local
-  echo "logged in automatically (web/.env.local). Next: cd web && npm ci && npm run dev, then open http://localhost:5173/"
-  echo "stop the backend with: scripts/demo.sh down"
+  case "$(sed -n 's/^SESSION=//p' <<<"$session")" in
+    reused)  echo "reused the existing web project and owner (your documents and benchmarks are still there); a fresh token was issued" ;;
+    created) echo "created a NEW web project and owner (the database had none)" ;;
+  esac
+  echo "logged in automatically (web/.env.local). Next: cd web && npm ci && npm run dev, then open http://localhost:5173/ and pick a document or benchmark to continue"
+  echo "stop the backend, keeping your data, with: scripts/demo.sh stop"
 }
 
-logs() {
-  mkdir -p logs
-  chmod 2770 logs
-  export LAB_LOG_GID="$(id -g)"
-  if [[ ! -e logs/app.log ]]; then
-    touch logs/app.log
-    chmod 0660 logs/app.log
+# up + the generate worker when there is a key, on whatever data exists. Never wipes.
+start_stack() {
+  up
+  generate_up || { code=$?; [[ $code == 3 ]] || return $code; echo "no API key: upload/parse/benchmark work in the page, model steps will fail (not a pass)" >&2; }
+  data_check || return $?
+}
+
+start() {
+  start_stack || return $?
+  echo "started on the existing data. Next: scripts/demo.sh ui   (web page session)   or   scripts/demo.sh status"
+}
+
+# KEY=VALUE lines from the api container, or nothing when the stack is not running.
+status_values() { "${compose[@]}" --profile demo exec -T api python - < deploy/data_status.py 2>/dev/null || true; }
+
+value_of() { sed -n "s/^$1=//p" <<<"$2" | head -n1; }
+
+describe_data() {
+  local v="$1"
+  echo "  documents: $(value_of DOCUMENTS "$v"), benchmarks: $(value_of BENCHMARKS "$v") (frozen: $(value_of FROZEN_BENCHMARKS "$v")), questions: $(value_of QUESTIONS "$v"), runs: $(value_of RUNS "$v"), developer uploads: $(value_of DEVELOPER_UPLOADS "$v"), stored files: $(value_of ARTIFACTS "$v")"
+}
+
+# After a start the database and the artifact volume must agree: a committed artifact whose object is missing is reported.
+data_check() {
+  local v dangling
+  v="$(status_values)"
+  [[ -n "$v" ]] || { echo "data check: the api is not answering, nothing to check" >&2; return 0; }
+  describe_data "$v"
+  dangling="$(value_of DANGLING_ARTIFACTS "$v")"
+  if [[ "${dangling:-0}" != "0" ]]; then
+    echo "WARNING: $dangling stored file(s) listed in the database are missing or damaged on the artifacts volume (not wiped by this script; restore the volume or re-upload)" >&2
+    return 6
   fi
-  tail -F logs/app.log
+  echo "data check: the database and the artifact volume agree"
 }
 
-down() { "${compose[@]}" --profile demo --profile tools --profile generate down -v; }
+status() {
+  local v
+  v="$(status_values)"
+  [[ -n "$v" ]] || { echo "the stack is not running (scripts/demo.sh start); the data volumes are kept while it is stopped"; return 0; }
+  echo "migration $(value_of MIGRATION "$v"); this stack holds:"
+  describe_data "$v"
+  echo "  files missing on the artifacts volume: $(value_of DANGLING_ARTIFACTS "$v")"
+}
+
+stop() {
+  "${compose[@]}" --profile demo --profile tools --profile generate down
+  echo "stopped. The database, the artifacts and logs/ are KEPT. Start again with: scripts/demo.sh start"
+}
+
+# The wipe flag: `down --wipe` or DEMO_WIPE=1. Without it nothing is deleted, and the message says what would be lost.
+wipe_confirmed() {
+  [[ "${DEMO_WIPE:-}" == "1" ]] && return 0
+  local arg
+  for arg in "$@"; do [[ "$arg" == "--wipe" ]] && return 0; done
+  return 1
+}
+
+down() {
+  local v
+  v="$(status_values)"
+  if ! wipe_confirmed "$@"; then
+    echo "REFUSED: 'down' deletes the demo database and artifacts (the Docker volumes), for good." >&2
+    if [[ -n "$v" ]]; then echo "It would destroy:" >&2; describe_data "$v" >&2
+    else echo "(the stack is not running, so what it holds cannot be counted; the volumes still exist and would be deleted)" >&2; fi
+    echo "To stop and KEEP your data: scripts/demo.sh stop.  To really delete it: scripts/demo.sh down --wipe  (or DEMO_WIPE=1)." >&2
+    return 5
+  fi
+  if [[ -n "$v" ]]; then echo "WIPING:"; describe_data "$v"; fi
+  "${compose[@]}" --profile demo --profile tools --profile generate down -v
+}
+
+# `all` ends with a wipe: never over data somebody created.
+all() {
+  local v docs
+  v="$(status_values)"
+  docs="$(value_of DOCUMENTS "$v")"
+  if [[ "${docs:-0}" != "0" && "${DEMO_WIPE:-}" != "1" ]]; then
+    echo "REFUSED: 'all' would wipe this stack at the end, and it already holds data:" >&2
+    describe_data "$v" >&2
+    echo "Use 'scripts/demo.sh run' on the running stack, or DEMO_WIPE=1 scripts/demo.sh all to delete it." >&2
+    return 5
+  fi
+  trap 'DEMO_WIPE=1 down' EXIT
+  up
+  run
+}
 
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0      # sourced (tests): only the functions
 case "${1:-}" in
   up) up ;;
   run) run ;;
-  down) down ;;
-  all) trap down EXIT; up; run ;;
+  stop) stop ;;
+  start) start ;;
+  status) status ;;
+  down) shift; down "$@" ;;
+  all) all ;;
   generate) generate ;;
   ui) ui ;;
   logs) logs ;;
-  *) echo "usage: $0 up|run|down|all|generate|ui|logs" >&2; exit 2 ;;
+  *) echo "usage: $0 up|run|stop|start|status|down --wipe|all|generate|ui|logs" >&2; exit 2 ;;
 esac

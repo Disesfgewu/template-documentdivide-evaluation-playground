@@ -563,15 +563,20 @@ describe("Workflow Component", () => {
   });
 });
 
+function emptyWorkspaceFetch() {
+  return vi.fn(async () => new Response(JSON.stringify({ project_id: VALID_UUID_1, documents: [], benchmarks: [], counts: { documents: 0, benchmarks: 0 } }),
+    { status: 200, headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch;
+}
+
 describe("Workflow local auto-login", () => {
   it("hides the token fields and enables upload when a dev session is provided", () => {
-    render(<Workflow fetchFn={vi.fn()} devToken="lab_act_dev" devProjectId="11111111-1111-4111-8111-111111111111" />);
+    render(<Workflow fetchFn={emptyWorkspaceFetch()} devToken="lab_act_dev" devProjectId="11111111-1111-4111-8111-111111111111" />);
     expect(screen.getByTestId("workflow-autologin").textContent).toContain("11111111-1111-4111-8111-111111111111");
     expect(screen.queryByLabelText(/認證 Token/)).toBeNull();
   });
 
   it("asks for credentials when no dev session is provided", () => {
-    render(<Workflow fetchFn={vi.fn()} devToken="" devProjectId="" />);
+    render(<Workflow fetchFn={emptyWorkspaceFetch()} devToken="" devProjectId="" />);
     expect(screen.queryByTestId("workflow-autologin")).toBeNull();
     expect(screen.getByLabelText(/認證 Token/)).toBeTruthy();
   });
