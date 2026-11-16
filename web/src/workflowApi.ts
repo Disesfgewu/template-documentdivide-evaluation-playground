@@ -45,7 +45,16 @@ export type ApiErrorDetail = {
   code?: string;
   status?: number;
   details?: unknown;
+  requestId?: string;
 };
+
+const LOG_ID = /^req-[0-9a-f]{8,64}$/;
+
+/** The id the API wrote into logs/app.log for this request (response header), or undefined. Shape-checked: it is shown on the page. */
+export function logRequestId(res: { headers?: { get?: (name: string) => string | null } }): string | undefined {
+  const raw = res.headers?.get?.("x-lab-request-id");
+  return typeof raw === "string" && LOG_ID.test(raw.trim()) ? raw.trim() : undefined;
+}
 
 export type ApiResult<T> =
   | { ok: true; status: number; data: T }
@@ -174,6 +183,11 @@ async function executeFetch<T>(
 
     if (!res.ok) {
       const parsedError = parseErrorBody(res.status, parsedBody, token);
+      const requestId = logRequestId(res);
+      if (requestId) {
+        parsedError.requestId = requestId;
+        parsedError.message = `${parsedError.message}（請求編號 ${requestId}，可到 logs/app.log 搜尋）`;
+      }
       return {
         ok: false,
         status: res.status,

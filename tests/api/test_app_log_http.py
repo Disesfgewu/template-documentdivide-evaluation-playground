@@ -14,7 +14,7 @@ from lab_db import jobs
 
 
 class HttpCompletionTests(unittest.TestCase):
-    def exercise(self, app, send_error=None, disconnect=False):
+    def exercise(self, app, send_error=None, disconnect=False, path=None):
         with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, LAB_APP_LOG="full", LAB_APP_LOG_FILE=d + "/app.log"):
             sent = []
             async def receive():
@@ -25,10 +25,11 @@ class HttpCompletionTests(unittest.TestCase):
                 sent.append(message)
             caught = None
             try:
-                asyncio.run(AppLogMiddleware(app)({"type": "http", "method": "GET"}, receive, send))
+                asyncio.run(AppLogMiddleware(app)({"type": "http", "method": "GET", **({"path": path} if path else {})}, receive, send))
             except BaseException as exc:
                 caught = exc
-            return Path(d + "/app.log").read_text(), caught, sent
+            f = Path(d + "/app.log")
+            return (f.read_text() if f.exists() else ""), caught, sent
 
     def test_success_waits_for_final_body_and_requested_trailers(self):
         for complete in (False, True):
@@ -95,3 +96,48 @@ class PhaseLifetimeTests(unittest.TestCase):
                 if kind == "succeeded":
                     self.assertIs(result, outcome)
                     self.assertTrue(any("succeeded (validate)" in line for line in logs.output))
+
+
+class HealthProbeNoiseTests(unittest.TestCase):
+    """PM on #191: a success of /healthz or /readyz every few seconds is not logged; a state change is. Every response carries the logged id."""
+
+    def run_probes(self, path, statuses):
+        import lab_api.app_log_http as mod
+        mod._last_probe_ok.clear()
+        helper = HttpCompletionTests()
+        lines = []
+        for st in statuses:
+            async def app(scope, receive, send, st=st):
+                await send({"type": "http.response.start", "status": st})
+                await send({"type": "http.response.body", "body": b"{}"})
+            text, _, _ = helper.exercise(app, path=path)
+            lines.append(text)
+        return lines
+
+    def test_successful_probes_write_nothing(self):
+        for path in ("/healthz", "/readyz"):
+            for text in self.run_probes(path, [200, 200, 200]):
+                self.assertNotIn("api_request", text)
+
+    def test_only_a_state_change_is_logged(self):
+        texts = self.run_probes("/readyz", [200, 503, 503, 200, 200])
+        self.assertEqual(["api_request" in t for t in texts], [False, True, False, True, False])
+        self.assertIn("probe_failing", texts[1])
+        self.assertIn("probe_recovered", texts[3])
+
+    def test_other_routes_are_still_logged_with_call_and_return(self):
+        text = self.run_probes("/api/v1/documents", [200])[0]
+        self.assertIn("[CALL]", text)
+        self.assertIn("[RETURN]", text)
+
+    def test_the_response_carries_the_id_that_is_in_the_log(self):
+        helper = HttpCompletionTests()
+        async def app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 404, "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": b"{}"})
+        text, _, sent = helper.exercise(app, path="/api/v1/x")
+        headers = dict(sent[0]["headers"])
+        rid = headers[b"x-lab-request-id"].decode()
+        self.assertRegex(rid, r"^req-[0-9a-f]{32}$")
+        self.assertIn(rid, text)
+        self.assertEqual(headers[b"content-type"], b"application/json")

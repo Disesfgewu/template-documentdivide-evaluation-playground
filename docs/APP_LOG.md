@@ -48,6 +48,15 @@ any requested trailers. Stream failures, failed sends, cancellation and incomple
 disconnected responses produce ERROR instead of a premature successful RETURN;
 original messages, results and exceptions are preserved. Generate-worker phase
 entries are removed on every handler exit, including nonterminal and exception
-paths. API log IDs still require canonical integration with the separate trace
-correlation increment (#65); the current log-only ID must not be treated as the
-returned error ID.
+paths. Health probes: a successful `/healthz` or `/readyz` writes nothing (they run every few seconds and would push the real
+events out of the five rotated files); only a change of state is logged (`probe_failing`, then `probe_recovered`).
+
+Finding a failed action: every API response carries the logged id in the `X-Lab-Request-Id` header, and the web page
+appends it to an error message ("請求編號 req-…，可到 logs/app.log 搜尋"). Search the file for that id to see the
+CALL/RETURN of that request and every stage line it caused. The id in the JSON error body is the client's own
+`X-Request-Id` (or `req-1`) and is a different thing; canonical correlation with the separate trace increment (#65) is
+still not done.
+
+`scripts/demo.sh logs <stage>` follows the file and shows only that stage (`api`, `upload`, `promote`, `plan`, `parse`,
+`generate`, `validate`, `exclusion`, `freeze`, `export`, `external_submission`, `rule_scoring`, `judge`, `results`,
+`workspace`). Without a stage it shows everything. Helper lines that carry no stage tag are not matched by a stage filter.

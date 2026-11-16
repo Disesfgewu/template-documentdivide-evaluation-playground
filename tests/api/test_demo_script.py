@@ -150,3 +150,35 @@ class DemoDataSafetyTests(unittest.TestCase):
     def test_status_when_stopped_says_the_data_is_kept(self):
         out = self.run_fn("status", status="")
         self.assertIn("kept", out.stdout)
+
+
+@unittest.skipUnless(subprocess.run(["bash", "--version"], capture_output=True).returncode == 0, "bash is required")
+class DemoLogsTests(unittest.TestCase):
+    """`logs <stage>` follows app.log but shows only that stage; a bad stage name is refused (it goes into a grep pattern)."""
+
+    def follow(self, args):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "app.log"
+            log.write_text(
+                "t api [CALL] FUNCTION:{api_request(stage='api', method='GET')} started\n"
+                "t api [RETURN] FUNCTION:{validate_line(stage='validate', n=1)} ok\n"
+                "t api [RETURN] FUNCTION:{judge_run(stage='judge', n=2)} ok\n")
+            r = subprocess.run(["timeout", "3", "bash", "-c", f'source "{SCRIPT}"; logs {args}'], capture_output=True, text=True,
+                               env={**os.environ, "DEMO_APP_LOG": str(log)})
+            return r.stdout, r.returncode
+
+    def test_a_stage_shows_only_its_lines(self):
+        out, _ = self.follow("validate")
+        self.assertIn("validate_line", out)
+        self.assertNotIn("judge_run", out)
+        self.assertNotIn("api_request", out)
+
+    def test_no_stage_shows_everything(self):
+        out, _ = self.follow("")
+        for fn in ("api_request", "validate_line", "judge_run"):
+            self.assertIn(fn, out)
+
+    def test_a_pattern_like_stage_name_is_refused(self):
+        out, code = self.follow("'.*'")
+        self.assertEqual(out, "")
+        self.assertEqual(code, 2)

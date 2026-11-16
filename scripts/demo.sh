@@ -6,6 +6,7 @@
 #   scripts/demo.sh start  bring the stack back up on the existing data (rebuild images, migrate forward, check data, never wipe)
 #   scripts/demo.sh status print what the stack holds (documents, benchmarks, runs, uploads) and whether the volumes agree
 #   scripts/demo.sh down --wipe   DELETE the demo database and artifacts (refused without --wipe or DEMO_WIPE=1; prints what is lost)
+#   scripts/demo.sh logs [stage]   follow logs/app.log (only one stage, e.g. validate, rule_scoring, judge)
 #   scripts/demo.sh all    up, run, then wipe (refused when the stack already holds data, unless DEMO_WIPE=1; exit status is the demo's)
 #   scripts/demo.sh generate  up, run INCLUDING question generation with the real model, then leave the stack up
 #                          (needs LAB_GEN_API_KEY in the environment; costs a few cents; without a key the step is SKIPPED, never passed)
@@ -177,6 +178,28 @@ stop() {
   echo "stopped. The database, the artifacts and logs/ are KEPT. Start again with: scripts/demo.sh start"
 }
 
+# Follow logs/app.log across rotations. `logs <stage>` shows only that stage's lines (stage names: api, upload, promote, plan,
+# parse, generate, validate, exclusion, freeze, export, external_submission, rule_scoring, judge, results, workspace).
+logs() {
+  local applog="${DEMO_APP_LOG:-logs/app.log}"
+  mkdir -p logs
+  chmod 2770 logs
+  export LAB_LOG_GID="$(id -g)"
+  if [[ ! -e "$applog" ]]; then
+    touch "$applog"
+    chmod 0660 "$applog"
+  fi
+  local stage="${1:-}"
+  if [[ -z "$stage" ]]; then
+    tail -F "$applog"
+  elif [[ "$stage" =~ ^[a-z_]+$ ]]; then
+    tail -F "$applog" | grep --line-buffered -F "stage='$stage'"
+  else
+    echo "stage must be lowercase letters and underscores, e.g. validate, rule_scoring, judge" >&2
+    exit 2
+  fi
+}
+
 # The wipe flag: `down --wipe` or DEMO_WIPE=1. Without it nothing is deleted, and the message says what would be lost.
 wipe_confirmed() {
   [[ "${DEMO_WIPE:-}" == "1" ]] && return 0
@@ -226,6 +249,6 @@ case "${1:-}" in
   all) all ;;
   generate) generate ;;
   ui) ui ;;
-  logs) logs ;;
-  *) echo "usage: $0 up|run|stop|start|status|down --wipe|all|generate|ui|logs" >&2; exit 2 ;;
+  logs) logs "${2:-}" ;;
+  *) echo "usage: $0 up|run|stop|start|status|down --wipe|all|generate|ui|logs [stage]" >&2; exit 2 ;;
 esac
