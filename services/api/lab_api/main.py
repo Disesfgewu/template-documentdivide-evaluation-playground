@@ -17,6 +17,7 @@ from .benchmark_freeze import router as benchmark_freeze_router
 from .benchmark_generate import router as benchmark_generate_router
 from .benchmark_method import router as benchmark_method_router
 from .benchmark_review import router as benchmark_review_router
+from .workspace import router as workspace_router
 from .benchmark_external import router as benchmark_external_router
 from .benchmarks import router as benchmarks_router
 from .config import Settings, load_settings
@@ -88,6 +89,7 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
     app.include_router(benchmark_method_router)
     app.include_router(benchmark_review_router)
     app.include_router(benchmark_external_router)
+    app.include_router(workspace_router)
 
     configure_openapi(app)
 

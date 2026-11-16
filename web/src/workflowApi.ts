@@ -1523,3 +1523,64 @@ export async function getSubmissionDetails(ref: { runId: string; projectId: stri
   return executeFetch(`${ref.baseUrl ?? ""}/api/v1/runs/${ref.runId}/submission-details?project_id=${encodeURIComponent(ref.projectId.trim())}`,
     { method: "GET", headers: { Authorization: `Bearer ${token}` } }, token, 60_000, ref.fetchFn ?? fetch, ref.signal);
 }
+
+// ---------------------------------------------------------------------------
+// Resume: what already exists in the project (Issue #194)
+// ---------------------------------------------------------------------------
+
+export type WorkspaceDocument = {
+  id: string;
+  document_version_id: string;
+  project_id: string;
+  logical_id: string;
+  revision: number;
+  page_count: number;
+  size_bytes: number;
+  sha256: string;
+  uploaded_at: string;
+  latest_parse_job_id: string | null;
+  latest_parse_status: string | null;
+  benchmarks: number;
+};
+
+export type WorkspaceBenchmark = {
+  logical_id: string;
+  revision: number;
+  status: string;
+  document_id: string;
+  document_logical_id: string;
+  created_at: string;
+  frozen_at: string | null;
+  active_questions: number;
+  questions: number;
+  uploads: number;
+  runs: number;
+  parse_job_id: string | null;
+};
+
+export type WorkspaceResponse = {
+  project_id: string;
+  documents: WorkspaceDocument[];
+  benchmarks: WorkspaceBenchmark[];
+  counts: { documents: number; benchmarks: number };
+};
+
+export async function getWorkspace(ref: { projectId: string; token: string; fetchFn?: typeof fetch; signal?: AbortSignal; baseUrl?: string }):
+  Promise<ApiResult<WorkspaceResponse>> {
+  const token = ref.token.trim();
+  if (!token) return { ok: false, error: { message: "未提供認證 Token", status: 401, code: "unauthorized" } };
+  if (!validateUuid(ref.projectId.trim())) {
+    return { ok: false, error: { message: "Project ID 格式錯誤（須為 UUID）", status: 400, code: "bad_request" } };
+  }
+  return executeFetch<WorkspaceResponse>(
+    `${ref.baseUrl ?? ""}/api/v1/workspace?project_id=${encodeURIComponent(ref.projectId.trim())}`,
+    { method: "GET", headers: { Authorization: `Bearer ${token}` } }, token, DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);
+}
+
+export async function getBenchmarkPlan(ref: BenchRef): Promise<ApiResult<BenchmarkPlanResponse>> {
+  const bad = checkRef(ref);
+  if (bad) return bad;
+  const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/plan?project_id=${encodeURIComponent(ref.projectId.trim())}`;
+  return executeFetch<BenchmarkPlanResponse>(endpoint, { method: "GET", headers: { Authorization: `Bearer ${ref.token.trim()}` } },
+    ref.token.trim(), ref.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);
+}

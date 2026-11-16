@@ -3,14 +3,17 @@ import { QuestionsPanel } from "./QuestionsPanel";
 import { QuestionReview } from "./QuestionReview";
 import { BenchmarkDownload } from "./BenchmarkDownload";
 import { DeveloperPackage, DeveloperUploads } from "./ExternalMethods";
+import { resumeSteps, STATUS_LABEL_ZH } from "./resume";
 import {
   cancelJob,
   createBenchmark,
   freezeBenchmark,
+  getBenchmarkPlan,
   getGenerationProgress,
   getJobStatus,
   getRunEstimate,
   getRunResults,
+  getWorkspace,
   parseDocument,
   planBenchmark,
   runBaseline,
@@ -26,6 +29,9 @@ import {
   type RunEstimate,
   type RunResultsResponse,
   type UploadDocumentResponse,
+  type WorkspaceBenchmark,
+  type WorkspaceDocument,
+  type WorkspaceResponse,
 } from "./workflowApi";
 
 export type StepState = "idle" | "running" | "success" | "error" | "skipped" | "conflict_409";
@@ -80,6 +86,35 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
   const [projectId, setProjectId] = useState(autoLogin ? devProjectId.trim() : "");
 
   const isAuthValid = Boolean(token.trim() && validateUuid(projectId.trim()));
+
+  // Resume (Issue #194): what the project already holds, loaded once logged in and on demand
+  const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [resumeNote, setResumeNote] = useState<string | null>(null);
+  const [resumedBench, setResumedBench] = useState<string | null>(null);
+  const loadWorkspace = async (signal?: AbortSignal) => {
+    setWorkspaceLoading(true);
+    const res = await getWorkspace({ projectId: projectId.trim(), token: token.trim(), fetchFn, signal });
+    if (signal?.aborted) return;
+    setWorkspaceLoading(false);
+    if (res.ok) {
+      setWorkspace(res.data);
+      setWorkspaceError(null);
+    } else {
+      setWorkspaceError(res.error.message);
+    }
+  };
+  useEffect(() => {
+    if (!isAuthValid) {
+      setWorkspace(null);
+      return;
+    }
+    const controller = new AbortController();
+    void loadWorkspace(controller.signal);
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthValid, token, projectId]);
 
   // Step 2: Upload
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -812,6 +847,69 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     }
   };
 
+  // Resume a document that has no benchmark yet: reopen at the parse / plan step
+  const resumeDocument = (doc: WorkspaceDocument) => {
+    setUploadedDoc({
+      id: doc.id, document_version_id: doc.document_version_id, project_id: doc.project_id, resource_id: "", artifact_id: "",
+      logical_id: doc.logical_id, revision: doc.revision, sha256: doc.sha256, size_bytes: doc.size_bytes, page_count: doc.page_count,
+    });
+    setUploadStatus("success");
+    const parsed = doc.latest_parse_status === "succeeded";
+    setParseStatus(parsed ? "success" : "idle");
+    setParseJobId(parsed ? doc.latest_parse_job_id : null);
+    setParseJobDetail(null);
+    setBenchLogicalId(null);
+    setPlanStatus("idle");
+    setPlanResult(null);
+    setGenStatus("idle");
+    setValStatus("idle");
+    setFreezeStatus("idle");
+    setResumedBench(null);
+    setResumeNote(parsed ? "文件已解析過，接下來在步驟 4 建立題庫。" : "文件已上傳，接下來在步驟 3 解析。");
+  };
+
+  // Resume a benchmark: the stepper opens at its REAL state (planning / generating / validating / frozen ...)
+  const resumeBenchmark = async (b: WorkspaceBenchmark) => {
+    const doc = workspace?.documents.find((d) => d.id === b.document_id);
+    if (!doc) {
+      setResumeNote("找不到這個題庫的文件，請重新整理。");
+      return;
+    }
+    if (b.revision !== 1) {
+      setResumeNote(`這個頁面目前只能接續第 1 版（這個是第 ${b.revision} 版）；資料沒有被刪除。`);
+      return;
+    }
+    const ref = { projectId: projectId.trim(), logicalId: b.logical_id, revision: b.revision, token: token.trim(), fetchFn };
+    const progress = await getGenerationProgress(ref);
+    if (!progress.ok) {
+      setResumeNote(`讀取題庫狀態失敗：${progress.error.message}`);
+      return;
+    }
+    const steps = resumeSteps(progress.data.benchmark_status, progress.data.job, progress.data.questions);
+    resumeDocument(doc);
+    setParseStatus("success");
+    setParseJobId(b.parse_job_id ?? doc.latest_parse_job_id);
+    setBenchLogicalId(b.logical_id);
+    setBenchLogicalIdInput(b.logical_id);
+    setResumedBench(b.logical_id);
+    const plan = await getBenchmarkPlan(ref);
+    if (plan.ok) setPlanResult(plan.data);
+    setPlanStatus("success");
+    const job = progress.data.job;
+    setGenProgress(job?.phase === "validate" ? null : progress.data);
+    setValProgress(job?.phase === "validate" ? progress.data : null);
+    setGenStatus(steps.generate);
+    setValStatus(steps.validate);
+    setFreezeStatus(steps.freeze);
+    setGenError(steps.generate === "error" ? explainFailure("generate", job?.status ?? "failed", job?.failure_reason) : null);
+    setValError(steps.validate === "error" ? explainFailure("validate", job?.status ?? "failed", job?.failure_reason) : null);
+    setResumeNote(steps.note);
+    if (!steps.resumable) {
+      setPlanStatus("idle");
+      setResumedBench(null);
+    }
+  };
+
   const done = (st: StepState) => st === "success";
   const steps: { key: string; label: string; state: StepState }[] = [
     { key: "auth", label: "登入", state: isAuthValid ? "success" : "idle" },
@@ -911,6 +1009,62 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         </div>
         )}
       </div>
+
+      {/* Resume: what the project already holds (Issue #194) */}
+      {isAuthValid && (
+        <div style={cardStyle} data-testid="resume-panel">
+          <div style={headerStyle}>
+            <h3 style={{ margin: 0 }}>接續既有的資料</h3>
+            <button type="button" style={buttonStyle} onClick={() => void loadWorkspace()} disabled={workspaceLoading}>
+              {workspaceLoading ? "讀取中…" : "重新整理"}
+            </button>
+          </div>
+          {workspaceError && <div role="status" data-testid="resume-error" style={errorBoxStyle}><strong>讀取既有資料失敗：</strong> {workspaceError}</div>}
+          {workspace && workspace.benchmarks.length === 0 && workspace.documents.length === 0 && (
+            <p className="muted small" data-testid="resume-empty">這個專案還沒有任何文件或題庫；從步驟 2 上傳第一份 PDF。</p>
+          )}
+          {workspace && workspace.benchmarks.length > 0 && (
+            <table style={{ width: "100%", borderCollapse: "collapse", marginTop: "0.5rem" }} aria-label="既有題庫">
+              <thead>
+                <tr><th align="left">題庫</th><th align="left">文件</th><th align="left">狀態</th><th align="right">題數</th><th align="right">開發人員答案</th><th /></tr>
+              </thead>
+              <tbody>
+                {workspace.benchmarks.map((b) => (
+                  <tr key={`${b.logical_id}-${b.revision}`} data-testid={`resume-bench-${b.logical_id}`}>
+                    <td>{b.logical_id}{b.revision !== 1 ? ` v${b.revision}` : ""}</td>
+                    <td>{b.document_logical_id}</td>
+                    <td>{STATUS_LABEL_ZH[b.status] ?? b.status}</td>
+                    <td align="right">{b.active_questions}{b.questions !== b.active_questions ? ` / ${b.questions}` : ""}</td>
+                    <td align="right">{b.uploads}</td>
+                    <td align="right">
+                      <button type="button" style={buttonStyle} onClick={() => void resumeBenchmark(b)}
+                        aria-label={`接著做 ${b.logical_id}`}>
+                        {resumedBench === b.logical_id ? "重新整理狀態" : "接著做"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {workspace && workspace.documents.some((d) => d.benchmarks === 0) && (
+            <div style={{ marginTop: "0.75rem" }}>
+              <strong>還沒建題庫的文件</strong>
+              <ul>
+                {workspace.documents.filter((d) => d.benchmarks === 0).map((d) => (
+                  <li key={d.id} data-testid={`resume-doc-${d.id}`}>
+                    {d.logical_id}（{d.page_count} 頁，解析：{d.latest_parse_status ?? "未解析"}）{" "}
+                    <button type="button" style={buttonStyle} onClick={() => resumeDocument(d)} aria-label={`用文件 ${d.logical_id} 接著做`}>
+                      用這份文件接著做
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {resumeNote && <p role="status" data-testid="resume-note" style={{ marginTop: "0.5rem" }}>{resumeNote}</p>}
+        </div>
+      )}
 
       {/* Step 2 Card: Upload PDF */}
       <div style={cardStyle}>

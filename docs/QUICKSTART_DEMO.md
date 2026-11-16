@@ -13,10 +13,12 @@
 ```bash
 scripts/demo.sh up     # 啟動資料庫、套用 schema、啟動 API（127.0.0.1:8000）與 parse worker
 scripts/demo.sh run    # 上傳合成 PDF、解析、印出逐頁結果、示範取消
-scripts/demo.sh down   # 全部停掉並刪除示範用的資料庫與檔案
+scripts/demo.sh stop   # 只停容器；資料庫、上傳的檔案、logs/ 都保留
 ```
 
-或一次做完：`scripts/demo.sh all`（跑完自動 `down`）。想用自己的 PDF：`DEMO_PDF=/path/to/your.pdf scripts/demo.sh run`（檔案只串流進本機容器，不會送到任何地方；自己的 PDF 只印逐頁表格，不做預期檢查）。
+要連資料一起刪掉，必須明確加旗標：`scripts/demo.sh down --wipe`（見下方「停止、啟動、升級、清除」）。
+
+或一次做完：`scripts/demo.sh all`（跑完自動清除；**如果這個環境已經有資料，`all` 會拒絕執行**，除非你設 `DEMO_WIPE=1`）。想用自己的 PDF：`DEMO_PDF=/path/to/your.pdf scripts/demo.sh run`（檔案只串流進本機容器，不會送到任何地方；自己的 PDF 只印逐頁表格，不做預期檢查）。
 
 API 的互動文件在 `http://127.0.0.1:8000/docs`（需要 `run` 印出的 Bearer token）。
 
@@ -44,7 +46,7 @@ API 的互動文件在 `http://127.0.0.1:8000/docs`（需要 `run` 印出的 Bea
 ```bash
 # key 只放在你自己的環境變數；也可以不設，腳本會（不印出）讀根目錄 .env 的 ANTHROPIC_API_KEY
 LAB_GEN_API_KEY=sk-ant-... scripts/demo.sh generate
-scripts/demo.sh down        # 看完再停掉並刪除示範資料
+scripts/demo.sh stop        # 看完再停掉（資料保留；要刪除才用 down --wipe）
 ```
 
 `generate` 會先做和 `all` 一樣的 up 與 run（四個步驟），再多啟動 `generate-worker`（第一次會 build，含一個 Go 的 `lab-gen`，需要網路下載
@@ -73,9 +75,24 @@ scripts/demo.sh down        # 看完再停掉並刪除示範資料
 - 全部是單機、單一 worker、合成資料；沒有量過真實文件，也沒有 500／600 頁以外的負載結論。
 - 本文件的指令由 CI 的手動 job `demo`（`workflow_dispatch` 勾 `demo`）在乾淨的 Ubuntu runner 上實際執行驗證；結果見交付說明。
 
+## 停止、啟動、升級、清除（資料不會被偷偷刪掉）
+
+| 想做什麼 | 指令 | 資料 |
+|---|---|---|
+| 暫時關掉（睡覺、關機前） | `scripts/demo.sh stop` | **保留**（資料庫卷 `lab-db`、檔案卷 `lab-artifacts`、`logs/`） |
+| 再開起來，接著上次的資料 | `scripts/demo.sh start`（只要 API 與 worker）或 `scripts/demo.sh ui`（再加網頁登入） | 保留；會重建映像、把資料庫往前遷移到最新版、不會清除 |
+| 升級到新版 main | `git pull` → `scripts/demo.sh stop` → `scripts/demo.sh ui` | 保留；舊的題庫、上傳、分數都還在 |
+| 看目前有什麼 | `scripts/demo.sh status` | 只讀：文件、題庫（凍結幾個）、題數、執行、開發人員答案、檔案數 |
+| 全部刪除 | `scripts/demo.sh down --wipe` | **永久刪除**；先印出會失去的數量；沒有 `--wipe`（或 `DEMO_WIPE=1`）一律拒絕 |
+
+- `ui` 會沿用同一個網頁專案與擁有者（只換一個新的登入 token），並明說是「reused」還是「created」；只有資料庫裡還沒有時才建立新的。
+- 網頁的「接續既有的資料」區塊會列出這個專案已有的題庫（狀態、題數、開發人員答案數）和還沒建題庫的文件；按「接著做」，步驟列會停在它真正的狀態（已做素材計畫、出題中、驗題階段、已凍結……）。出題或驗題任務還在跑的時候，頁面不會即時追蹤，按「重新整理狀態」即可。
+- `start` 之後會做資料檢查：資料庫列出的檔案如果在檔案卷上找不到或損壞，會印出警告（不會自動刪除任何東西）。
+- 資料只存在這台機器的 Docker 卷裡；`stop` 不會動它。重灌 Docker 或刪卷才會失去，請自行備份（例如 `docker run --rm -v lab-dev_lab-db:/v -v "$PWD":/b alpine tar czf /b/lab-db.tgz -C /v .`）。
+
 ## 疑難排解
 
 - `up` 卡在 worker：看 `docker compose -f deploy/compose.dev.yml --profile demo logs parse-worker`。第一次啟動要下載 spaCy 模型（已在映像內，不需網路）。
 - port 8000 被佔用：`LAB_API_PORT=8010 scripts/demo.sh up`（`run` 在容器內執行，不受影響）。
-- 清乾淨重來：`scripts/demo.sh down`。**注意**：它做 `down -v`，會連 `deploy/compose.dev.yml` 共用的開發資料庫卷（`lab-db`）一起刪掉；如果你同一台機器上有別的開發資料，先備份。
+- 清乾淨重來：`scripts/demo.sh down --wipe`（或 `DEMO_WIPE=1 scripts/demo.sh down`）。**注意**：它做 `down -v`，會連 `deploy/compose.dev.yml` 共用的開發資料庫卷（`lab-db`）和檔案卷（`lab-artifacts`）一起刪掉，而且救不回來；沒有旗標時它會拒絕，並先印出會被刪掉的文件、題庫、執行、開發人員答案的數量。
 - 資料庫 port 被佔用：`LAB_DB_PORT=55433 scripts/demo.sh up`（預設 55432）。

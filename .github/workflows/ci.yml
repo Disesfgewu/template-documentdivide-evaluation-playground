@@ -348,7 +348,7 @@ jobs:
             ${{ runner.temp }}/demo-logs.txt
       - name: Clean up
         if: always()
-        run: scripts/demo.sh down
+        run: scripts/demo.sh down --wipe
 
   worker-image:
     name: worker-image (synthetic, manual)
