@@ -262,3 +262,73 @@ describe("Workflow: the owner sets HOW MANY questions, never a price", () => {
     expect(document.body.textContent).not.toContain("micro-USD");
   }, 20000);
 });
+
+// Issue #198: a baseline run and then a model-answering run in one session. Each run has its own evaluation; the page must never ask for one
+// run's results with the other run's evaluation id, and never show one run's table under another.
+describe("Workflow: results belong to their run (#198)", () => {
+  const BASE_RUN = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const BASE_EVAL = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const MODEL_RUN = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const MODEL_EVAL = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+
+  function twoRunBackend(opts: { modelResultsFail?: boolean } = {}) {
+    const { f, calls } = backend();
+    const result = (run: string, ev: string, mean: number) => ({
+      run_id: run, evaluation: { id: ev, grader_revision: "g", status: "provisional" }, provisional: true,
+      metrics: [{ metric_name: "recall_at_k", scored: 6, not_applicable: 0, pending: 0, error: 0, mean }], submissions: { answered: 0, abstained_by_model: 0, method_failures: {} },
+      excluded_questions: [], judge: null,
+    });
+    const g = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method || "GET";
+      if (u.includes("/baseline-run") && method === "POST") {
+        calls.push({ url: u, method });
+        return json({ run_id: BASE_RUN, evaluation_id: BASE_EVAL, method: "local-lexical-baseline", status: "completed", evaluation_status: "provisional", questions: 6, limits: [] }, 201);
+      }
+      if (u.includes("/method-runs") && method === "POST") {
+        calls.push({ url: u, method });
+        return json({ run_id: MODEL_RUN, job_id: METHOD_JOB, status: "queued" }, 202);
+      }
+      const m = u.match(/\/api\/v1\/runs\/([0-9a-f-]+)\/results(?:\?(.*))?$/);
+      if (m) {
+        calls.push({ url: u, method });
+        const params = new URLSearchParams(m[2] ?? "");
+        const ev = params.get("evaluation_id");
+        if (m[1] === BASE_RUN) return ev && ev !== BASE_EVAL ? json({ error: { code: "not_found", message: "evaluation not found" } }, 404) : json(result(BASE_RUN, BASE_EVAL, 98.6));
+        if (m[1] === MODEL_RUN) {
+          if (opts.modelResultsFail) return json({ error: { code: "internal", message: "boom" } }, 500);
+          return ev && ev !== MODEL_EVAL ? json({ error: { code: "not_found", message: "evaluation not found" } }, 404) : json(result(MODEL_RUN, MODEL_EVAL, 77.7));
+        }
+      }
+      return f(url, init);
+    });
+    return { f: g as unknown as typeof fetch, calls };
+  }
+
+  it("a baseline and then a model run show two different tables and never request one run with the other's evaluation id", async () => {
+    const { f, calls } = twoRunBackend();
+    await runUntilFrozen(f);
+    fireEvent.click(screen.getByRole("button", { name: "詞彙 baseline" }));
+    await waitFor(() => expect(screen.getByTestId("results-table").textContent).toContain("98.60"));
+    fireEvent.click(screen.getByRole("button", { name: "模型回答方法" }));
+    await waitFor(() => expect(screen.getByTestId("results-table").textContent).toContain("77.70"), { timeout: 8000 });
+    expect(screen.getByTestId("results-table").textContent).not.toContain("98.60");
+    expect(screen.queryByText(/evaluation not found/)).toBeNull();
+    const modelReads = calls.filter((c) => c.url.includes(`/runs/${MODEL_RUN}/results`));
+    expect(modelReads.length).toBeGreaterThan(0);
+    expect(modelReads.some((c) => !c.url.includes("evaluation_id"))).toBe(true);        // the table read asks for "the latest evaluation of that run"
+    const wrong = calls.filter((c) => c.url.includes("/results") && c.url.includes(MODEL_RUN) && c.url.includes(BASE_EVAL));
+    expect(wrong).toEqual([]);
+  }, 25000);
+
+  it("a failed read clears the old table instead of leaving the previous run's numbers on the page", async () => {
+    const { f } = twoRunBackend({ modelResultsFail: true });
+    await runUntilFrozen(f);
+    fireEvent.click(screen.getByRole("button", { name: "詞彙 baseline" }));
+    await waitFor(() => expect(screen.getByTestId("results-table").textContent).toContain("98.60"));
+    fireEvent.click(screen.getByRole("button", { name: "模型回答方法" }));
+    await waitFor(() => expect(screen.getAllByText(/讀取結果失敗|boom/).length).toBeGreaterThan(0), { timeout: 8000 });
+    expect(screen.queryByTestId("results-table")).toBeNull();
+    expect(document.body.textContent).not.toContain("98.60");
+  }, 25000);
+});
