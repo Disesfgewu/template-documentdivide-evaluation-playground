@@ -92,7 +92,7 @@ class VerdictMatchingTests(unittest.TestCase):
     def test_a_matching_verdict_passes(self):
         v, why = self.check(verdict())
         self.assertIsNone(why)
-        self.assertEqual(v.facts, (("f1", "stated"), ("f2", "missing")))
+        self.assertEqual(v.facts, (("f1", "stated", ""), ("f2", "missing", "")))
         self.assertEqual(v.claims[0], ("c1", True, ("p1-c0",)))
 
     def test_an_invented_omitted_or_duplicated_fact_or_claim_is_refused(self):

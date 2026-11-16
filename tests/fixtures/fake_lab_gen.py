@@ -116,10 +116,18 @@ for i, c in enumerate(inp["calls"]):
         import re as _re
         fact_ids = _re.findall(r'<fact id="([^"]+)"', c["user"])
         claims = [(m[0], [h for h in m[1].split(",") if h]) for m in _re.findall(r'<claim id="([^"]+)" cites="([^"]*)"', c["user"])]
-        verdict = {"facts": [{"id": f, "verdict": "stated"} for f in fact_ids],
+        answer_text = (_re.search(r"<answer>\s*(.*?)\s*</answer>", c["user"], _re.S) or [None, ""])[1]
+        # a stated fact carries the span the judge copied from the answer: here the whole answer (a real substring)
+        verdict = {"facts": [{"id": f, "verdict": "stated", "answer_span": answer_text} for f in fact_ids],
                    "claims": [{"id": cid, "supported": True, "supporting_hit_ids": ids} for cid, ids in claims]}
         if mode == "judge_contradicted":              # every call: the first fact is contradicted, the claims are supported
             verdict["facts"][0]["verdict"] = "contradicted"
+        if mode == "judge_no_span":                  # the model says stated but copies nothing from the answer
+            for f in verdict["facts"]:
+                f.pop("answer_span")
+        if mode == "judge_fake_span":                # ... or a span that is not in the answer
+            for f in verdict["facts"]:
+                f["answer_span"] = "a sentence the answer never contained"
         if mode == "judge_mixed":
             if i % 2 == 1:
                 verdict["facts"][0]["verdict"] = "contradicted"

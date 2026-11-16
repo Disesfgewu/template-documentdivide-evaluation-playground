@@ -160,6 +160,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
   const [methodError, setMethodError] = useState<string | null>(null);
   const [methodJobDetail, setMethodJobDetail] = useState<JobStatusResponse | null>(null);
   const [methodModel, setMethodModel] = useState("claude-haiku-4-5-20251001");
+  const [judgeModel, setJudgeModel] = useState("claude-haiku-4-5-20251001");      // the judge's own model (Issue #197): a stronger one can be tried without changing the answering model
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeEvalId, setActiveEvalId] = useState<string | null>(null);
   // The real flow (Issue #189): the questions go to a method developer, the developer's answers come back
@@ -758,7 +759,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
       const res = await startJudgeRun({
         projectId: projectId.trim(),
         runId,
-        model: methodModel.trim(),
+        model: judgeModel.trim(),
         token: token.trim(),
         fetchFn,
         signal: controller.signal,
@@ -1635,6 +1636,21 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 用評分模型評分
               </button>
               <span style={moneyWarningStyle}>會呼叫真實模型、會花錢</span>
+            </div>
+            <div style={{ margin: "0.25rem 0" }}>
+              <label htmlFor="workflow-judge-model" style={{ display: "block", fontSize: "0.85rem" }}>評分模型（預設和答題模型相同）</label>
+              <input
+                id="workflow-judge-model"
+                type="text"
+                value={judgeModel}
+                onChange={(e) => setJudgeModel(e.target.value)}
+                disabled={judgeStatus === "running"}
+                style={{ width: "220px", fontSize: "0.85rem" }}
+              />
+              <p className="muted small" data-testid="judge-model-note" style={{ margin: "0.25rem 0 0 0" }}>
+                換更強的評分模型通常更準，但更貴。費用估計用的是設定檔裡的模型價格（LAB_GEN_PRICE_IN/OUT_MICROS_PER_MTOK），
+                換模型時請同步更新，否則估計會偏低。你的 key 能用哪些模型可以用 scripts/probe_models.sh 檢查。
+              </p>
             </div>
             <EstimateLine est={judgeEst} label="評分這一步" testId="judge-estimate" />
             <p className="help" data-testid="judge-help">

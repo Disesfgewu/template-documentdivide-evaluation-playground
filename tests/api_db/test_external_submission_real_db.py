@@ -219,7 +219,7 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertNotIn("cheese", prompts[0]["user"])
         self.assertIn('cites=""', prompts[0]["user"])                    # the claim has no passage to be supported by
         self.assertIn("NO PASSAGES WERE OFFERED", prompts[0]["user"])    # and the judge is told so: the facts are judged against the answer alone (#197)
-        self.assertIn("judge-v2", json.dumps(results["judge"]))
+        self.assertIn("judge-v3", json.dumps(results["judge"]))
         self.assertAlmostEqual(metrics["correctness"]["mean"], 100.0 / 18, places=6)     # the ANSWER is still judged: 1 of 18 at 100, the 17 abstentions score 0
         with self.connect() as c:
             row = c.execute("SELECT raw_value FROM question_scores s JOIN questions q ON q.id = s.question_id WHERE s.evaluation_id = %s "
@@ -405,3 +405,20 @@ if __name__ == "__main__":
         self.assertEqual(value, 0.0)
         self.assertIn("judge_overruled_by_number_check", codes)
         self.assertEqual(results["judge"]["questions_overruled_by_number_check"], 1)
+
+    def test_no_span_no_credit_a_stated_fact_without_a_span_from_the_answer_scores_zero(self):
+        project, owner = self.frozen()
+        gold = self.gold(owner, project)
+        key = sorted(gold)[0]
+        page, text, answer = gold[key]
+        for mode, what in (("judge_no_span", "no span at all"), ("judge_fake_span", "a span that is not in the answer")):
+            with self.subTest(what=what):
+                lines = [json.dumps({"question_id": key, "status": "answered", "answer": answer, "sources": [{"page": page, "text": text}]})]
+                lines += [json.dumps({"question_id": k, "status": "abstained", "reason": "skip"}) for k in sorted(gold)[1:]]
+                run = self.upload(owner, project, "\n".join(lines) + "\n").json()["run_id"]
+                prompts, metrics, results = self.judge_with_capture(owner, project, run, mode=mode)
+                value, codes = self.score_of(results["evaluation"]["id"], key, "correctness")
+                self.assertEqual(value, 0.0)
+                self.assertIn("judge_span_not_in_answer", codes)
+                self.assertEqual(results["judge"]["questions_with_a_span_not_in_the_answer"], 1)
+                self.assertIn("answer_span", prompts[0]["system"])

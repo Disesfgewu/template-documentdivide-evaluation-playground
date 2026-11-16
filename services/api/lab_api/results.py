@@ -283,11 +283,12 @@ FROM target_eval te
     judge_row = conn.execute(
         "SELECT count(*) FILTER (WHERE judge_model IS NOT NULL), count(*) FILTER (WHERE 'contradicted_fact' = ANY(reason_codes)), "
         "count(*) FILTER (WHERE 'judge_overruled_by_number_check' = ANY(reason_codes)), "
+        "count(*) FILTER (WHERE 'judge_span_not_in_answer' = ANY(reason_codes)), "
         "min(judge_model), min(judge_prompt_revision), min(judge_limitation) FROM question_scores "
         "WHERE evaluation_id = %s AND metric_name = 'correctness'", (judged_eval,)).fetchone() if judged_eval else None
     judge_summary = ({"judged_questions": int(judge_row[0]), "questions_with_a_contradicted_fact": int(judge_row[1]),
-                      "questions_overruled_by_number_check": int(judge_row[2]), "model": judge_row[3],
-                      "prompt_revision": judge_row[4], "limitation": judge_row[5]} if judge_row and judge_row[0] else None)
+                      "questions_overruled_by_number_check": int(judge_row[2]), "questions_with_a_span_not_in_the_answer": int(judge_row[3]),
+                      "model": judge_row[4], "prompt_revision": judge_row[5], "limitation": judge_row[6]} if judge_row and judge_row[0] else None)
     # An uploaded developer file: how its quoted sources fared against the system parse. Not-found quotes are excluded from the judge and a
     # not-found quote still carries a whole-page region, so the retrieval scores of those sources are page-only credit.
     sc = conn.execute("SELECT count(*), count(*) FILTER (WHERE m.text_found), count(*) FILTER (WHERE m.match_quality = 'not_found'), "
