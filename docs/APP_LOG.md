@@ -48,6 +48,18 @@ any requested trailers. Stream failures, failed sends, cancellation and incomple
 disconnected responses produce ERROR instead of a premature successful RETURN;
 original messages, results and exceptions are preserved. Generate-worker phase
 entries are removed on every handler exit, including nonterminal and exception
+paths. API log IDs still require canonical integration with the separate trace
+correlation increment (#65); the current log-only ID must not be treated as the
+returned error ID.
+
+Scoring decisions (Issue #197): every line written while a question is being scored or judged carries `q=<question_key>#<ordinal>` after the
+job/run id, so `grep 'q=q-…#9' logs/app.log` is that question's whole story. A MetricResult is logged as its fields (metric, status, raw_value,
+numerator, denominator, reason_codes), never as `<object>`. Strings shorter than 40 characters (ids, verdicts) are shown as they are; only longer
+owner text gets the length + sha256 + 120-char preview. The judge writes one `question_summary` line per question: the judge's fact verdicts, the
+final ones after the number check, `overruled=[f1:number_other_entity]`, claims supported/total, claims with no passage, and the derived scores.
+`retrieval_credit_withheld` says a not-found source got no retrieval credit; `judge_overruled_by_number_check` says why a fact the judge called
+stated was scored missing.
+
 paths. Health probes: a successful `/healthz` or `/readyz` writes nothing (they run every few seconds and would push the real
 events out of the five rotated files); only a change of state is logged (`probe_failing`, then `probe_recovered`).
 

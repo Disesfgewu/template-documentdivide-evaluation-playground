@@ -141,7 +141,10 @@ def run_local_baseline(conn: psycopg.Connection, store: LocalArtifactStore, proj
 
 
 @app_traced(stage="rule_scoring", is_stage=True)
-def _score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_code=None) -> list[MetricResult]:
+def _score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_code=None, unlocated=frozenset()) -> list[MetricResult]:
+    """``unlocated`` = ids of the hits whose quote was NOT found on the cited page (an uploaded developer file). Their region is the whole page; it earns
+    retrieval credit only when the question's gold is page-level (a benchmark frozen before Issue #197). With fact-level gold it earns 0, and the
+    source stays visible as not_found."""
     source = conn.execute("SELECT payload FROM gold_answers WHERE question_id = %s AND kind = 'source'", (qid,)).fetchone()
     if source is None:
         raise BaselineError("a question has no source gold")
@@ -153,8 +156,12 @@ def _score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_cod
             "JOIN evidence_regions er ON er.evidence_unit_id = eu.id WHERE eu.document_version_id = %s "
             "AND eu.evidence_key = ANY(%s) ORDER BY eu.evidence_key, er.ordinal", (doc_id, ids)).fetchall():
         unit_regions.setdefault(key, []).append(rules.Region(page, _fraction(x0), _fraction(y0), _fraction(x1), _fraction(y1)))
+    granularity = conn.execute("SELECT payload->>'gold_granularity' FROM questions WHERE id = %s", (qid,)).fetchone()[0] or "page"
+    dropped = [h.hit_id for h in response.retrieved_hits if h.hit_id in unlocated] if granularity == "fact" else []
+    if dropped:
+        log_op("retrieval_credit_withheld", question_key=qkey, hit_ids=dropped, reason="quote_not_found_and_gold_is_fact_level", stage="rule_scoring")
     returned = [rules.Region(r.page_index, _fraction(r.bbox[0]), _fraction(r.bbox[1]), _fraction(r.bbox[2]), _fraction(r.bbox[3]))
-                for h in response.retrieved_hits for r in h.regions]
+                for h in response.retrieved_hits if h.hit_id not in dropped for r in h.regions]
     matched = set()
     for k, regs in unit_regions.items():
         hit = rules.unit_hit(returned, regs)
@@ -171,7 +178,8 @@ def _score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_cod
         out += [_pending(qkey, m) for m in PENDING_METRICS]
     else:       # the METHOD failed (budget, provider, contract): an error with its code, never a pending score or an abstention
         out += [rules._error(qkey, m, GRADER_REVISION, [failure_code]) for m in PENDING_METRICS]
-    metrics_summary = [(m.metric, str(m.numerator), str(m.denominator)) for m in out]
+    metrics_summary = [f"{m.metric}={m.raw_value if m.raw_value is not None else m.status} ({m.numerator}/{m.denominator})"
+                       + (f" {list(m.reason_codes)}" if m.reason_codes else "") for m in out]
     log_op("score_rule_metrics", question_key=qkey, gold_sets=gold_sets, matched_units=list(matched),
            metrics=metrics_summary, stage="rule_scoring")
     return out

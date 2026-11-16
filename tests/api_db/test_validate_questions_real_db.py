@@ -115,9 +115,16 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         project, owner, bench = self.generated()
         self.validate(project, owner, bench, "validate_garbage")
         self.assertEqual(set(self.verdicts(bench)), {"needs_review"})
-        project, owner, bench = self.generated("questions_ungrounded")
-        self.validate(project, owner, bench, "validate_ok")                          # the validator says yes, the code says no
-        self.assertEqual(set(self.verdicts(bench)), {"fail"})
+        # Ungrounded facts (not in the shown text) are no longer written to be failed later: since #197 a fact that no shown body unit carries
+        # makes the question invalid at generation, so nothing reaches the validator whatever it would have said.
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=BIG)
+        out = self.process(project, job, "questions_ungrounded", build_calls=gq.make_build_calls(), on_results=gq.make_on_results())
+        self.assertEqual((out.status, self.bench_status(bench)), ("succeeded", "generating"))     # nothing was written, so nothing is validating
+        self.assertEqual(self.count_q(bench), 0)
+        with self.connect() as c:
+            reasons = c.execute("SELECT reason FROM audit_events WHERE project_id = %s AND action = 'benchmark.questions_generated'", (project,)).fetchone()[0]
+        self.assertIn("fact_not_attributable", reasons)
 
     def test_questions_are_never_deleted_and_decided_ones_are_not_validated_again(self):
         project, owner, bench = self.generated()

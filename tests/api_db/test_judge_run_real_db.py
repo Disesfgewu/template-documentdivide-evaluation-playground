@@ -59,7 +59,10 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         for name in JUDGED:
             m = self.metric(body, name)
             self.assertEqual((m["scored"], m["pending"], m["error"]), (n, 0, 0), name)
-            self.assertEqual(m["mean"], 100.0, name)
+            if name == "correctness":
+                self.check_correctness(m, body, n)
+            else:
+                self.assertEqual(m["mean"], 100.0, name)
         self.assertEqual(self.metric(body, "recall_at_k")["scored"], n)               # the rule-based rows are carried over
         self.assertNotEqual(body["evaluation"]["id"], str(old))
         self.assertTrue(body["provisional"])
@@ -107,7 +110,19 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         _, body = self.judge(project, owner, run, "judge_prose")
         for name in JUDGED:
             m = self.metric(body, name)
-            self.assertEqual((m["scored"], m["error"], m["mean"]), (n, 0, 100.0), name)
+            self.assertEqual((m["scored"], m["error"]), (n, 0), name)
+            if name == "correctness":
+                self.check_correctness(m, body, n)
+            else:
+                self.assertEqual(m["mean"], 100.0, name)
+
+    def check_correctness(self, m, body, n):
+        """The fake judge says every fact is stated. The code check (#197) overrules it where the fixture's lexical retrieval handed the answering
+        stub a different page, so the answer lacks the fact's number: those questions lose credit and are counted; the rest score 100."""
+        overruled = body["judge"]["questions_overruled_by_number_check"]
+        self.assertLessEqual(overruled, 3)
+        self.assertGreaterEqual(m["mean"], 100.0 * (n - overruled) / n)
+        self.assertEqual(m["mean"] == 100.0, overruled == 0)
 
     def test_a_contradicted_fact_is_scored_like_a_missing_one_but_is_marked_and_counted_in_the_results(self):
         project, owner, run = self.answered()

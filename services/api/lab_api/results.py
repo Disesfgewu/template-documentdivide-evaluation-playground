@@ -282,20 +282,30 @@ FROM target_eval te
                                                   (run_id,)).fetchone() or [None])[0]
     judge_row = conn.execute(
         "SELECT count(*) FILTER (WHERE judge_model IS NOT NULL), count(*) FILTER (WHERE 'contradicted_fact' = ANY(reason_codes)), "
+        "count(*) FILTER (WHERE 'judge_overruled_by_number_check' = ANY(reason_codes)), "
         "min(judge_model), min(judge_prompt_revision), min(judge_limitation) FROM question_scores "
         "WHERE evaluation_id = %s AND metric_name = 'correctness'", (judged_eval,)).fetchone() if judged_eval else None
-    judge_summary = ({"judged_questions": int(judge_row[0]), "questions_with_a_contradicted_fact": int(judge_row[1]), "model": judge_row[2],
-                      "prompt_revision": judge_row[3], "limitation": judge_row[4]} if judge_row and judge_row[0] else None)
+    judge_summary = ({"judged_questions": int(judge_row[0]), "questions_with_a_contradicted_fact": int(judge_row[1]),
+                      "questions_overruled_by_number_check": int(judge_row[2]), "model": judge_row[3],
+                      "prompt_revision": judge_row[4], "limitation": judge_row[5]} if judge_row and judge_row[0] else None)
     # An uploaded developer file: how its quoted sources fared against the system parse. Not-found quotes are excluded from the judge and a
     # not-found quote still carries a whole-page region, so the retrieval scores of those sources are page-only credit.
     sc = conn.execute("SELECT count(*), count(*) FILTER (WHERE m.text_found), count(*) FILTER (WHERE m.match_quality = 'not_found'), "
                       "count(*) FILTER (WHERE m.match_quality = 'page_without_text') FROM submission_source_matches m "
                       "JOIN submissions s ON s.id = m.submission_id WHERE s.run_id = %s", (run_id,)).fetchone()
     source_checks = ({"total": int(sc[0]), "found": int(sc[1]), "not_found": int(sc[2]), "page_without_text": int(sc[3]),
-                      "excluded_from_judge": int(sc[0]) - int(sc[1]), "page_only_retrieval_credit": int(sc[0]) - int(sc[1]),
+                      "excluded_from_judge": int(sc[0]) - int(sc[1]), "page_only_retrieval_credit": int(sc[0]) - int(sc[1]),   # only on page-level gold; fact-level gold gives a not-found source 0
                       "note": "sources whose quote was not found on the cited page are excluded from the judge (it sees only the system's own text of "
                               "matched passages) and count against citation precision; their retrieval credit is the whole page, not a located passage"}
                      if sc and sc[0] else None)
+    gold = conn.execute("SELECT count(*) FILTER (WHERE q.payload->>'gold_granularity' = 'fact'), "
+                        "count(*) FILTER (WHERE q.payload->>'gold_granularity' IS DISTINCT FROM 'fact') FROM active_questions q WHERE q.benchmark_id = %s",
+                        (benchmark_id,)).fetchone()
+    retrieval_gold = {"fact_level_questions": int(gold[0]), "page_level_questions": int(gold[1]),
+                      "note": ("retrieval metrics (recall, complete, localization) use PAGE-level gold for " + str(int(gold[1])) + " question(s): the gold "
+                               "evidence is every unit shown from the page, so they reward whole pages; generate a new benchmark revision for fact-level gold "
+                               "(the units that support each required fact)") if gold[1] else
+                      "retrieval metrics use fact-level gold: the evidence set is the units that support each required fact"}
     snapshot = conn.execute(sql, tuple(eval_args + [run_id] + score_args + page_args)).fetchone()
     if snapshot is None:
         raise missing
@@ -376,6 +386,7 @@ FROM target_eval te
         "excluded_questions": excluded_questions,
         "judge": judge_summary,
         "source_checks": source_checks,
+        "retrieval_gold": retrieval_gold,
         "items": items_list,
         "next_cursor": next_cursor,
     }

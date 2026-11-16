@@ -11,6 +11,8 @@ Where:
 from __future__ import annotations
 
 import dataclasses
+from decimal import Decimal
+from fractions import Fraction
 import itertools
 import re
 import uuid
@@ -33,6 +35,7 @@ BACKUP_COUNT = 5
 
 _current_service: contextvars.ContextVar[str] = contextvars.ContextVar("service", default="")
 _current_context_id: contextvars.ContextVar[str] = contextvars.ContextVar("context_id", default="-")
+_current_question: contextvars.ContextVar[str] = contextvars.ContextVar("question", default="")
 _current_stage: contextvars.ContextVar[str] = contextvars.ContextVar("stage", default="")
 _LOG_FAILURES = 0
 
@@ -85,6 +88,8 @@ class ContextScope:
             cid = str(self.kw["context_id"])
         if cid is not None:
             self.tokens.append((_current_context_id, _current_context_id.set(cid)))
+        if self.kw.get("question") is not None:      # "question_key#ordinal": on every line written inside the scope (Issue #197)
+            self.tokens.append((_current_question, _current_question.set(str(self.kw["question"]))))
         return self
 
     def __exit__(self, *args):
@@ -103,6 +108,7 @@ _HASH_ONLY_PARTS = ("prompt", "reply", "stdout", "stderr", "payload", "raw")
 _PREVIEW = {"shown_text", "quote", "quotes", "file_content", "answer", "answers", "reference_answer", "facts", "fact_statements",
             "question_text", "matched_text", "verdict_reason", "claim", "claims", "answer_text"}
 PREVIEW_CHARS = 120
+SHORT_CHARS = 40
 _DSN = re.compile(r"(?i)postgres(?:ql)?(?:\+[a-z0-9]+)?://[^\s\"'<>]+")
 
 
@@ -115,7 +121,7 @@ def _digest(value) -> str:
     return f"<{len(value)} {'chars' if isinstance(value, str) else 'bytes'} sha256:{hashlib.sha256(data).hexdigest()[:16]}>"
 
 
-_SAFE_NAMES = {"question_key", "evidence_key", "qkey"}      # identifiers of benchmark items, not credentials
+_SAFE_NAMES = {"question_key", "evidence_key", "qkey", "ordinal"}      # identifiers of benchmark items, not credentials
 
 
 def _field(name, value, depth=0):
@@ -133,6 +139,8 @@ def preview_value(value, depth=0):
     """Owner data: strings become ``<N chars sha256:..>'first 120 chars'`` (redacted first); containers leaf by leaf."""
     try:
         if type(value) is str:
+            if len(value) < SHORT_CHARS:       # a short id/verdict/number: shown as it is, a hash wrapper would only be noise
+                return repr(_clean(value))
             return _digest(value) + repr(_clean(value)[:PREVIEW_CHARS])
         if type(value) in (bytes, bytearray):
             return _digest(value)
@@ -170,6 +178,13 @@ def bound_value(val: Any, max_str_chars: int = 300, max_items: int = 8, depth: i
             return "..."
         if val is None or type(val) in (int, float, bool):
             return str(val)[:100]
+        if type(val) in (Fraction, Decimal):
+            return str(val)[:100]
+        if type(val).__module__.startswith("lab_contracts") and hasattr(type(val), "model_fields"):
+            # a contract object (e.g. a MetricResult): its scalar fields only, never a repr of the object
+            fields = {n: getattr(val, n, None) for n in itertools.islice(type(val).model_fields, 16)}
+            fields = {n: v for n, v in fields.items() if v is None or type(v) in (str, int, float, bool, Fraction, Decimal, list, tuple)}
+            return type(val).__name__ + bound_value(fields, max_str_chars, max_items + 8, depth + 1)
         if isinstance(val, uuid.UUID):
             return str(val)
         if type(val) in (bytes, bytearray):
@@ -230,7 +245,15 @@ def format_log_line(mode: str, func_name: str, args_repr: str, status: str, retu
     func_name = func_name[:128]
     svc, cid = svc[:64], cid[:160]
     ret_part = f" {{Return: {return_repr[:4096]}}}" if return_repr is not None else ""
-    return f"{ts} {svc} {cid} [{mode}] FUNCTION:{{{func_name}({args_repr})}} {status}{ret_part}"
+    q = _current_question.get()
+    q = f"/q={_clean(q)[:120].replace(' ', '_')}" if q else ""      # inside the context token: the line keeps its "<time> <service> <context> [MODE]" grammar
+    return f"{ts} {svc} {cid}{q} [{mode}] FUNCTION:{{{func_name}({args_repr})}} {status}{ret_part}"
+
+
+def set_question(question_key: str | None, ordinal: int | None = None) -> None:
+    """Tag every line written from now on with ``q=<question_key>#<ordinal>`` (``None`` clears it). For per-question loops; the caller
+    clears it when the loop ends."""
+    _current_question.set("" if question_key is None else f"{question_key}#{ordinal}")
 
 
 _BANNER_KEY: tuple = ()

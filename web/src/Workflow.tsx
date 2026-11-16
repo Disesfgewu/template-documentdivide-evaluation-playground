@@ -1680,10 +1680,19 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 <div data-testid="judge-summary" style={infoBoxStyle}>
                   <p style={{ margin: 0 }}>
                     評分模型 {resultsData.judge.model}（prompt {resultsData.judge.prompt_revision}）：評了 {resultsData.judge.judged_questions} 題，
-                    其中 {resultsData.judge.questions_with_a_contradicted_fact} 題有被判定為與標準答案相反的事實。
+                    其中 {resultsData.judge.questions_with_a_contradicted_fact} 題有被判定為與標準答案相反的事實
+                    {(resultsData.judge.questions_overruled_by_number_check ?? 0) > 0
+                      ? `；${resultsData.judge.questions_overruled_by_number_check} 題因為數字與標準答案對不上，由程式把「有說到」改為「沒說到」`
+                      : ""}。
                   </p>
                   <p style={{ margin: "0.25rem 0 0 0" }} className="muted small">限制：{resultsData.judge.limitation}</p>
                 </div>
+              )}
+              {resultsData.retrieval_gold && resultsData.retrieval_gold.page_level_questions > 0 && (
+                <p data-testid="page-level-gold-note" className="muted small" style={{ margin: "0.25rem 0" }}>
+                  注意：這份題庫有 {resultsData.retrieval_gold.page_level_questions} 題的標準出處是整頁，召回率（recall）和 complete 會偏向整頁方法；
+                  重新出一份題庫（新版本）才會改成每個要點各自的出處。
+                </p>
               )}
               {resultsData.excluded_questions && resultsData.excluded_questions.length > 0 && (
                 <p data-testid="excluded-note" className="muted small" style={{ margin: "0.25rem 0" }}>

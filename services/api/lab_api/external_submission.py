@@ -34,7 +34,7 @@ from lab_db.storage import LocalArtifactStore, store_and_register
 from lab_api import baseline_eval as be
 from lab_api.method_answer import failure_response
 from lab_api.validate_questions import content_tokens
-from .app_log import app_traced, log_op, log_alarm
+from .app_log import app_traced, log_op, log_alarm, set_question
 
 ACTION = "register_method_and_submit"
 MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -374,6 +374,7 @@ def import_submission(conn: psycopg.Connection, store: LocalArtifactStore, proje
         failures: dict = {}
         for qid, qkey, ordinal in questions:
             entry = parsed.entries.get(qkey)
+            set_question(qkey, ordinal)
             code, matches = None, []
             if entry is None:
                 code = "not_submitted"
@@ -402,8 +403,10 @@ def import_submission(conn: psycopg.Connection, store: LocalArtifactStore, proje
                              (submission_id, hit_key, page, loc.quality, loc.found, loc.coverage, loc.system_text))
                 checks["total"] += 1
                 checks["found" if loc.found else loc.quality] += 1
-            for result in be._score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_code=code):
+            for result in be._score_question(conn, benchmark_id, doc_id, qid, qkey, response, failure_code=code,
+                                          unlocated=frozenset(hk for hk, _, loc in matches if not loc.found)):
                 be._store_score(conn, evaluation_id, run_id, benchmark_id, qid, submission_id, result)
+        set_question(None)
         report["source_checks"] = checks
         conn.execute("INSERT INTO external_submissions (run_id, project_id, benchmark_id, method_name, method_version, notes, file_sha256, "
                      "file_artifact_id, uploaded_by, accepted_partial, report) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
