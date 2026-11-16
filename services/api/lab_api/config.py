@@ -25,8 +25,17 @@ _MSG_REAL = (
     "is implemented yet (T84 pending)"
 )
 _MSG_PROD_MOCK = "env=prod must not run with provider_mode=mock"
+_MSG_BOOLEAN = "must be a boolean"
 _SAFE_VALUE_ERRORS = frozenset(
-    {_MSG_SCHEME, _MSG_HOST_DB, _MSG_MALFORMED_URL, _MSG_ABSOLUTE, _MSG_REAL, _MSG_PROD_MOCK}
+    {
+        _MSG_SCHEME,
+        _MSG_HOST_DB,
+        _MSG_MALFORMED_URL,
+        _MSG_ABSOLUTE,
+        _MSG_REAL,
+        _MSG_PROD_MOCK,
+        _MSG_BOOLEAN,
+    }
 )
 
 # Fixed, value-free text for pydantic's built-in error types. Pydantic's own
@@ -39,6 +48,8 @@ _SAFE_TYPE_MESSAGES = {
     "float_parsing": "must be a number",
     "float_type": "must be a number",
     "finite_number": "must be a finite number",
+    "bool_parsing": "must be a boolean",
+    "bool_type": "must be a boolean",
     "path_type": "must be a path",
     "string_type": "must be a string",
 }
@@ -71,10 +82,24 @@ class Settings(BaseSettings):
     artifact_root: Path
     auth_secret: SecretStr | None = None
     db_connect_timeout_s: float = Field(default=3.0, gt=0, le=30)
+    trust_remote_traceparent: bool = False
     # List prices (micro-currency per million tokens) of the question-generation model, the same values the generate worker is given:
     # the API only uses them to show and derive the worst-case cost of a run BEFORE it starts (Issue #186). Never a key.
     gen_price_in_micros_per_mtok: int | None = Field(default=None, ge=0, le=1_000_000_000)
     gen_price_out_micros_per_mtok: int | None = Field(default=None, ge=0, le=1_000_000_000)
+
+    @field_validator("trust_remote_traceparent", mode="before")
+    @classmethod
+    def _strict_bool(cls, v: object) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            norm = v.strip().lower()
+            if norm in ("true", "1"):
+                return True
+            if norm in ("false", "0"):
+                return False
+        raise ValueError("must be a boolean")
 
     @field_validator("database_url")
     @classmethod
