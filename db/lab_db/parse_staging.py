@@ -22,7 +22,7 @@ from psycopg.types.json import Jsonb
 from .jobs import Lease, LeaseLost
 from .storage import LocalArtifactStore, store_and_register
 
-__all__ = ["StagingIdentityMismatch", "StagingConflict", "StagingIncomplete", "Resume", "begin", "stage_page", "stage_run", "progress", "staged_pages",
+__all__ = ["StagingIdentityMismatch", "StagingConflict", "StagingIncomplete", "Resume", "begin", "stage_page", "stage_run", "progress", "staged_pages", "staged_summary",
            "finish_from_staging", "discard_staging", "sweep_orphans", "page_digest", "MAX_PAGE_BYTES", "ORPHAN_HOURS"]
 
 MAX_PAGE_BYTES = 32 * 1024 * 1024        # canonical JSON of ONE page; the database also caps each JSON column at 16 MiB
@@ -80,7 +80,7 @@ def begin(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease, identit
 
 
 def stage_page(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease, page_index: int, status: str, diagnostics: list, evidence: list,
-               observations: list) -> int:
+               observations: list, run_key: Optional[str] = None) -> int:
     """Store one FINAL page in its own short transaction; returns its canonical size in bytes. A page already stored must have the same digest."""
     digest, data = page_digest(page_index, status, diagnostics, evidence, observations)
     if len(data) > MAX_PAGE_BYTES:
@@ -88,9 +88,9 @@ def stage_page(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease, pa
     with conn.transaction():
         _fence(conn, project_id, lease)
         conn.execute(
-            "INSERT INTO parse_staging_pages (job_id, page_index, status, diagnostics, evidence, observations, page_sha256, page_bytes) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (job_id, page_index) DO NOTHING",
-            (lease.job_id, page_index, status, Jsonb(diagnostics), Jsonb(evidence), Jsonb(observations), digest, len(data)))
+            "INSERT INTO parse_staging_pages (job_id, page_index, status, diagnostics, evidence, observations, run_key, page_sha256, page_bytes) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (job_id, page_index) DO NOTHING",
+            (lease.job_id, page_index, status, Jsonb(diagnostics), Jsonb(evidence), Jsonb(observations), run_key, digest, len(data)))
         stored = conn.execute("SELECT page_sha256 FROM parse_staging_pages WHERE job_id = %s AND page_index = %s", (lease.job_id, page_index)).fetchone()[0]
         if stored != digest:
             raise StagingConflict(f"page {page_index} was staged with other content")
@@ -98,24 +98,35 @@ def stage_page(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease, pa
     return len(data)
 
 
-def stage_run(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease, run_key: str, manifest: dict, capabilities: dict, raw: Iterable[bytes]) -> None:
-    """Store the small manifest of one batch run and its raw upstream outputs (kept here until the job succeeds)."""
+def stage_run(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease, run_key: str, manifest: dict, capabilities: dict, raw: Iterable[bytes],
+              raw_result_refs: Iterable[str] = ()) -> None:
+    """Store the small manifest of one batch run and its raw upstream outputs (kept here until the job succeeds). A run stored again keeps the first copy."""
     raw = list(raw)
     with conn.transaction():
         _fence(conn, project_id, lease)
-        conn.execute("INSERT INTO parse_staging_runs (job_id, run_key, manifest, capabilities, raw) VALUES (%s, %s, %s, %s, %s) "
-                     "ON CONFLICT (job_id, run_key) DO NOTHING", (lease.job_id, run_key, Jsonb(manifest), Jsonb(capabilities), raw))
+        conn.execute("INSERT INTO parse_staging_runs (job_id, run_key, manifest, capabilities, raw_result_refs, raw) VALUES (%s, %s, %s, %s, %s, %s) "
+                     "ON CONFLICT (job_id, run_key) DO NOTHING", (lease.job_id, run_key, Jsonb(manifest), Jsonb(capabilities), Jsonb(list(raw_result_refs)), raw))
 
 
 def progress(conn: psycopg.Connection, job_id: uuid.UUID) -> Optional[tuple[int, int]]:
     """(pages staged, pages in the document) or None when the job has no staging (never started, finished, or discarded)."""
-    row = conn.execute("SELECT (SELECT count(*) FROM parse_staging_pages p WHERE p.job_id = s.job_id), (s.identity->>'pages_total')::int "
-                       "FROM parse_staging s WHERE s.job_id = %s", (job_id,)).fetchone()
+    with conn.transaction():
+        row = conn.execute("SELECT (SELECT count(*) FROM parse_staging_pages p WHERE p.job_id = s.job_id), (s.identity->>'pages_total')::int "
+                           "FROM parse_staging s WHERE s.job_id = %s", (job_id,)).fetchone()
     return None if row is None else (int(row[0]), int(row[1]))
 
 
+def staged_summary(conn: psycopg.Connection, job_id: uuid.UUID) -> tuple[dict, bool]:
+    """({page_index: (status, diagnostics)}, whether any staged page has an observation): what a RESUMED parse needs to know about the stored pages."""
+    with conn.transaction():          # no implicit transaction may stay open on the caller's connection across a long parse
+        pages = {i: (st, d) for i, st, d in conn.execute("SELECT page_index, status, diagnostics FROM parse_staging_pages WHERE job_id = %s", (job_id,))}
+        any_obs = conn.execute("SELECT EXISTS (SELECT 1 FROM parse_staging_pages WHERE job_id = %s AND jsonb_array_length(observations) > 0)", (job_id,)).fetchone()[0]
+    return pages, bool(any_obs)
+
+
 def staged_pages(conn: psycopg.Connection, job_id: uuid.UUID) -> frozenset[int]:
-    return frozenset(p for (p,) in conn.execute("SELECT page_index FROM parse_staging_pages WHERE job_id = %s", (job_id,)))
+    with conn.transaction():
+        return frozenset(p for (p,) in conn.execute("SELECT page_index FROM parse_staging_pages WHERE job_id = %s", (job_id,)))
 
 
 def finish_from_staging(conn: psycopg.Connection, store: LocalArtifactStore, project_id: uuid.UUID, lease: Lease, header: dict, pages_total: int) -> dict:
@@ -138,15 +149,18 @@ def finish_from_staging(conn: psycopg.Connection, store: LocalArtifactStore, pro
     artifact_ids: list[uuid.UUID] = []
     seen: dict[str, uuid.UUID] = {}
     raw_count = 0
-    for (blobs,) in conn.execute("SELECT raw FROM parse_staging_runs WHERE job_id = %s ORDER BY run_key", (lease.job_id,)):
-        for blob in blobs:
-            raw_count += 1
-            if raw_count > MAX_RAW_ARTIFACTS:
-                raise ValueError("too many raw artifacts")
-            sha = hashlib.sha256(bytes(blob)).hexdigest()
-            if sha not in seen:
-                seen[sha] = store_and_register(conn, store, project_id, bytes(blob), "application/json")
-                artifact_ids.append(seen[sha])
+    with conn.cursor(name="parse_staging_raw") as runs:          # server side, one run's raw outputs in memory at a time
+        runs.itersize = 1
+        runs.execute("SELECT raw FROM parse_staging_runs WHERE job_id = %s ORDER BY run_key", (lease.job_id,))
+        for (blobs,) in runs:
+            for blob in blobs:
+                raw_count += 1
+                if raw_count > MAX_RAW_ARTIFACTS:
+                    raise ValueError("too many raw artifacts")
+                sha = hashlib.sha256(bytes(blob)).hexdigest()
+                if sha not in seen:
+                    seen[sha] = store_and_register(conn, store, project_id, bytes(blob), "application/json")
+                    artifact_ids.append(seen[sha])
     for extra in header.get("extra_artifacts", ()):       # e.g. the merged manifest, which is not a batch output
         sha = hashlib.sha256(extra).hexdigest()
         if sha not in seen:

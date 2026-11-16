@@ -25,6 +25,7 @@ CREATE TABLE parse_staging_pages (
     diagnostics jsonb NOT NULL CHECK (jsonb_typeof(diagnostics) = 'array' AND octet_length(diagnostics::text) <= 65536),
     evidence    jsonb NOT NULL CHECK (jsonb_typeof(evidence) = 'array' AND octet_length(evidence::text) <= 16777216),
     observations jsonb NOT NULL CHECK (jsonb_typeof(observations) = 'array' AND octet_length(observations::text) <= 16777216),
+    run_key     text CHECK (run_key IS NULL OR length(run_key) BETWEEN 1 AND 128),     -- the batch run whose output this page came from
     page_sha256 text NOT NULL CHECK (page_sha256 ~ '^[0-9a-f]{64}$'),
     page_bytes  integer NOT NULL CHECK (page_bytes >= 0),
     PRIMARY KEY (job_id, page_index)
@@ -37,6 +38,7 @@ CREATE TABLE parse_staging_runs (
     run_key  text NOT NULL CHECK (length(run_key) BETWEEN 1 AND 128),
     manifest jsonb NOT NULL CHECK (jsonb_typeof(manifest) = 'object' AND octet_length(manifest::text) <= 1048576),
     capabilities jsonb NOT NULL CHECK (jsonb_typeof(capabilities) = 'object' AND octet_length(capabilities::text) <= 1048576),
+    raw_result_refs jsonb NOT NULL CHECK (jsonb_typeof(raw_result_refs) = 'array'),
     raw         bytea[] NOT NULL,
     PRIMARY KEY (job_id, run_key)
 );

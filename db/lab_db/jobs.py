@@ -129,6 +129,15 @@ def heartbeat(
         )
 
 
+def set_stage(conn: psycopg.Connection, project_id: uuid.UUID, lease: Lease, stage: str) -> None:
+    """Record which stage a running job is in (so a failed job shows where it failed). Fenced by the lease; a lost lease raises ``LeaseLost``."""
+    with conn.transaction():
+        n = conn.execute("UPDATE jobs SET stage = %s, row_version = row_version + 1 WHERE project_id = %s AND id = %s AND status = 'running' AND lease_token = %s",
+                         (stage, project_id, lease.job_id, lease.token)).rowcount
+    if n != 1:
+        raise LeaseLost(f"job {lease.job_id} is not running under token {lease.token}")
+
+
 def finish(
     conn: psycopg.Connection,
     project_id: uuid.UUID,
@@ -136,6 +145,7 @@ def finish(
     status: str,
     reason: str,
     hook: Optional[Callable[[psycopg.Connection], None]] = None,
+    stage: Optional[str] = None,
 ) -> None:
     """running -> succeeded/failed/paused_budget/waiting_review/cancel_requested/queued.
     The DB rejects anything else; leaving 'running' always drops the lease.
@@ -154,13 +164,14 @@ def finish(
             """
             UPDATE jobs
             SET status = %s,
+                stage = COALESCE(%s, stage),
                 lease_owner = NULL,
                 lease_token = NULL,
                 lease_expires_at = NULL,
                 row_version = row_version + 1
             WHERE project_id = %s AND id = %s
             """,
-            (status, project_id, lease.job_id),
+            (status, stage, project_id, lease.job_id),
         )
 
 

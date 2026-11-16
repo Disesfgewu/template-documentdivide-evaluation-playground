@@ -36,7 +36,7 @@ from .isolation import InspectionError, inspect_geometry
 from .normalize import Artifact, NormalizedBatch
 from .unstructured_runner import LOST_TEXT_DIAGNOSTIC, UNSAFE_CODES, run_unstructured_fast
 
-__all__ = ["DEFAULT_LIMITS", "MAX_RETRY_ROUNDS", "PartialParseFailure", "parse_in_batches"]
+__all__ = ["DEFAULT_LIMITS", "MAX_RETRY_ROUNDS", "PartialParseFailure", "StagedParse", "parse_in_batches"]
 
 DEFAULT_LIMITS = BatchLimits(max_pages=2000, batch_size=10, overlap_pages=0, parallel_batches=2)
 MAX_RETRY_ROUNDS = 5
@@ -84,6 +84,18 @@ def _pages_of(run: NormalizedBatch) -> dict[int, _Page]:
     return pages
 
 
+@dataclass(frozen=True)
+class StagedParse:
+    """What ``parse_in_batches`` returns in SINK mode: the pages and runs went to the sinks as they became final, nothing of them is kept here."""
+    pages: int
+    statuses: dict      # page_index -> status of every page, the resumed ones included
+
+
+def _light(state: "_Page") -> "_Page":
+    """A page without its content: all that the coverage and retry logic read is the status and the diagnostics."""
+    return _Page(state.status, state.diagnostics, [], [], None)
+
+
 def parse_in_batches(
     data: bytes,
     *,
@@ -98,7 +110,11 @@ def parse_in_batches(
     job_deadline_seconds: float = JOB_DEADLINE_SECONDS,
     max_failed_fraction: float = MAX_FAILED_FRACTION,
     on_progress: Callable[[int, int], None] | None = None,
-) -> NormalizedBatch:
+    page_sink: Callable[..., None] | None = None,
+    run_sink: Callable[[str, NormalizedBatch], None] | None = None,
+    staged: dict | None = None,
+    staged_any_observation: bool = False,
+) -> "NormalizedBatch | StagedParse":
     """Return one merged ``NormalizedBatch`` for all pages.
 
     Raises ``InspectionError`` for a systemic failure (invalid input or platform, cancel, the job
@@ -111,7 +127,19 @@ def parse_in_batches(
     ``on_progress(pages_done, pages_total)`` (optional, Issue #205) is called after every batch of the FIRST pass finishes, from a batch
     thread, with the pages whose first attempt is over (a failed batch counts: its pages are then retried one by one). It must be quick and
     must not raise; one that does is ignored, progress is never worth a failed parse. Retries do not move it: it stays at the total.
+
+    SINK mode (Issue #205; give BOTH sinks): every page is handed to ``page_sink(page_index, status, diagnostics, evidence, observations, run_key)`` as soon as it is
+    FINAL (an ok / needs_review page right after its batch returns, a page that failed only after its retries settled; a page that stays failed is never
+    sunk and the job fails as before), and every batch run to ``run_sink(run_key, batch)`` (its manifest and raw outputs). Nothing of a sunk page or run is
+    kept in memory, no merged ``NormalizedBatch`` is built, and the function returns a ``StagedParse``. A sink that raises stops the parse with that
+    exception. ``staged`` = {page_index: (status, diagnostics)} of pages already stored by an earlier attempt of the same job (RESUME): a batch whose core
+    pages are ALL staged is not run again; a batch with any page missing is run again as a whole (its pages are then sunk again and the store compares
+    them with what it holds). ``staged_any_observation`` tells the whole-document text-loss check whether those earlier pages had any observation.
     """
+    sink_mode = page_sink is not None or run_sink is not None
+    if sink_mode and (page_sink is None or run_sink is None):
+        raise InspectionError("invalid_input")
+    staged = dict(staged or {})
     if type(retry_rounds) is not int or not 0 <= retry_rounds <= MAX_RETRY_ROUNDS:
         raise InspectionError("invalid_input")
     cancelled = cancelled or (lambda: False)
@@ -121,6 +149,21 @@ def parse_in_batches(
                         page_count=len(geometry.pages), limits=limits)
     outcome: dict[int, _Page] = {}
     lock = threading.Lock()
+    flags = {"observation": staged_any_observation, "lost_text": False, "unsafe": False}
+    source_key: dict[int, str] = {}     # id(batch) -> the run key it was sunk under (alive only while its pages are being settled)
+
+    def settle(page: int, state: "_Page") -> "_Page":
+        """Sink mode: hand a FINAL page to the sink and drop its content. A failed page has nothing to sink and stays pending."""
+        if state.status != "failed":
+            page_sink(page, state.status, list(state.diagnostics), list(state.evidence), list(state.observations), source_key.get(id(state.source)))
+        with lock:
+            if state.observations:
+                flags["observation"] = True
+            if LOST_TEXT_DIAGNOSTIC in state.diagnostics:
+                flags["lost_text"] = True
+            if any(code in state.diagnostics for code in UNSAFE_CODES):
+                flags["unsafe"] = True
+        return _light(state)
 
     codes: dict[str, str] = {}
     total_pages = len(geometry.pages)
@@ -155,6 +198,10 @@ def parse_in_batches(
         except BaseException:
             stop.set()
             raise
+        if run_sink is not None and batch.quarantine_reason is None:
+            run_sink(op, batch)
+            with lock:
+                source_key[id(batch)] = op
         return _pages_of(batch)
 
     def report(page: int, state: _Page, op: str, attempt: int | None) -> BatchPageReport:
@@ -163,7 +210,10 @@ def parse_in_batches(
 
     def first_pass(pages: Sequence[int], op: str) -> dict[int, _Page]:
         try:
-            return run(pages, op)
+            got = run(pages, op)
+            if sink_mode:
+                got = {p: settle(p, st) for p, st in got.items()}
+            return got
         finally:
             advance(len(pages))
 
@@ -176,12 +226,17 @@ def parse_in_batches(
         futures = []
         for spec in plan.batches:
             op = f"{operation_id}-b{spec.batch_index}"
+            if sink_mode and all(p in staged for p in spec.core_page_indices):
+                futures.append((spec, op, None))               # resumed: every page of this batch is already stored
+                advance(len(spec.core_page_indices))
+                continue
             futures.append((spec, op, pool.submit(first_pass, spec.core_page_indices, op)))
         results = []
         error: BaseException | None = None
         for spec, op, future in futures:
             try:
-                got = future.result()
+                got = ({p: _Page(staged[p][0], list(staged[p][1]), [], [], None) for p in spec.core_page_indices}
+                       if future is None else future.result())
             except BaseException as exc:  # noqa: BLE001 - cancel or an unexpected failure: stop everything
                 stop.set()
                 error = error or exc
@@ -215,6 +270,8 @@ def parse_in_batches(
             got = run([target.page_index], f"{retry_op}-p{target.page_index}")
             state = got[target.page_index]
             if state.status != "failed" or outcome[target.page_index].status == "failed":
+                if sink_mode:
+                    state = settle(target.page_index, state)     # a retried page becomes final here
                 outcome[target.page_index] = state  # a retry never replaces content with a worse state
             return report(target.page_index, state, retry_op, round_number)
 
@@ -225,6 +282,11 @@ def parse_in_batches(
     failed = sorted(set(coverage.failed_pages) | set(coverage.missing_pages))
     if failed:
         raise PartialParseFailure(failed)
+    if sink_mode:
+        # the whole-document text-loss check of the merged path, from the running flags
+        if not flags["observation"] and not flags["unsafe"] and flags["lost_text"]:
+            raise InspectionError("text_extraction_empty")
+        return StagedParse(len(geometry.pages), {p: outcome[p].status for p in range(len(geometry.pages))})
     merged = _merge(outcome, operation_id, len(geometry.pages))
     quarantined = any(code in p.diagnostics for p in merged.result.pages for code in UNSAFE_CODES)
     # Observations of hidden-text pages are dropped by the runner, so such a page proves elements existed.

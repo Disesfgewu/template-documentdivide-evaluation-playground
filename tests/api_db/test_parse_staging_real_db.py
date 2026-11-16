@@ -80,7 +80,7 @@ class ParseStagingRealDbTests(FreshDatabase):
         for p in record.pages:
             if p.page_index not in skip:
                 ps.stage_page(c, project, lease, p.page_index, p.status, p.diagnostics, p.evidence, p.observations)
-        ps.stage_run(c, project, lease, "b0", record.manifest, record.capabilities, record.raw_artifacts)
+        ps.stage_run(c, project, lease, "b0", record.manifest, record.capabilities, record.raw_artifacts, record.result["raw_result_refs"])
 
     # --- the write path ---------------------------------------------------------------------------------------------------------------
     def test_pages_are_staged_one_by_one_and_progress_counts_them_without_any_final_row(self):
@@ -158,7 +158,7 @@ class ParseStagingRealDbTests(FreshDatabase):
             self.assertEqual(c.execute("SELECT count(*) FROM parse_staging_runs WHERE job_id = %s", (job,)).fetchone()[0], 0)
 
     def test_no_module_outside_the_parse_worker_reads_the_staging_tables(self):
-        allowed = {"db/lab_db/parse_staging.py", "db/lab_db/migrations/0025_parse_staging.sql", "services/api/lab_api/parse_worker.py", "services/api/lab_api/jobs.py", "db/lab_db/schema/versions/0025_parse_staging.py"}
+        allowed = {"db/lab_db/parse_staging.py", "services/api/lab_api/parse_staged.py", "services/api/lab_api/parse_worker_main.py", "db/lab_db/migrations/0025_parse_staging.sql", "services/api/lab_api/parse_worker.py", "services/api/lab_api/jobs.py", "db/lab_db/schema/versions/0025_parse_staging.py"}
         offenders = []
         for sub in ("db", "services", "scoring", "contracts"):
             for path in (_REPO_ROOT / sub).rglob("*"):
