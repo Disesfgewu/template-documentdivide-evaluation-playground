@@ -97,6 +97,14 @@ def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -
                 "occurred_at": r[11].isoformat() if hasattr(r[11], "isoformat") else str(r[11]),
             })
 
+    progress = None
+    if kind == "document.parse":
+        # pages whose first attempt is over / pages in the document, written by the parse worker after every batch (Issue #205); a hint only
+        row = conn.execute("SELECT pages_done, pages_total, updated_at FROM parse_progress WHERE project_id = %s AND job_id = %s",
+                           (project_id, job_id)).fetchone()
+        if row is not None:
+            progress = {"pages_done": int(row[0]), "pages_total": int(row[1]),
+                        "updated_at": row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2])}
     return {
         "id": str(job_id),
         "project_id": str(snap_project_id),
@@ -109,6 +117,7 @@ def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -
         "retryable": retryable,
         "transitions": transitions[:MAX_TRANSITIONS],  # newest first
         "transitions_truncated": len(transitions) > MAX_TRANSITIONS,
+        "progress": progress,
     }
 
 

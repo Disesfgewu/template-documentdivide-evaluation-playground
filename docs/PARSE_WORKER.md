@@ -46,7 +46,7 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 
 ## 已存結果與讀取 API（migration 0012）
 
-`lab_db.parse_results.persist_parse_result` 是上述契約中的 persist：把原始輸出存為 content-addressed artifact，寫入 `parse_results`（manifest、capabilities、不含各頁的 result、`record_sha256`）與每頁一列 `parse_page_results`（status、diagnostics、evidence、observations），全部 append-only。以 job 為冪等鍵；重放必須與整筆紀錄的雜湊相同，否則 `ParseResultConflict`。整筆紀錄超過 64 MiB 以 `ParseResultTooLarge` 拒絕且不寫入任何東西，資料庫另對各 JSON 欄位設上限（manifest／capabilities 1 MiB，result 與頁面 evidence／observations 16 MiB）。
+`lab_db.parse_results.persist_parse_result` 是上述契約中的 persist：把原始輸出存為 content-addressed artifact，寫入 `parse_results`（manifest、capabilities、不含各頁的 result、`record_sha256`）與每頁一列 `parse_page_results`（status、diagnostics、evidence、observations），全部 append-only。以 job 為冪等鍵；重放必須與整筆紀錄的雜湊相同，否則 `ParseResultConflict`。整筆紀錄超過 256 MiB（Issue #205 之前是 64 MiB：真實的 834 頁手冊是 70.6 MB，解析 7 分鐘後被拒絕；2000 頁上限在同樣密度約 170 MB）以 `ParseResultTooLarge` 拒絕且不寫入任何東西，job 的原因是 `result_too_large`，資料庫另對各 JSON 欄位設上限（manifest／capabilities 1 MiB，result 與頁面 evidence／observations 16 MiB）。
 
 讀取：`GET /api/v1/documents/{document_id}/parse-results/{job_id}`（摘要）與 `.../pages/{page_index}`（單頁）。權限動作為 `read_gold_and_generation_context`（owner、maintainer、reviewer）：organizer 的 parse 輸出是產生 evidence 的來源，SPEC 16.4 讓 participant 的解析與之分開，所以 participant 與 observer 一律 403（不論結果是否存在）；非成員、未知文件、未知結果、不在結果內的頁面為 404。
 
@@ -97,7 +97,7 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 
 ## 已存結果的已知限制（#107 審查的 P3，Refs #7）
 
-- **大小上限在記錄已在記憶體之後才檢查**：`persist_parse_result` 對整筆紀錄（canonical JSON）的 64 MiB 上限，是在 normalizer 已經把整個結果建在記憶體之後才計算與檢查；它阻止的是寫入資料庫與 artifact 儲存，不是記憶體使用。真正的記憶體界線來自 normalizer 的輸入上限（16 MiB raw、200,000 元素、20,000 artifacts）與每批 10 頁。超過上限的結果在 worker 端以 `failed(persist_failed)` 結束（確定性，不重排，有測試）。
+- **大小上限在記錄已在記憶體之後才檢查**：`persist_parse_result` 對整筆紀錄（canonical JSON）的 256 MiB 上限，是在 normalizer 已經把整個結果建在記憶體之後才計算與檢查；它阻止的是寫入資料庫與 artifact 儲存，不是記憶體使用。真正的記憶體界線來自 normalizer 的輸入上限（16 MiB raw、200,000 元素、20,000 artifacts）與每批 10 頁。超過上限的結果在 worker 端以 `failed(result_too_large)` 結束（確定性，不重排，有測試）。任何 persist 失敗都會在 app.log 寫一行 `persist_parse_result` ERROR：例外類別、SQLSTATE、constraint 名稱、頁數與 evidence 數（不含任何文件內容）。
 - **沒有「合成／真實」標記**：資料庫與 API 不知道一份結果是來自合成文件或真實文件，只有 manifest 的 parser 版本與 profile；誠實標示要靠證據（CI run、fixture 名稱）而不是結果欄位。
 - **被隔離（quarantine）的批次不會被記錄**：normalizer 回傳 quarantine 的批次，其頁面在合併時視為失敗並重試；重試預算用完則整個 job 失敗且不存任何結果，所以資料庫裡沒有「失敗批次」的紀錄，只有 job 的轉換原因 `pages_failed:<頁數>`。
 - 摘要的 `effective_profile`／`strategy` 在 manifest 缺欄位時回 `null` 而不是 500（防禦用；寫入路徑一定帶有該欄位）。
@@ -115,3 +115,8 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 - **未涵蓋**：映像只在 x86_64 的 GitHub runner 上建置與測試；沒有多 worker、沒有 `--concurrency` 大於 1 的容器測試、沒有 orchestrator（systemd／Kubernetes）設定；映像沒有掃描漏洞；鎖檔以 pip freeze 產生而不是 `--require-hashes`（只有 spaCy 模型有雜湊）；無法保證 `packages.unstructured.io`／PyPI 之外的其他執行期下載不存在（目前只觀察到這一個）。
 
 CI：手動 `workflow_dispatch` 的 `worker_image` 輸入執行 `worker-image` job：建置映像、以 compose 啟動、檢查非 root／唯讀／capability／健康狀態／映像沒有機密，並用 `deploy/worker_smoke.py` 在**執行中的容器內**以合成單頁 PDF 走完整條路徑（建立專案、上傳、排隊、由容器自己的 worker 以真實 unstructured 解析、讀回結果），最後優雅停止。
+
+
+## 解析進度（Issue #205）
+
+長文件解析要好幾分鐘（834 頁約 7 分鐘）。`parse_in_batches(on_progress=...)` 在第一輪每一批（10 頁）結束時回報 `(已處理頁數, 總頁數)`；失敗的批也算「已嘗試」（它的頁面之後逐頁重試），重試不再推進進度，最後停在總數。worker 用自己的連線把它寫進 `parse_progress`（migration 0024，每個 job 一列，會被覆寫；至少間隔 2 秒才寫一次，最後一筆一定寫；任何寫入失敗都被吞掉，進度不值得讓解析失敗）。`GET /api/v1/jobs/{id}` 對 parse job 多回 `progress {pages_done, pages_total, updated_at}`（還沒有第一批時是 `null`）。進度只是提示，job 狀態才是真相。網頁在解析中畫進度條與「已處理 N / M 頁（x%）」，完成至少 5% 後才顯示粗略的剩餘分鐘數；解析失敗時顯示原因代碼（例如 `result_too_large`）。網頁等待上限從 10 分鐘改為 35 分鐘（worker 自己的 job 期限是 30 分鐘）。

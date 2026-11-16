@@ -24,7 +24,10 @@ from .storage import LocalArtifactStore, store_and_register
 __all__ = ["PageRecord", "ParseResultConflict", "ParseResultRecord", "ParseResultTooLarge", "persist_parse_result"]
 
 MAX_RAW_ARTIFACTS = 20_000
-MAX_RECORD_BYTES = 64 * 1024 * 1024  # canonical JSON of the whole record; larger fails closed
+# Canonical JSON of the whole record; larger fails closed. Was 64 MiB until Issue #205: a real 834-page, 30 MB manual (78,581 evidence units and as
+# many observations, about 94 units per page) is 70.6 MB and was refused AFTER a 7-minute parse. The cap now allows the 2000-page limit at that density
+# (about 170 MB) with room to spare; each JSON column still has its own database cap.
+MAX_RECORD_BYTES = 256 * 1024 * 1024
 
 
 class ParseResultConflict(Exception):
