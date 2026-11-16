@@ -154,3 +154,52 @@ class AppLogReadableTests(unittest.TestCase):
         self.assertIn("ordinal=9", lines[0])
         self.assertIn("'f1=stated'", lines[0])
         self.assertNotIn("q=", lines[1])
+
+
+class ExactScoresFromAHandWrittenVerdictTests(unittest.TestCase):
+    """The scoring path with NO model and NO database: a verdict written by hand, exact numbers asserted (PM on #199)."""
+
+    FACTS = ["PreSET is 19% lower than Baseline", "Flip-N-Write is 10% higher than Baseline"]
+
+    def derive(self, answer, claims, citations, verdict_facts, claim_verdicts):
+        from types import SimpleNamespace as NS
+        from fractions import Fraction
+        from lab_api import judge_run
+        from lab_api.method_judge import JudgeVerdict
+        derive = judge_run.make_judge_hooks(None, None)[1].derive
+        it = {"qkey": "q-9", "ordinal": 9, "facts": self.FACTS, "weights": [Fraction(1, 2), Fraction(1, 2)],
+              "response": NS(answer=NS(text=answer), citations=[NS(claim_id=c, hit_id=h) for c, h in citations]), "claims": claims}
+        verdict = JudgeVerdict(facts=tuple(verdict_facts), claims=tuple(claim_verdicts))
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, LAB_APP_LOG="off"):
+            return {r.metric: r for r in derive(it, verdict, "g1+llm-judge-1")}
+
+    ALL_STATED = [("f1", "stated"), ("f2", "stated")]
+
+    def test_the_pms_swapped_answer_scores_zero_even_though_the_judge_said_stated(self):
+        out = self.derive(NumberCheckTests.SWAPPED, [("c1", "x", ["h1"])], [("c1", "h1")], self.ALL_STATED, [("c1", True, ("h1",))])
+        self.assertEqual((out["correctness"].numerator, out["correctness"].denominator, out["correctness"].raw_value), (0, 1, 0.0))
+        self.assertEqual(out["correctness"].reason_codes, ["judge_overruled_by_number_check"])
+
+    def test_the_right_answer_scores_100_on_every_judged_metric(self):
+        out = self.derive(NumberCheckTests.RIGHT, [("c1", "x", ["h1"])], [("c1", "h1")], self.ALL_STATED, [("c1", True, ("h1",))])
+        for metric in ("correctness", "faithfulness", "citation_precision", "citation_completeness"):
+            self.assertEqual(out[metric].raw_value, 100.0, metric)
+        self.assertEqual(out["correctness"].reason_codes, [])
+
+    def test_one_fact_overruled_and_one_kept_gives_exactly_half(self):
+        answer = "PreSET's latency is 10% higher than Baseline, and Flip-N-Write's latency is 10% higher than Baseline"
+        out = self.derive(answer, [("c1", "x", ["h1"])], [("c1", "h1")], self.ALL_STATED, [("c1", True, ("h1",))])
+        self.assertEqual(out["correctness"].raw_value, 50.0)        # f1 (19%) is absent from the answer, f2 (10%, Flip-N-Write, higher) holds
+        self.assertEqual(out["correctness"].reason_codes, ["judge_overruled_by_number_check"])
+
+    def test_a_correct_answer_with_only_an_invented_quote_is_correct_but_unsupported(self):
+        # no passage reached the judge (the claim cites nothing): the judge may still say the claim is supported, code does not believe it
+        out = self.derive(NumberCheckTests.RIGHT, [("c1", "x", [])], [], self.ALL_STATED, [("c1", True, ())])
+        self.assertEqual(out["correctness"].raw_value, 100.0)
+        for metric in ("faithfulness", "citation_completeness"):
+            self.assertEqual(out[metric].raw_value, 0.0, metric)
+
+    def test_a_contradicted_fact_is_zero_and_marked(self):
+        out = self.derive(NumberCheckTests.RIGHT, [("c1", "x", ["h1"])], [("c1", "h1")], [("f1", "contradicted"), ("f2", "stated")], [("c1", True, ("h1",))])
+        self.assertEqual(out["correctness"].raw_value, 50.0)
+        self.assertEqual(out["correctness"].reason_codes, ["contradicted_fact"])

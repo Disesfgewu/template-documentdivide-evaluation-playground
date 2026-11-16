@@ -291,4 +291,5 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         set_question(None)
         return {"evaluation_id": str(evaluation_id), "failures": counts}
 
+    on_results.derive = derive           # exposed so a test can feed a hand-written verdict and assert the exact scores
     return build_calls, on_results
