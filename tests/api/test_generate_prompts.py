@@ -25,6 +25,20 @@ class SelectPagesTests(unittest.TestCase):
         self.assertEqual(select_pages([2], 0), [])
         self.assertEqual(select_pages([2], 3), [2, 2, 2])
 
+    def test_page_selection_is_spread_over_the_document_not_the_first_pages(self):
+        """The 834-page walk-through: 30 questions were all asked about pages 0-23 (title, contents, preface)."""
+        chosen = select_pages(range(834), 30)
+        self.assertEqual(len(chosen), 30)
+        self.assertEqual(chosen[0], 0)
+        self.assertGreater(chosen[-1], 834 * 0.9)                                          # reaches the end of the document
+        self.assertEqual(chosen, sorted(set(chosen)))                                      # distinct, in order
+        gaps = [b - a for a, b in zip(chosen, chosen[1:])]
+        self.assertLessEqual(max(gaps) - min(gaps), 1)                                     # evenly spaced
+        self.assertEqual(select_pages(range(834), 30), chosen)                             # deterministic
+        self.assertEqual(select_pages(range(10), 10), list(range(10)))                     # as many questions as pages: every page, as before
+        self.assertEqual(select_pages(range(4), 10), [0, 1, 2, 3, 0, 1, 2, 3] + [0, 2])    # whole passes first, then a spread of the rest
+        self.assertEqual(select_pages([7, 3, 3, 9], 2), [3, 7])
+
 
 class BuildCallTests(unittest.TestCase):
     def test_evidence_is_fenced_labelled_and_cut_at_the_cap(self):
@@ -140,6 +154,13 @@ class CrossPageTests(unittest.TestCase):
         from lab_api.generate_prompts import select_page_pairs
         self.assertEqual(select_page_pairs([5, 0, 2], 4), [(0, 2), (2, 5), (0, 5), (0, 2)])
         self.assertEqual(select_page_pairs([4], 3), [])
+        # spread: 6 pairs of an 834-page document are adjacent pages (distance 1) at evenly spaced places, not (0,1), (1,2), (2,3) ...
+        spread = select_page_pairs(range(834), 6)
+        self.assertEqual({b - a for a, b in spread}, {1})
+        self.assertEqual(spread[0], (0, 1))
+        self.assertGreater(spread[-1][0], 834 * 0.7)
+        self.assertEqual(len(set(spread)), 6)
+        self.assertEqual(select_page_pairs(range(834), 6), spread)
         self.assertEqual(select_page_pairs([0, 1], 0), [])
         for a, b in select_page_pairs(range(6), 40):
             self.assertLess(a, b)
