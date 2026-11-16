@@ -170,7 +170,10 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
   // Step 9: Results & Judge
   const [resultsStatus, setResultsStatus] = useState<StepState>("idle");
   const [resultsError, setResultsError] = useState<string | null>(null);
-  const [resultsData, setResultsData] = useState<RunResultsResponse | null>(null);
+  const [resultsRaw, setResultsData] = useState<RunResultsResponse | null>(null);
+  // Issue #198: a table is only ever shown under the run it belongs to. A response for another run (an older request that finished late, or the
+  // previous run's table that was never cleared) is not rendered; the page says it is loading or failed instead.
+  const resultsData = resultsRaw && activeRunId && resultsRaw.run_id === activeRunId ? resultsRaw : null;
   const [judgeStatus, setJudgeStatus] = useState<StepState>("idle");
   const [judgeError, setJudgeError] = useState<string | null>(null);
 
@@ -606,6 +609,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     setMethodError(null);
     setActiveRunId(null);
     setActiveEvalId(null);
+    setResultsData(null);
+    setResultsStatus("idle");
+    setResultsError(null);
     setActiveRunKind(null);
     setMethodJobDetail(null);
     setJudgeStatus("idle");
@@ -649,6 +655,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     setMethodError(null);
     setActiveRunId(null);
     setActiveEvalId(null);
+    setResultsData(null);
+    setResultsStatus("idle");
+    setResultsError(null);
     setActiveRunKind(null);
     setMethodJobDetail(null);
     setJudgeStatus("idle");
@@ -817,6 +826,8 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
   };
 
   // Step 9: Results Fetch
+  // evalIdToFetch is passed explicitly or not at all (= the latest evaluation of THAT run). It never falls back to state: a closure made
+  // before the run changed still holds the previous run's evaluation id (Issue #198).
   const fetchResults = async (runIdToFetch: string, evalIdToFetch?: string) => {
     setResultsStatus("running");
     setResultsError(null);
@@ -827,7 +838,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     try {
       const res = await getRunResults({
         runId: runIdToFetch,
-        evaluationId: evalIdToFetch || activeEvalId || undefined,
+        evaluationId: evalIdToFetch || undefined,
         token: token.trim(),
         fetchFn,
         signal: controller.signal,
@@ -838,6 +849,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         setResultsData(res.data);
       } else {
         setResultsStatus("error");
+        setResultsData(null);              // a failed read never leaves the previous table on the page
         setResultsError(res.error.message);
       }
     } finally {
@@ -1429,8 +1441,8 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 projectId={projectId}
                 logicalId={benchLogicalId}
                 reloadKey={`${genStatus}-${valStatus}-${freezeStatus}-${genProgress?.questions ?? 0}-${activeRunId ?? ""}-${resultsStatus}`}
-                runId={activeRunId}
-                evaluationId={activeEvalId}
+                runId={resultsStatus === "success" && resultsData ? activeRunId : null}
+                evaluationId={resultsData?.evaluation?.id ?? null}
               />
               </>
             )}

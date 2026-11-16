@@ -59,3 +59,16 @@ owner text gets the length + sha256 + 120-char preview. The judge writes one `qu
 final ones after the number check, `overruled=[f1:number_other_entity]`, claims supported/total, claims with no passage, and the derived scores.
 `retrieval_credit_withheld` says a not-found source got no retrieval credit; `judge_overruled_by_number_check` says why a fact the judge called
 stated was scored missing.
+
+paths. Health probes: a successful `/healthz` or `/readyz` writes nothing (they run every few seconds and would push the real
+events out of the five rotated files); only a change of state is logged (`probe_failing`, then `probe_recovered`).
+
+Finding a failed action: every API response carries the logged id in the `X-Lab-Request-Id` header, and the web page
+appends it to an error message ("請求編號 req-…，可到 logs/app.log 搜尋"). Search the file for that id to see the
+CALL/RETURN of that request and every stage line it caused. The id in the JSON error body is the client's own
+`X-Request-Id` (or `req-1`) and is a different thing; canonical correlation with the separate trace increment (#65) is
+still not done.
+
+`scripts/demo.sh logs <stage>` follows the file and shows only that stage (`api`, `upload`, `promote`, `plan`, `parse`,
+`generate`, `validate`, `exclusion`, `freeze`, `export`, `external_submission`, `rule_scoring`, `judge`, `results`,
+`workspace`). Without a stage it shows everything. Helper lines that carry no stage tag are not matched by a stage filter.
