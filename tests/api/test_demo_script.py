@@ -182,3 +182,18 @@ class DemoLogsTests(unittest.TestCase):
         out, code = self.follow("'.*'")
         self.assertEqual(out, "")
         self.assertEqual(code, 2)
+
+
+@unittest.skipUnless(subprocess.run(["bash", "--version"], capture_output=True).returncode == 0, "bash is required")
+class DemoUsageTests(unittest.TestCase):
+    """PM on #197: #195 kept the `logs` case entry but deleted the function. Every command in the case table must be a defined function."""
+
+    def test_every_dispatched_command_is_a_defined_function(self):
+        import re
+        text = SCRIPT.read_text()
+        table = text[text.index('case "$'):] if 'case "$' in text else text
+        commands = re.findall(r"^\s{2}([a-z]+)\)\s*(?:[a-z_]+)", table, re.M)
+        self.assertGreaterEqual(len(commands), 8, commands)
+        for cmd in commands:
+            r = bash(f"type -t {cmd}")
+            self.assertEqual(r.stdout.strip(), "function", f"`scripts/demo.sh {cmd}` dispatches to an undefined function")
