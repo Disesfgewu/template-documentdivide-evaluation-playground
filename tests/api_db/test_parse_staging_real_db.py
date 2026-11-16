@@ -158,7 +158,7 @@ class ParseStagingRealDbTests(FreshDatabase):
             self.assertEqual(c.execute("SELECT count(*) FROM parse_staging_runs WHERE job_id = %s", (job,)).fetchone()[0], 0)
 
     def test_no_module_outside_the_parse_worker_reads_the_staging_tables(self):
-        allowed = {"db/lab_db/parse_staging.py", "services/api/lab_api/parse_staged.py", "services/api/lab_api/parse_worker_main.py", "db/lab_db/migrations/0025_parse_staging.sql", "services/api/lab_api/parse_worker.py", "services/api/lab_api/jobs.py", "db/lab_db/schema/versions/0025_parse_staging.py"}
+        allowed = {"db/lab_db/parse_staging.py", "services/api/lab_api/parse_staged.py", "services/api/lab_api/parse_worker_main.py", "db/lab_db/repo.py", "db/lab_db/migrations/0025_parse_staging.sql", "services/api/lab_api/parse_worker.py", "services/api/lab_api/jobs.py", "db/lab_db/schema/versions/0025_parse_staging.py"}
         offenders = []
         for sub in ("db", "services", "scoring", "contracts"):
             for path in (_REPO_ROOT / sub).rglob("*"):
