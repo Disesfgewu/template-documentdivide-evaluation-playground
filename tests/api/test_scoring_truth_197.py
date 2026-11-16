@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from lab_api.app_log import ContextScope, bound_value, log_op, preview_value, set_question
 from lab_api.evidence_support import NotAttributable, boilerplate_ids, support_units
-from lab_api.method_judge import JUDGE_PROMPT_REVISION, SYSTEM, build_judge_call, number_check
+from lab_api.method_judge import JUDGE_PROMPT_REVISION, SYSTEM, build_judge_call, span_check
 from lab_contracts.benchmark import EvidenceUnit
 from lab_contracts.source import RegionKind, SourceRegion
 from lab_contracts.score import MetricResult
@@ -68,56 +68,79 @@ class SupportUnitsTests(unittest.TestCase):
                 support_units(fact, self.pages[1], self.boiler)
 
 
-class NumberCheckTests(unittest.TestCase):
+class SpanCheckTests(unittest.TestCase):
     FACTS = ["PreSET is 19% lower than Baseline", "Flip-N-Write is 10% higher than Baseline"]
     SWAPPED = "PreSET's access latency is 10% higher than Baseline, while Flip-N-Write's is 19% lower"      # the PM's ordinal-9 answer
     RIGHT = "Flip-N-Write's access latency is 10% higher than Baseline, while PreSET's is 19% lower"
 
-    def test_the_pms_swapped_answer_states_neither_fact(self):
+    def test_the_pms_swapped_answer_states_neither_fact_even_when_the_span_is_the_whole_answer(self):
         for fact in self.FACTS:
-            ok, code = number_check(fact, self.SWAPPED)
-            self.assertFalse(ok, fact)
-            self.assertEqual(code, "number_other_entity")
+            self.assertEqual(span_check(fact, self.SWAPPED), ("missing", "number_other_entity"), fact)
 
-    def test_the_right_answer_and_a_paraphrase_pass(self):
-        for answer in (self.RIGHT, "PreSET reduces latency by 19% relative to Baseline; Flip-N-Write is 10% higher than Baseline"):
-            for fact in self.FACTS:
-                self.assertEqual(number_check(fact, answer), (True, ""), (fact, answer))
+    def test_a_span_that_is_only_the_wrong_clause_is_missing_the_entity(self):
+        self.assertEqual(span_check(self.FACTS[0], "Flip-N-Write's is 19% lower"), ("missing", "entity_absent"))
+        self.assertEqual(span_check(self.FACTS[1], "PreSET's access latency is 10% higher than Baseline"), ("missing", "entity_absent"))
 
-    def test_a_missing_or_different_number_fails(self):
-        self.assertEqual(number_check("Latency is 5 ms", "Latency is 7 ms"), (False, "number_absent"))
-        self.assertEqual(number_check("Latency is 5 ms", "It is fast"), (False, "number_absent"))
+    def test_the_right_answer_and_its_clauses_pass(self):
+        for fact, span in ((self.FACTS[0], "PreSET's is 19% lower"), (self.FACTS[0], self.RIGHT), (self.FACTS[1], self.RIGHT),
+                           (self.FACTS[1], "Flip-N-Write's access latency is 10% higher than Baseline")):
+            self.assertEqual(span_check(fact, span), ("ok", ""), (fact, span))
 
-    def test_the_opposite_direction_fails_even_with_the_right_number_and_entity(self):
-        self.assertEqual(number_check("PreSET is 19% lower than Baseline", "PreSET is 19% higher than Baseline"), (False, "number_opposite_direction"))
+    def test_the_entity_may_come_after_the_number(self):      # the PM's false positives on ordinals 6 and 8: the old check looked only to the left
+        self.assertEqual(span_check("PreSET has 59% SET bits", "DATACON lowers the SET-bit share to 41% compared with 59% in PreSET."), ("ok", ""))
+        self.assertEqual(span_check("More than 60% of the write data bits are SET bits", "In our traces more than 60% of the write data bits are SET bits"), ("ok", ""))
+
+    def test_a_different_number_is_absent_and_the_opposite_direction_is_contradicted(self):
+        self.assertEqual(span_check("Latency is 5 ms", "Latency is 7 ms"), ("missing", "number_absent"))
+        self.assertEqual(span_check("PreSET is 19% lower than Baseline", "PreSET is 19% higher than Baseline"), ("contradicted", "opposite_direction"))
+
+    def test_a_span_must_carry_the_fact_not_just_the_topic(self):      # ordinal 9 fact 3 and ordinal 8 fact 3: said "stated", the answer never says it
+        self.assertEqual(span_check("PreSET reduces access latency by programming PCM cells only in the SET direction", self.SWAPPED),
+                         ("missing", "span_does_not_carry_fact"))
 
     def test_thousands_separators_and_trailing_zeros_are_the_same_number(self):
-        self.assertTrue(number_check("The ratio is 1,000 ohms", "about 1000 ohms")[0])
-        self.assertTrue(number_check("It takes 2.50 ns", "It takes 2.5 ns")[0])
+        self.assertEqual(span_check("The ratio is 1,000 ohms", "about 1000 ohms ratio"), ("ok", ""))
+        self.assertEqual(span_check("It takes 2.50 ns", "It takes 2.5 ns"), ("ok", ""))
 
-    def test_a_fact_without_a_number_is_left_to_the_judge(self):
-        self.assertEqual(number_check("GST has a high endurance", "Ge2Sb2Te5 (GST), because of its high endurance"), (True, ""))
+    def test_a_fact_without_a_number_passes_when_its_words_are_in_the_span(self):
+        self.assertEqual(span_check("GST has a high endurance", "Ge2Sb2Te5 (GST), because of its high endurance"), ("ok", ""))
+
+    def test_the_span_must_really_be_in_the_answer(self):
+        from lab_api.method_judge import span_in_answer
+        answer = "GST,  because of its HIGH endurance\nand fast switching"
+        self.assertTrue(span_in_answer("because of its high endurance and fast switching", answer))      # case and whitespace normalised
+        self.assertFalse(span_in_answer("because of its low endurance", answer))
+        self.assertFalse(span_in_answer("", answer))
+        self.assertFalse(span_in_answer("   ", answer))
 
 
 class JudgePromptTests(unittest.TestCase):
-    def test_v2_is_strict_about_numbers_direction_and_entity_and_has_a_contrastive_example(self):
-        self.assertEqual(JUDGE_PROMPT_REVISION, "judge-v2")
-        for word in ("every number", "direction", "entity", "contradicted", "19% lower", "10% higher"):
+    def test_v3_asks_for_a_copied_span_does_the_facts_first_and_has_two_worked_examples(self):
+        self.assertEqual(JUDGE_PROMPT_REVISION, "judge-v3")
+        for word in ("answer_span", "No span copied from the answer, no credit", "Example A", "Example B", "missing", "contradicted", "word for word"):
             self.assertIn(word, SYSTEM)
+        self.assertLess(SYSTEM.index("TASK 1"), SYSTEM.index("TASK 2"))
+        self.assertIn("compare each REFERENCE FACT with the ANSWER only", SYSTEM)
 
     def test_no_passage_is_stated_explicitly_and_the_facts_are_still_judged(self):
-        # the PM's ordinal 16: a correct answer whose only quote was invented, so no passage is offered
         call = build_judge_call("j0016", ["Ge2Sb2Te5 (GST)", "high resistance ratio"], "GST, because of its high amorphous-to-crystalline resistance ratio",
                                 [("c1", "GST has a high resistance ratio", [])], {})
         self.assertIn("NO PASSAGES WERE OFFERED", call.user)
         self.assertIn("against the answer only", call.user)
         self.assertIn("NO PASSAGES WERE OFFERED", SYSTEM)
-        self.assertIn("judge every fact against the answer alone", SYSTEM)
 
     def test_with_a_passage_the_message_does_not_claim_there_is_none(self):
         call = build_judge_call("j1", ["A"], "A", [("c1", "A", ["p1-c0"])], {"p1-c0": "A is true"})
         self.assertNotIn("NO PASSAGES", call.user)
         self.assertIn('<hit id="p1-c0">', call.user)
+
+    def test_the_reply_may_carry_an_answer_span_but_nothing_else_extra(self):
+        from lab_api.method_judge import parse_judge_reply
+        ok = '{"facts": [{"id": "f1", "verdict": "stated", "answer_span": "x"}, {"id": "f2", "verdict": "missing"}], "claims": []}'
+        self.assertEqual(parse_judge_reply(ok)["facts"][0]["answer_span"], "x")
+        for bad in ('{"facts": [{"id": "f1", "verdict": "stated", "answer_span": 3}], "claims": []}',
+                    '{"facts": [{"id": "f1", "verdict": "stated", "why": "x"}], "claims": []}'):
+            self.assertIsNone(parse_judge_reply(bad))
 
 
 class AppLogReadableTests(unittest.TestCase):
@@ -157,49 +180,110 @@ class AppLogReadableTests(unittest.TestCase):
 
 
 class ExactScoresFromAHandWrittenVerdictTests(unittest.TestCase):
-    """The scoring path with NO model and NO database: a verdict written by hand, exact numbers asserted (PM on #199)."""
+    """The scoring path with NO model and NO database: verdicts written by hand (the model's replies on the PM's acceptance run), exact numbers
+    asserted. The facts and answers are modelled on the PM's description of run caa9548a (the owner's data is not in the repo)."""
 
-    FACTS = ["PreSET is 19% lower than Baseline", "Flip-N-Write is 10% higher than Baseline"]
-
-    def derive(self, answer, claims, citations, verdict_facts, claim_verdicts):
+    def derive(self, facts, answer, verdict_facts, claims=(("c1", "x", ["h1"]),), claim_verdicts=(("c1", True, ("h1",)),), citations=(("c1", "h1"),)):
         from types import SimpleNamespace as NS
         from fractions import Fraction
         from lab_api import judge_run
         from lab_api.method_judge import JudgeVerdict
         derive = judge_run.make_judge_hooks(None, None)[1].derive
-        it = {"qkey": "q-9", "ordinal": 9, "facts": self.FACTS, "weights": [Fraction(1, 2), Fraction(1, 2)],
-              "response": NS(answer=NS(text=answer), citations=[NS(claim_id=c, hit_id=h) for c, h in citations]), "claims": claims}
+        n = len(facts)
+        it = {"qkey": "q-x", "ordinal": 1, "facts": facts, "weights": [Fraction(1, n)] * n,
+              "response": NS(answer=NS(text=answer), citations=[NS(claim_id=c, hit_id=h) for c, h in citations]), "claims": [list(c) for c in claims]}
         verdict = JudgeVerdict(facts=tuple(verdict_facts), claims=tuple(claim_verdicts))
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, LAB_APP_LOG="off"):
-            return {r.metric: r for r in derive(it, verdict, "g1+llm-judge-1")}
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, LAB_APP_LOG="full", LAB_APP_LOG_FILE=d + "/app.log"):
+            out = {r.metric: r for r in derive(it, verdict, "g1+llm-judge-1")}
+            self.log = Path(d + "/app.log").read_text() if (Path(d) / "app.log").exists() else ""
+        return out
 
-    ALL_STATED = [("f1", "stated"), ("f2", "stated")]
+    # the four rows of the PM's table -------------------------------------------------------------------------------------------------
+    Q9_FACTS = ["PreSET is 19% lower than Baseline", "Flip-N-Write is 10% higher than Baseline",
+                "PreSET reduces access latency by programming PCM cells only in the SET direction"]
+    Q9_ANSWER = "PreSET's access latency is 10% higher than Baseline, while Flip-N-Write's is 19% lower"
 
-    def test_the_pms_swapped_answer_scores_zero_even_though_the_judge_said_stated(self):
-        out = self.derive(NumberCheckTests.SWAPPED, [("c1", "x", ["h1"])], [("c1", "h1")], self.ALL_STATED, [("c1", True, ("h1",))])
-        self.assertEqual((out["correctness"].numerator, out["correctness"].denominator, out["correctness"].raw_value), (0, 1, 0.0))
-        self.assertEqual(out["correctness"].reason_codes, ["judge_overruled_by_number_check"])
+    def test_row_9_the_wrong_answer_scores_0_although_the_model_said_every_fact_stated(self):
+        out = self.derive(self.Q9_FACTS, self.Q9_ANSWER, [("f1", "stated", self.Q9_ANSWER), ("f2", "stated", self.Q9_ANSWER), ("f3", "stated", self.Q9_ANSWER)])
+        self.assertEqual(out["correctness"].raw_value, 0.0)
+        self.assertIn("judge_overruled_by_number_check", out["correctness"].reason_codes)
+        self.assertIn("DOWNGRADE number_other_entity", self.log)
+        self.assertIn("DOWNGRADE span_does_not_carry_fact", self.log)       # fact 3: nowhere in the answer, the model's leniency is not believed
 
-    def test_the_right_answer_scores_100_on_every_judged_metric(self):
-        out = self.derive(NumberCheckTests.RIGHT, [("c1", "x", ["h1"])], [("c1", "h1")], self.ALL_STATED, [("c1", True, ("h1",))])
-        for metric in ("correctness", "faithfulness", "citation_precision", "citation_completeness"):
-            self.assertEqual(out[metric].raw_value, 100.0, metric)
+    def test_row_9_a_span_the_model_made_up_gets_no_credit(self):
+        out = self.derive(self.Q9_FACTS, self.Q9_ANSWER, [("f1", "stated", "PreSET is 19% lower than Baseline"), ("f2", "stated", ""), ("f3", "stated", "x")])
+        self.assertEqual(out["correctness"].raw_value, 0.0)
+        self.assertIn("judge_span_not_in_answer", out["correctness"].reason_codes)
+        self.assertEqual(self.log.count("DOWNGRADE judge_span_not_in_answer"), 3)
+
+    Q16_FACTS = ["The material is Ge2Sb2Te5 (GST)", "GST has a high amorphous-to-crystalline resistance ratio, fast switching and high endurance",
+                 "GST is used because it was the first phase change material ever demonstrated"]
+    Q16_ANSWER = "Ge2Sb2Te5 (GST), because of its high amorphous-to-crystalline resistance ratio, fast switching and high endurance"
+
+    def test_row_16_a_right_answer_with_an_invented_quote_is_two_thirds_correct_and_unsupported(self):
+        # the model said "missing" for facts 1 and 2 although they are in the answer: that error is the PROMPT's to fix (judge-v3), not the code's; here the
+        # corrected verdict (what v3 must return) is scored: facts 1 and 2 stated with their spans, fact 3 missing -> 66.7. No passage reached the judge.
+        out = self.derive(self.Q16_FACTS, self.Q16_ANSWER, [("f1", "stated", "Ge2Sb2Te5 (GST)"), ("f2", "stated", self.Q16_ANSWER), ("f3", "missing", "")],
+                          claims=(("c1", "x", []),), claim_verdicts=(("c1", True, ()),), citations=())
+        self.assertAlmostEqual(out["correctness"].raw_value, 200 / 3, places=6)
+        self.assertEqual(out["correctness"].reason_codes, [])
+        self.assertEqual(out["faithfulness"].raw_value, 0.0)
+
+    Q6_FACTS = ["More than 60% of the write data bits are SET bits"]
+
+    def test_row_6_a_careful_correct_answer_with_the_entity_after_the_number_is_not_downgraded(self):
+        answer = "In the traces we studied, more than 60% of the write data bits are SET bits."
+        out = self.derive(self.Q6_FACTS, answer, [("f1", "stated", "more than 60% of the write data bits are SET bits")])
+        self.assertEqual(out["correctness"].raw_value, 100.0)
         self.assertEqual(out["correctness"].reason_codes, [])
 
-    def test_one_fact_overruled_and_one_kept_gives_exactly_half(self):
-        answer = "PreSET's latency is 10% higher than Baseline, and Flip-N-Write's latency is 10% higher than Baseline"
-        out = self.derive(answer, [("c1", "x", ["h1"])], [("c1", "h1")], self.ALL_STATED, [("c1", True, ("h1",))])
-        self.assertEqual(out["correctness"].raw_value, 50.0)        # f1 (19%) is absent from the answer, f2 (10%, Flip-N-Write, higher) holds
+    Q8_FACTS = ["DATACON has 41% SET bits", "PreSET has 59% SET bits",
+                "DATACON has higher performance and lower energy than PreSET because it re-maps writes to the cheaper state"]
+    Q8_ANSWER = "DATACON lowers the SET-bit share to 41% compared with 59% in PreSET."
+
+    def test_row_8_two_of_three_facts_for_the_right_reason(self):
+        out = self.derive(self.Q8_FACTS, self.Q8_ANSWER, [("f1", "stated", self.Q8_ANSWER), ("f2", "stated", self.Q8_ANSWER), ("f3", "stated", self.Q8_ANSWER)])
+        self.assertAlmostEqual(out["correctness"].raw_value, 200 / 3, places=6)
         self.assertEqual(out["correctness"].reason_codes, ["judge_overruled_by_number_check"])
+        self.assertEqual(self.log.count("DOWNGRADE"), 1)
+        self.assertIn("f3: missing (judge said stated)", self.log)
 
-    def test_a_correct_answer_with_only_an_invented_quote_is_correct_but_unsupported(self):
-        # no passage reached the judge (the claim cites nothing): the judge may still say the claim is supported, code does not believe it
-        out = self.derive(NumberCheckTests.RIGHT, [("c1", "x", [])], [], self.ALL_STATED, [("c1", True, ())])
-        self.assertEqual(out["correctness"].raw_value, 100.0)
-        for metric in ("faithfulness", "citation_completeness"):
-            self.assertEqual(out[metric].raw_value, 0.0, metric)
+    # the summary line says why ---------------------------------------------------------------------------------------------------------
+    def test_the_summary_line_shows_per_fact_verdict_span_and_downgrade(self):
+        self.derive(self.Q8_FACTS, self.Q8_ANSWER, [("f1", "stated", self.Q8_ANSWER), ("f2", "stated", self.Q8_ANSWER), ("f3", "stated", self.Q8_ANSWER)])
+        line = [l for l in self.log.splitlines() if "question_summary" in l][0]
+        self.assertIn("f1: stated span='DATACON lowers", line)
+        self.assertIn("f3: missing (judge said stated) span='DATACON lowers", line)
+        self.assertIn("DOWNGRADE span_does_not_carry_fact", line)
+        self.assertIn("correctness=66.666", line)
+        self.assertIn("downgrades=['f3:span_does_not_carry_fact']", line)
 
-    def test_a_contradicted_fact_is_zero_and_marked(self):
-        out = self.derive(NumberCheckTests.RIGHT, [("c1", "x", ["h1"])], [("c1", "h1")], [("f1", "contradicted"), ("f2", "stated")], [("c1", True, ("h1",))])
-        self.assertEqual(out["correctness"].raw_value, 50.0)
-        self.assertEqual(out["correctness"].reason_codes, ["contradicted_fact"])
+    # the careful answers must keep their credit -----------------------------------------------------------------------------------------
+    CAREFUL = [
+        ("PreSET is 19% lower than Baseline", "PreSET's latency is 19% lower than Baseline."),
+        ("Flip-N-Write is 10% higher than Baseline", "Compared with Baseline, Flip-N-Write is 10% higher."),
+        ("Flip-N-Write is 10% higher than Baseline", "Flip-N-Write's write latency is 10% higher than the Baseline scheme."),
+        ("The memory has 8 banks and 4 channels", "The memory has 8 banks and 4 channels in the evaluated system."),
+        ("Write energy drops by 23% with DATACON", "DATACON reduces write energy; the drop is 23% ."),
+        ("The write buffer holds 1,024 entries", "The write buffer holds 1024 entries."),
+        ("GST has a high endurance", "Ge2Sb2Te5 (GST), because of its high endurance"),
+        ("The cell resistance ratio is 100 between RESET and SET states", "The ratio between RESET and SET resistance is 100, so the states are easy to tell apart."),
+    ]
+
+    def test_eight_careful_answers_keep_full_credit(self):
+        for fact, answer in self.CAREFUL:
+            with self.subTest(fact=fact):
+                out = self.derive([fact], answer, [("f1", "stated", answer)])
+                self.assertEqual(out["correctness"].raw_value, 100.0, self.log)
+                self.assertEqual(out["correctness"].reason_codes, [])
+
+    def test_a_contradicted_verdict_needs_a_span_that_is_in_the_answer(self):
+        out = self.derive(["PreSET is 19% lower than Baseline"], "PreSET is 19% higher than Baseline", [("f1", "contradicted", "PreSET is 19% higher than Baseline")])
+        self.assertEqual((out["correctness"].raw_value, out["correctness"].reason_codes), (0.0, ["contradicted_fact"]))
+        out = self.derive(["PreSET is 19% lower than Baseline"], "PreSET is 19% higher than Baseline", [("f1", "contradicted", "something never said")])
+        self.assertEqual(out["correctness"].reason_codes, ["judge_span_not_in_answer"])
+
+    def test_a_stated_fact_whose_span_says_the_opposite_becomes_contradicted(self):
+        answer = "PreSET is 19% higher than Baseline"
+        out = self.derive(["PreSET is 19% lower than Baseline"], answer, [("f1", "stated", answer)])
+        self.assertEqual((out["correctness"].raw_value, out["correctness"].reason_codes), (0.0, ["contradicted_fact", "judge_overruled_by_number_check"]))

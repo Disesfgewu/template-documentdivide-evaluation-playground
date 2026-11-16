@@ -30,7 +30,7 @@ from lab_db.storage import LocalArtifactStore
 from lab_api import baseline_eval as be
 from lab_api.generate_worker import CallSpec
 from lab_api.method_judge import (JUDGE_GRADER_SUFFIX, JUDGE_LIMITATION, JUDGE_PROMPT_REVISION, JUDGE_PROMPT_SHA256, MAX_JUDGED_CLAIMS,
-                                  build_judge_call, check_verdict_ex, number_check, parse_judge_reply_ex)
+                                  build_judge_call, check_verdict_ex, parse_judge_reply_ex, span_check, span_in_answer)
 from lab_scoring import rules
 from .app_log import app_traced, log_op, set_question
 
@@ -182,18 +182,30 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
     @app_traced(stage="judge")
     def derive(it, verdict, grader) -> list:
         qkey = it["qkey"]
-        # The judge's "stated" is only accepted when every number of the gold fact is in the answer, bound to the same entity and direction
-        # (Issue #197): otherwise the fact is "missing" and the row says judge_overruled_by_number_check.
+        # No span, no credit (Issue #197): a "stated" or "contradicted" verdict stands only if the span the judge copied is really in the answer.
+        # A "stated" is then checked against that SPAN (numbers, entities around them, direction); a failed check downgrades it to "missing",
+        # or to "contradicted" when the span says the opposite. Every downgrade is recorded with its code.
+        answer = it["response"].answer.text
         final: list[tuple[str, str]] = []
-        overruled: list[tuple[str, str]] = []
-        for label, v in verdict.facts:
-            if v == "stated":
-                ok, why = number_check(it["facts"][int(label[1:]) - 1], it["response"].answer.text)
-                if not ok:
-                    v = "missing"
-                    overruled.append((label, why))
-                    log_op("judge_overruled_by_number_check", question_key=qkey, ordinal=it["ordinal"], fact=label, reason=why, stage="judge")
+        decisions: list[str] = []
+        downgrades: list[tuple[str, str]] = []
+        for label, v, span in verdict.facts:
+            said, code = v, ""
+            if v in ("stated", "contradicted") and not span_in_answer(span, answer):
+                v, code = "missing", "judge_span_not_in_answer"
+            elif v == "stated":
+                new_v, why = span_check(it["facts"][int(label[1:]) - 1], span)
+                if new_v != "ok":
+                    v, code = new_v, why
+            if code:
+                downgrades.append((label, code))
+                log_op("judge_verdict_downgraded", question_key=qkey, ordinal=it["ordinal"], fact=label, judge_said=said,
+                       now=v, reason=code, stage="judge")
             final.append((label, v))
+            decisions.append(f"{label}: {v}" + (f" (judge said {said})" if said != v else "") + (f" span={span[:120]!r}" if span else " no span")
+                             + (f" DOWNGRADE {code}" if code else ""))
+        overruled = [(l, c) for l, c in downgrades if c != "judge_span_not_in_answer"]
+        span_missing = [(l, c) for l, c in downgrades if c == "judge_span_not_in_answer"]
         score = {label: Fraction(1) if v == "stated" else Fraction(0) for label, v in final}
         facts = [(w, score[f"f{i}"]) for i, w in enumerate(it["weights"], start=1)]
         # A claim with no passage the judge could see (an uploaded answer whose every quote was not found, or that cited nothing) is
@@ -205,8 +217,8 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         citations = [(cit.claim_id, frozenset({cit.hit_id}), cit.hit_id in supported[cit.claim_id][1]) for cit in it["response"].citations]
         fully = sum(1 for ok, hids in supported.values() if ok and hids)
         correctness = rules.correctness(qkey, facts, False, grader)
-        contradicted = sum(1 for _, v in verdict.facts if v == "contradicted")
-        codes = (["contradicted_fact"] if contradicted else []) + (["judge_overruled_by_number_check"] if overruled else [])
+        contradicted = sum(1 for _, v in final if v == "contradicted")
+        codes = (["contradicted_fact"] if contradicted else []) + (["judge_overruled_by_number_check"] if overruled else []) + (["judge_span_not_in_answer"] if span_missing else [])
         if codes:          # the rule scores a contradicted fact as 0 like a missing one; the row says it was contradicted / overruled
             correctness = correctness.model_copy(update={"reason_codes": codes})
         out = [correctness,
@@ -215,8 +227,8 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                rules.citation_completeness(qkey, len(supported), fully, grader)]
         # ONE line per question with everything that decided its scores (Issue #197): the judge's and the final fact verdicts, the claims, the scores
         log_op("question_summary", question_key=qkey, ordinal=it["ordinal"], stage="judge",
-               fact_verdicts=[f"{l}={v}" for l, v in verdict.facts], final_fact_verdicts=[f"{l}={v}" for l, v in final],
-               overruled=[f"{l}:{why}" for l, why in overruled], claims_supported=f"{sum(1 for ok, _ in supported.values() if ok)}/{len(supported)}",
+               fact_decisions=decisions, final_fact_verdicts=[f"{l}={v}" for l, v in final],
+               downgrades=[f"{l}:{why}" for l, why in downgrades], claims_supported=f"{sum(1 for ok, _ in supported.values() if ok)}/{len(supported)}",
                claims_without_passage=sorted(no_passage),
                scores=[f"{m.metric}={m.raw_value if m.raw_value is not None else m.status}" for m in out])
         return out

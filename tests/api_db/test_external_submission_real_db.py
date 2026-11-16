@@ -22,12 +22,16 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
         return GenerateWorker(self.connect, lab_gen_cmd=STUB, cfg=CFG, api_key="k", name="ext-test", interval=1, backoff=1, grace=5,
                               once_timeout=120, store=LocalArtifactStore(self.root), extra_env={"FAKE_LAB_GEN_MODE": mode})
 
-    def frozen(self):
+    def frozen(self, legacy_gold=False):
         project, owner = self.planned()
         self.api("post", owner, self.GEN, project, BODY)
         self.worker("questions").run_once()
         self.api("post", owner, self.VAL, project, BODY)
         self.worker("validate_ok").run_once()
+        if legacy_gold:          # a benchmark generated before #197: no gold_granularity marker, so its gold is page-level (frozen ones cannot be edited)
+            with self.connect() as c:
+                c.execute("UPDATE questions SET payload = payload - 'gold_granularity'")
+                c.commit()
         self.assertEqual(self.api("post", owner, f"{BASE}/freeze", project, {"compliance": "partial"}).status_code, 200)
         return project, owner
 
@@ -219,7 +223,7 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertNotIn("cheese", prompts[0]["user"])
         self.assertIn('cites=""', prompts[0]["user"])                    # the claim has no passage to be supported by
         self.assertIn("NO PASSAGES WERE OFFERED", prompts[0]["user"])    # and the judge is told so: the facts are judged against the answer alone (#197)
-        self.assertIn("judge-v2", json.dumps(results["judge"]))
+        self.assertIn("judge-v3", json.dumps(results["judge"]))
         self.assertAlmostEqual(metrics["correctness"]["mean"], 100.0 / 18, places=6)     # the ANSWER is still judged: 1 of 18 at 100, the 17 abstentions score 0
         with self.connect() as c:
             row = c.execute("SELECT raw_value FROM question_scores s JOIN questions q ON q.id = s.question_id WHERE s.evaluation_id = %s "
@@ -346,10 +350,6 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
             self.assertIn("recall_at_k", {m["metric_name"] for m in res["metrics"]})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     # --- Issue #197: gold evidence is the units that support each fact; a located quote beats an invented one; a changed number is not "stated" ---
 
     def score_of(self, evaluation, key, metric):
@@ -360,24 +360,26 @@ if __name__ == "__main__":
     def test_new_questions_have_fact_level_gold_and_the_results_say_so(self):
         project, owner = self.frozen()
         with self.connect() as c:
-            self.assertEqual(c.execute("SELECT DISTINCT payload->>'gold_granularity' FROM questions").fetchall(), [("fact",)])
+            self.assertEqual(c.execute("SELECT DISTINCT q.payload->>'gold_granularity' FROM questions q JOIN benchmark_revisions b ON b.id = q.benchmark_id "
+                                       "WHERE b.project_id = %s", (project,)).fetchall(), [("fact",)])
         run = self.upload(owner, project, self.file(owner, project)).json()["run_id"]
         results = self.client.get(f"/api/v1/runs/{run}/results", headers=self.headers(owner)).json()
         self.assertEqual(results["retrieval_gold"]["fact_level_questions"], 18)
         self.assertEqual(results["retrieval_gold"]["page_level_questions"], 0)
         self.assertIn("fact-level gold", results["retrieval_gold"]["note"])
 
-    def test_an_invented_quote_earns_no_retrieval_credit_with_fact_level_gold_but_page_credit_with_page_level_gold(self):
+    def test_an_invented_quote_earns_no_retrieval_credit_with_fact_level_gold(self):
         project, owner = self.frozen()
         content = self.file(owner, project, fabricate={0})
         key = sorted(self.gold(owner, project))[0]
         fact = self.upload(owner, project, content).json()
         self.assertEqual(self.score_of(fact["evaluation_id"], key, "recall_at_k")[0], 0.0)       # was 100: the whole-page fallback covered every gold unit
         self.assertEqual(self.score_of(fact["evaluation_id"], key, "complete_at_k")[0], 0.0)
-        with self.connect() as c:         # a benchmark frozen before #197 has no marker: its gold is page-level and says so
-            c.execute("UPDATE questions SET payload = payload - 'gold_granularity'")
-            c.commit()
-        legacy = self.upload(owner, project, content).json()
+
+    def test_a_benchmark_with_page_level_gold_keeps_the_page_credit_and_the_results_say_so(self):
+        project, owner = self.frozen(legacy_gold=True)
+        key = sorted(self.gold(owner, project))[0]
+        legacy = self.upload(owner, project, self.file(owner, project, fabricate={0})).json()
         self.assertEqual(self.score_of(legacy["evaluation_id"], key, "recall_at_k")[0], 100.0)
         results = self.client.get(f"/api/v1/runs/{legacy['run_id']}/results", headers=self.headers(owner)).json()
         self.assertEqual(results["retrieval_gold"]["page_level_questions"], 18)
@@ -405,3 +407,24 @@ if __name__ == "__main__":
         self.assertEqual(value, 0.0)
         self.assertIn("judge_overruled_by_number_check", codes)
         self.assertEqual(results["judge"]["questions_overruled_by_number_check"], 1)
+
+    def test_no_span_no_credit_a_stated_fact_without_a_span_from_the_answer_scores_zero(self):
+        project, owner = self.frozen()
+        gold = self.gold(owner, project)
+        key = sorted(gold)[0]
+        page, text, answer = gold[key]
+        for mode, what in (("judge_no_span", "no span at all"), ("judge_fake_span", "a span that is not in the answer")):
+            with self.subTest(what=what):
+                lines = [json.dumps({"question_id": key, "status": "answered", "answer": answer, "sources": [{"page": page, "text": text}]})]
+                lines += [json.dumps({"question_id": k, "status": "abstained", "reason": "skip"}) for k in sorted(gold)[1:]]
+                run = self.upload(owner, project, "\n".join(lines) + "\n").json()["run_id"]
+                prompts, metrics, results = self.judge_with_capture(owner, project, run, mode=mode)
+                value, codes = self.score_of(results["evaluation"]["id"], key, "correctness")
+                self.assertEqual(value, 0.0)
+                self.assertIn("judge_span_not_in_answer", codes)
+                self.assertEqual(results["judge"]["questions_with_a_span_not_in_the_answer"], 1)
+                self.assertIn("answer_span", prompts[0]["system"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -269,6 +269,25 @@ describe("Workflow: the owner sets HOW MANY questions, never a price", () => {
 
 // Issue #198: a baseline run and then a model-answering run in one session. Each run has its own evaluation; the page must never ask for one
 // run's results with the other run's evaluation id, and never show one run's table under another.
+describe("Workflow: the judge model is its own choice (#197)", () => {
+  it("sends the judge model typed in its own field, not the answering model, and warns that a stronger one costs more", async () => {
+    const { f, calls } = backend();
+    await runUntilFrozen(f);
+    fireEvent.click(screen.getByRole("button", { name: "模型回答方法" }));
+    await waitFor(() => expect(judgeButton().disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText(/評分模型/), { target: { value: "claude-sonnet-5-5" } });
+    expect(screen.getByTestId("judge-model-note").textContent).toContain("更貴");
+    expect(screen.getByTestId("judge-model-note").textContent).toContain("probe_models.sh");
+    fireEvent.click(judgeButton());
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/judge-runs"))).toBe(true));
+    const post = calls.find((c) => c.url.includes("/judge-runs"))!;
+    expect(JSON.parse(post.body!)).toEqual({ model: "claude-sonnet-5-5" });
+    const answering = calls.find((c) => c.url.includes("/method-runs"))!;
+    expect(JSON.parse(answering.body!).model).toBe("claude-haiku-4-5-20251001");
+  }, 25000);
+});
+
+// Issue #198: results belong to their run
 describe("Workflow: results belong to their run (#198)", () => {
   const BASE_RUN = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
   const BASE_EVAL = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
