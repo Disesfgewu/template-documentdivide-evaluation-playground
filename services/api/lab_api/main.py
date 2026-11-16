@@ -32,12 +32,17 @@ from .parse_jobs import router as parse_jobs_router
 from .parse_results import router as parse_results_router
 from .lineage import router as lineage_router
 from .readiness import Check, default_checks, generation_status, run_checks
+from .request_logging import RequestLogSink, RequestLoggingMiddleware
 
 API_VERSION = "0.1.0"
 
 
-def create_app(settings: Settings | None = None, checks: dict[str, Check] | None = None,
-               generation: Callable[[], dict] | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    checks: dict[str, Check] | None = None,
+    generation: Callable[[], dict] | None = None,
+    log_sink: RequestLogSink | None = None,
+) -> FastAPI:
     settings = settings or load_settings()
     if generation is None:      # injected checks (tests) never reach for a database on their own
         generation = (lambda: generation_status(settings)) if checks is None else (lambda: {"state": "unknown"})
@@ -46,6 +51,12 @@ def create_app(settings: Settings | None = None, checks: dict[str, Check] | None
     app = FastAPI(title="document-seperater-playground LAB API", version=API_VERSION)
     app.add_middleware(DownloadAdmissionMiddleware)
     app.state.settings = settings
+    app.add_middleware(
+        RequestLoggingMiddleware,
+        env=settings.env,
+        provider_mode=settings.provider_mode,
+        sink=log_sink,
+    )
 
     app.add_middleware(AppLogMiddleware)
 
