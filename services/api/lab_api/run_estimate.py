@@ -19,6 +19,7 @@ import psycopg
 
 from lab_db.generation import MAX_OUTPUT_TOKENS, worst_case_micros
 from .config import Settings
+from .model_prices import ModelPriceError, price_for
 from .generate_questions import (confusable_target, cross_page_target, general_target, load_clean_pages, make_build_calls)
 from . import validate_questions
 from .method_answer import MAX_HIT_CHARS, SYSTEM as ANSWER_SYSTEM
@@ -39,10 +40,34 @@ def usd(micros: int) -> str:
     return f"{(Decimal(micros) / Decimal(1_000_000)).quantize(Decimal('0.0001'))}"
 
 
-def prices(settings: Settings) -> tuple[int, int]:
-    if settings.gen_price_in_micros_per_mtok is None or settings.gen_price_out_micros_per_mtok is None:
+def prices(settings: Settings, model: Optional[str] = None) -> tuple[int, int]:
+    """The price pair of ``model`` (per-model table, see model_prices) or, without a model, the configured pair."""
+    configured = None
+    if settings.gen_price_in_micros_per_mtok is not None and settings.gen_price_out_micros_per_mtok is not None:
+        configured = (settings.gen_price_in_micros_per_mtok, settings.gen_price_out_micros_per_mtok)
+    if model:
+        try:
+            pin, pout, _ = price_for(model, configured)
+        except ModelPriceError as exc:
+            raise EstimateError(f"{exc}; or give an explicit budget") from None
+        return pin, pout
+    if configured is None:
         raise EstimateError("the model prices are not configured for the API (LAB_GEN_PRICE_IN/OUT_MICROS_PER_MTOK): give an explicit budget")
-    return settings.gen_price_in_micros_per_mtok, settings.gen_price_out_micros_per_mtok
+    return configured
+
+
+def _model_info(settings: Settings, model: Optional[str]) -> dict:
+    """Which model the figures are for and where its price comes from (``builtin_unverified`` means: not checked against the owner's invoice)."""
+    if not model:
+        return {}
+    configured = None
+    if settings.gen_price_in_micros_per_mtok is not None and settings.gen_price_out_micros_per_mtok is not None:
+        configured = (settings.gen_price_in_micros_per_mtok, settings.gen_price_out_micros_per_mtok)
+    try:
+        pin, pout, source = price_for(model, configured)
+    except ModelPriceError:
+        return {}
+    return {"model": model, "price_source": source, "price_in_micros_per_mtok": pin, "price_out_micros_per_mtok": pout}
 
 
 def split_question_count(page_count: int, n: int) -> tuple[int, int, int]:
@@ -71,26 +96,28 @@ def _result(phase: str, calls: int, worst: int, extra: Optional[dict] = None) ->
     return out
 
 
-def _worst_of(calls, settings: Settings, max_output_tokens: int) -> int:
-    pin, pout = prices(settings)
+def _worst_of(calls, settings: Settings, max_output_tokens: int, model: Optional[str] = None) -> int:
+    pin, pout = prices(settings, model)
     return sum(worst_case_micros(len((c.system + c.user).encode("utf-8")), max_output_tokens, pin, pout) for c in calls)
 
 
 def estimate_generate(conn: psycopg.Connection, settings: Settings, project_id: uuid.UUID, benchmark_id: uuid.UUID, page_count: int,
-                      question_count: int, max_output_tokens: int = MAX_OUTPUT_TOKENS) -> tuple[dict, tuple[int, int, int]]:
+                      question_count: int, max_output_tokens: int = MAX_OUTPUT_TOKENS,
+                      model: Optional[str] = None) -> tuple[dict, tuple[int, int, int]]:
     requested = split_question_count(page_count, question_count)
     calls = list(make_build_calls()(conn, project_id, benchmark_id, requested))
     split = {"general": requested[0], "cross_page": requested[1], "confusable": requested[2]}
-    return _result("generate", len(calls), _worst_of(calls, settings, max_output_tokens),
-                   {"question_count": question_count, "split": split, "plan_total": default_question_count(page_count)}), requested
+    return _result("generate", len(calls), _worst_of(calls, settings, max_output_tokens, model),
+                   {"question_count": question_count, "split": split, "plan_total": default_question_count(page_count),
+                    **_model_info(settings, model)}), requested
 
 
 def estimate_validate(conn: psycopg.Connection, settings: Settings, project_id: uuid.UUID, actor_id: uuid.UUID, benchmark_id: uuid.UUID,
-                      max_output_tokens: int = MAX_OUTPUT_TOKENS) -> dict:
+                      max_output_tokens: int = MAX_OUTPUT_TOKENS, model: Optional[str] = None) -> dict:
     with conn.transaction():
         conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor_id),))        # the validation prompts read the gold
         calls = list(validate_questions.make_build_calls()(conn, project_id, benchmark_id))
-    return _result("validate", len(calls), _worst_of(calls, settings, max_output_tokens))
+    return _result("validate", len(calls), _worst_of(calls, settings, max_output_tokens, model), _model_info(settings, model))
 
 
 def _largest_pages_bytes(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.UUID) -> int:
@@ -100,26 +127,26 @@ def _largest_pages_bytes(conn: psycopg.Connection, project_id: uuid.UUID, benchm
     return int(sum(sizes[:TOP_K_HITS]) * BOUND_MARGIN)
 
 
-def _bound_worst(settings: Settings, prompt_bytes: int, max_output_tokens: int) -> int:
-    pin, pout = prices(settings)
+def _bound_worst(settings: Settings, prompt_bytes: int, max_output_tokens: int, model: Optional[str] = None) -> int:
+    pin, pout = prices(settings, model)
     return worst_case_micros(prompt_bytes, max_output_tokens, pin, pout)
 
 
 def estimate_answer(conn: psycopg.Connection, settings: Settings, project_id: uuid.UUID, benchmark_id: uuid.UUID,
-                    max_output_tokens: int = MAX_OUTPUT_TOKENS) -> dict:
+                    max_output_tokens: int = MAX_OUTPUT_TOKENS, model: Optional[str] = None) -> dict:
     n = conn.execute("SELECT count(*) FROM active_questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0]
     per_call = _bound_worst(settings, len(ANSWER_SYSTEM.encode("utf-8")) + ANSWER_FIXED_BYTES + _largest_pages_bytes(conn, project_id, benchmark_id),
-                            max_output_tokens)
-    return _result("answer", int(n), int(n) * per_call, {"bound": True})
+                            max_output_tokens, model)
+    return _result("answer", int(n), int(n) * per_call, {"bound": True, **_model_info(settings, model)})
 
 
 def estimate_judge(conn: psycopg.Connection, settings: Settings, project_id: uuid.UUID, benchmark_id: uuid.UUID, run_id: uuid.UUID,
-                   max_output_tokens: int = MAX_OUTPUT_TOKENS) -> dict:
+                   max_output_tokens: int = MAX_OUTPUT_TOKENS, model: Optional[str] = None) -> dict:
     n = conn.execute("SELECT count(*) FROM submissions WHERE run_id = %s AND status = 'accepted' AND answer_status = 'answered' "
                      "AND failure_reason IS NULL", (run_id,)).fetchone()[0]
     uploaded = conn.execute("SELECT 1 FROM runs r JOIN method_revisions m ON m.id = r.method_revision_id WHERE r.id = %s "
                             "AND m.execution_mode = 'offline_file'", (run_id,)).fetchone() is not None
     # an uploaded file: the judge sees at most 10 submitted passages of 2000 characters (up to 3 bytes each) and a 4000-character answer
     shown = (10 * 2000 + 4000) * 3 if uploaded else _largest_pages_bytes(conn, project_id, benchmark_id)
-    per_call = _bound_worst(settings, len(JUDGE_SYSTEM.encode("utf-8")) + JUDGE_FIXED_BYTES + shown, max_output_tokens)
-    return _result("judge", int(n), int(n) * per_call, {"bound": True})
+    per_call = _bound_worst(settings, len(JUDGE_SYSTEM.encode("utf-8")) + JUDGE_FIXED_BYTES + shown, max_output_tokens, model)
+    return _result("judge", int(n), int(n) * per_call, {"bound": True, **_model_info(settings, model)})

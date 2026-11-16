@@ -72,6 +72,19 @@ class GenModelConfig:
     requests_per_minute: int = 30
 
 
+def _priced_for(cfg: GenModelConfig, model: str) -> GenModelConfig:
+    """The job's model decides its price (model_prices: owner override, built-in unverified table, else the configured pair), so a stronger judge is charged
+    and held at ITS price, not at the configured model's. A model with no price at all keeps the configured pair (as before)."""
+    from dataclasses import replace
+    from .model_prices import ModelPriceError, price_for
+    try:
+        pin, pout, source = price_for(model, (cfg.input_micros_per_mtok, cfg.output_micros_per_mtok))
+    except ModelPriceError:
+        return cfg
+    log_op("model_price", stage="generate", model=model, source=source, input_micros_per_mtok=pin, output_micros_per_mtok=pout)
+    return replace(cfg, input_micros_per_mtok=pin, output_micros_per_mtok=pout)
+
+
 GenBuilder = Callable[[psycopg.Connection, uuid.UUID, uuid.UUID], Sequence[CallSpec]]
 OnResults = Callable[[psycopg.Connection, uuid.UUID, uuid.UUID, list[dict], uuid.UUID], None]
 
@@ -294,6 +307,7 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
     if row is None:
         return _fail(conn, project_id, lease, "generate_job_missing")
     benchmark_id, model, cap_tokens, cap_micros, currency, pricing_rev, bench_status, attempt, phase = row
+    cfg = _priced_for(cfg, model)
     expected = {"generate": "generating", "validate": "validating", "answer": "frozen", "judge": "frozen"}[phase]
     if bench_status != expected:
         return _fail(conn, project_id, lease, {"generate": "benchmark_not_generating", "validate": "benchmark_not_validating",

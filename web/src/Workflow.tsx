@@ -201,7 +201,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     enabled: boolean,
     phase: "generate" | "validate" | "answer" | "judge",
     set: (e: Est) => void,
-    extra: { questionCount?: number; runId?: string | null; onFirst?: (e: RunEstimate) => void } = {},
+    extra: { questionCount?: number; runId?: string | null; model?: string; onFirst?: (e: RunEstimate) => void } = {},
     deps: unknown[] = [],
   ) => {
     useEffect(() => {
@@ -212,7 +212,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
       const controller = new AbortController();
       void getRunEstimate({
         projectId: projectId.trim(), logicalId: benchLogicalId, phase, questionCount: extra.questionCount,
-        runId: extra.runId ?? undefined, token: token.trim(), fetchFn, signal: controller.signal,
+        runId: extra.runId ?? undefined, model: extra.model, token: token.trim(), fetchFn, signal: controller.signal,
       }).then((res) => {
         if (controller.signal.aborted) return;
         if (res.ok) {
@@ -230,9 +230,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     { questionCount: genCount === "" ? undefined : countValid ? countNumber : undefined,
       onFirst: (e) => { if (genCount === "" && e.plan_total) setGenCount(String(e.plan_total)); } }, [genCount, genStatus]);
   useEstimateEffect(genStatus === "success" && valStatus !== "running" && freezeStatus !== "success", "validate", setValEst, {}, [genStatus, valStatus]);
-  useEstimateEffect(freezeStatus === "success" && methodStatus !== "running", "answer", setMethodEst, {}, [freezeStatus, methodStatus]);
+  useEstimateEffect(freezeStatus === "success" && methodStatus !== "running", "answer", setMethodEst, { model: methodModel }, [freezeStatus, methodStatus, methodModel]);
   useEstimateEffect(activeRunKind === "model" && Boolean(activeRunId) && judgeStatus !== "running", "judge", setJudgeEst,
-    { runId: activeRunId }, [activeRunKind, activeRunId, judgeStatus]);
+    { runId: activeRunId, model: judgeModel }, [activeRunKind, activeRunId, judgeStatus, judgeModel]);
 
   // ---------------------------------------------------------------------------
   // Handlers
@@ -1648,8 +1648,8 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 style={{ width: "220px", fontSize: "0.85rem" }}
               />
               <p className="muted small" data-testid="judge-model-note" style={{ margin: "0.25rem 0 0 0" }}>
-                換更強的評分模型通常更準，但更貴。費用估計用的是設定檔裡的模型價格（LAB_GEN_PRICE_IN/OUT_MICROS_PER_MTOK），
-                換模型時請同步更新，否則估計會偏低。你的 key 能用哪些模型可以用 scripts/probe_models.sh 檢查。
+                換更強的評分模型通常更準，但更貴。費用估計和預算上限會依所選模型的牌價計算（內建牌價未經查證；
+                可用 LAB_GEN_MODEL_PRICES 覆寫），下面的金額就是那個模型的。你的 key 能用哪些模型可以用 scripts/probe_models.sh 檢查。
               </p>
             </div>
             <EstimateLine est={judgeEst} label="評分這一步" testId="judge-estimate" />
@@ -1822,6 +1822,12 @@ function EstimateLine({ est, label, testId }: { est: { value: RunEstimate | null
     <p data-testid={testId} className="small" style={{ margin: "0.25rem 0" }}>
       {label}最多約 <strong>{v.estimated_max_usd} 美元</strong>（{v.calls} 次呼叫，依最壞情況估算，實際通常低很多）
       {v.bound ? "；這一步的提示長度用上限估算" : ""}
+      {v.model && v.price_source ? (
+        <span data-testid={`${testId}-price`}>
+          {`；依 ${v.model} 的牌價（輸入 ${(Number(v.price_in_micros_per_mtok) / 1e6).toFixed(2)}／輸出 ${(Number(v.price_out_micros_per_mtok) / 1e6).toFixed(2)} 美元每百萬 token`}
+          {v.price_source === "builtin_unverified" ? "，內建牌價未經查證，請對照你的帳單" : v.price_source === "owner_override" ? "，用你設定的價格" : "，用設定檔裡的價格"}）
+        </span>
+      ) : null}
     </p>
   );
 }

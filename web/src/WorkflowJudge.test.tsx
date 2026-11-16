@@ -40,7 +40,10 @@ function backend(opts: Opts = {}) {
     if (u.includes("/estimate?")) {
       const q = new URL(u, "http://x").searchParams;
       const n = q.get("question_count") ? Number(q.get("question_count")) : 6;
-      return json({ phase: q.get("phase"), calls: n, estimated_max_micros: 50_000, estimated_max_usd: "0.0500", currency: "USD", ceiling_usd: "5.0000",
+      const model = q.get("model");
+      const priced = model ? { model, price_source: model.includes("sonnet") ? "builtin_unverified" : "configured",
+        price_in_micros_per_mtok: model.includes("sonnet") ? 2_000_000 : 1_000_000, price_out_micros_per_mtok: model.includes("sonnet") ? 10_000_000 : 5_000_000 } : {};
+      return json({ ...priced, phase: q.get("phase"), calls: n, estimated_max_micros: 50_000, estimated_max_usd: "0.0500", currency: "USD", ceiling_usd: "5.0000",
         question_count: n, plan_total: 6, split: { general: n - 2 > 0 ? n - 2 : n, cross_page: n - 2 > 0 ? 1 : 0, confusable: n - 2 > 0 ? 1 : 0 } });
     }
     if (u.includes("/generate") && method === "GET") {
@@ -277,6 +280,10 @@ describe("Workflow: the judge model is its own choice (#197)", () => {
     await waitFor(() => expect(judgeButton().disabled).toBe(false));
     fireEvent.change(screen.getByLabelText(/評分模型/), { target: { value: "claude-sonnet-5-5" } });
     expect(screen.getByTestId("judge-model-note").textContent).toContain("更貴");
+    // the estimate follows the chosen model: it is asked for with that model and says where the price comes from
+    await waitFor(() => expect(calls.some((c) => c.url.includes("phase=judge") && c.url.includes("model=claude-sonnet-5-5"))).toBe(true));
+    await waitFor(() => expect(screen.getByTestId("judge-estimate-price").textContent).toContain("claude-sonnet-5-5 的牌價（輸入 2.00／輸出 10.00"));
+    expect(screen.getByTestId("judge-estimate-price").textContent).toContain("未經查證");
     expect(screen.getByTestId("judge-model-note").textContent).toContain("probe_models.sh");
     fireEvent.click(judgeButton());
     await waitFor(() => expect(calls.some((c) => c.url.includes("/judge-runs"))).toBe(true));
