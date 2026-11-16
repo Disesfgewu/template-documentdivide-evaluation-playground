@@ -182,18 +182,39 @@ class ParseResultsRealDbTests(FreshDatabase):
 
     def test_an_oversized_record_is_refused_before_anything_is_written(self):
         import dataclasses
-        from lab_db.parse_results import ParseResultTooLarge
+        from lab_db import parse_results as pr
         s = self.seed()
         record = record_from_batch(make_batch(s.doc, s.op))
-        huge = [{"page_index": 0, "raw_content": "x" * (65 * 1024 * 1024)}]
+        huge = [{"page_index": 0, "raw_content": "x" * (3 * 1024 * 1024)}]
         record = dataclasses.replace(record, pages=(dataclasses.replace(record.pages[0], observations=huge),) + record.pages[1:])
-        with self.connect() as c:
+        with self.connect() as c, patch.object(pr, "MAX_RECORD_BYTES", 2 * 1024 * 1024):      # the mechanism, with a small cap so the test stays light
             before = c.execute("SELECT count(*) FROM artifacts").fetchone()[0]
             lease = jobs.acquire(c, s.project, s.job, "w1")
-            with self.assertRaises(ParseResultTooLarge):
+            with self.assertRaises(pr.ParseResultTooLarge):
                 persist_parse_result(c, self.store, s.project, lease, record)
             self.assertEqual(c.execute("SELECT count(*) FROM artifacts").fetchone()[0], before)
             self.assertEqual(c.execute("SELECT count(*) FROM parse_results WHERE job_id = %s", (s.job,)).fetchone()[0], 0)
+
+    def test_the_size_cap_admits_the_real_834_page_document_that_a_64_mib_cap_refused(self):
+        """Issue #205: that parse (30 MB PDF, 78,581 evidence units + as many observations) is 70,556,088 bytes of canonical JSON, and the page limit
+        is 2000. The cap must hold at least the 834-page figure with margin and the 2000-page figure at the same density."""
+        from lab_db.parse_results import MAX_RECORD_BYTES
+        real_834_pages = 70_556_088
+        self.assertGreater(real_834_pages, 64 * 1024 * 1024)                                # the old cap refused it
+        self.assertGreater(MAX_RECORD_BYTES, real_834_pages * 2000 / 834)                   # 2000 pages at that density (about 169 MB) fit
+        self.assertLessEqual(MAX_RECORD_BYTES, 512 * 1024 * 1024)                           # still a closed limit, not "unbounded"
+
+    def test_a_record_just_under_the_cap_is_stored(self):
+        import dataclasses
+        from lab_db import parse_results as pr
+        s = self.seed()
+        record = record_from_batch(make_batch(s.doc, s.op))
+        filler = [{"page_index": 0, "raw_content": "y" * (1024 * 1024)}]
+        record = dataclasses.replace(record, pages=(dataclasses.replace(record.pages[0], observations=filler),) + record.pages[1:])
+        with self.connect() as c, patch.object(pr, "MAX_RECORD_BYTES", 2 * 1024 * 1024):
+            lease = jobs.acquire(c, s.project, s.job, "w1")
+            persist_parse_result(c, self.store, s.project, lease, record)
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_results WHERE job_id = %s", (s.job,)).fetchone()[0], 1)
 
     def test_the_database_also_caps_each_json_column(self):
         s = self.seed()

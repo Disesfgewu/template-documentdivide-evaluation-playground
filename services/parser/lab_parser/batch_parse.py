@@ -97,6 +97,7 @@ def parse_in_batches(
     python: str | None = None,
     job_deadline_seconds: float = JOB_DEADLINE_SECONDS,
     max_failed_fraction: float = MAX_FAILED_FRACTION,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> NormalizedBatch:
     """Return one merged ``NormalizedBatch`` for all pages.
 
@@ -106,6 +107,10 @@ def parse_in_batches(
     Bounded cost: ``job_deadline_seconds`` ends the job (``timeout``, transient) before any further
     child starts, and when more than ``max_failed_fraction`` of the pages failed the first pass the
     cause is systemic, so no page-by-page retry is attempted.
+
+    ``on_progress(pages_done, pages_total)`` (optional, Issue #205) is called after every batch of the FIRST pass finishes, from a batch
+    thread, with the pages whose first attempt is over (a failed batch counts: its pages are then retried one by one). It must be quick and
+    must not raise; one that does is ignored, progress is never worth a failed parse. Retries do not move it: it stays at the total.
     """
     if type(retry_rounds) is not int or not 0 <= retry_rounds <= MAX_RETRY_ROUNDS:
         raise InspectionError("invalid_input")
@@ -118,6 +123,20 @@ def parse_in_batches(
     lock = threading.Lock()
 
     codes: dict[str, str] = {}
+    total_pages = len(geometry.pages)
+    progress = {"done": 0}
+
+    def advance(n: int) -> None:
+        if on_progress is None:
+            return
+        with lock:
+            progress["done"] = min(total_pages, progress["done"] + n)
+            done = progress["done"]
+        try:
+            on_progress(done, total_pages)
+        except Exception:  # noqa: BLE001 - never fail a parse over its progress report
+            pass
+
     stop = threading.Event()   # set by the first unexpected failure: queued batches then never start a child
 
     def run(pages: Sequence[int], op: str) -> dict[int, _Page]:
@@ -142,11 +161,22 @@ def parse_in_batches(
         return BatchPageReport(page_index=page, status=state.status, diagnostics=tuple(state.diagnostics),
                                role="core", operation_id=op, attempt=attempt)
 
+    def first_pass(pages: Sequence[int], op: str) -> dict[int, _Page]:
+        try:
+            return run(pages, op)
+        finally:
+            advance(len(pages))
+
+    if on_progress is not None:
+        try:
+            on_progress(0, total_pages)
+        except Exception:  # noqa: BLE001
+            pass
     with ThreadPoolExecutor(limits.parallel_batches, thread_name_prefix="batch") as pool:
         futures = []
         for spec in plan.batches:
             op = f"{operation_id}-b{spec.batch_index}"
-            futures.append((spec, op, pool.submit(run, spec.core_page_indices, op)))
+            futures.append((spec, op, pool.submit(first_pass, spec.core_page_indices, op)))
         results = []
         error: BaseException | None = None
         for spec, op, future in futures:

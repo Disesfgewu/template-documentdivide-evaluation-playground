@@ -313,6 +313,33 @@ class BatchParseTests(unittest.TestCase):
         self.assertEqual(calls, [(0,)])
         self.assertEqual(len(merged.result.pages), 1)
 
+    def test_progress_is_reported_after_every_first_pass_batch_and_ends_at_the_total(self):
+        seen = []
+        merged = self.parse(Recorder(), on_progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen[0], (0, PAGES))                              # announced before any batch ends
+        self.assertEqual(len(seen), 4)                                     # that, then one report per batch (3 batches)
+        self.assertEqual({total for _, total in seen}, {PAGES})
+        self.assertEqual(sorted(done for done, _ in seen)[0], 0)
+        self.assertEqual(max(done for done, _ in seen), PAGES)             # 10 + 10 + 1 pages
+        self.assertEqual(len(merged.result.pages), PAGES)
+
+    def test_a_failed_batch_still_counts_as_attempted_and_retries_do_not_move_progress(self):
+        seen = []
+
+        def behaviour(pages, nth):
+            if pages == tuple(range(0, 10)) and nth == 1:
+                raise InspectionError("page_failed")                       # only the first attempt of the first batch fails
+
+        self.parse(Recorder(behaviour=behaviour), on_progress=lambda done, total: seen.append(done))
+        self.assertEqual(max(seen), PAGES)                                 # all three batches ended, the failed one included
+        self.assertEqual(seen.count(PAGES), 1)                             # the page-by-page retries add nothing
+
+    def test_a_progress_callback_that_raises_never_fails_the_parse(self):
+        def boom(done, total):
+            raise RuntimeError("progress is not worth a failed parse")
+        merged = self.parse(Recorder(), on_progress=boom)
+        self.assertEqual(len(merged.result.pages), PAGES)
+
     def test_invalid_retry_budget_is_rejected(self):
         for bad in (-1, 6, True, 1.5):
             with self.subTest(bad), self.assertRaises(InspectionError):

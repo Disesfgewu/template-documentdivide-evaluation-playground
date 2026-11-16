@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import hashlib
 import logging
 import threading
+import time
 import uuid
 from typing import Callable
 
@@ -38,7 +39,7 @@ from lab_db.storage import LocalArtifactStore
 from lab_parser.isolation import InspectionError
 from lab_parser.normalize import NormalizedBatch
 from lab_parser.batch_parse import PartialParseFailure, parse_in_batches
-from .app_log import app_traced, log_op, log_alarm, ContextScope, log_page_statuses
+from .app_log import app_traced, log_op, log_alarm, log_error, ContextScope, log_page_statuses
 
 LOG = logging.getLogger("lab.parse_worker")
 
@@ -202,6 +203,53 @@ def process_parse_job(
             raise
 
 
+class _ProgressWriter:
+    """Writes "pages done / pages total" for a running parse job on its OWN connection (Issue #205). Called from batch threads: serialised, at most
+    one write per ``MIN_INTERVAL`` seconds (the last value is always written), and every failure is swallowed: progress never fails a parse."""
+    MIN_INTERVAL = 2.0
+
+    def __init__(self, connect, project_id, job_id, clock=time.monotonic):
+        self._connect, self._project_id, self._job_id, self._clock = connect, project_id, job_id, clock
+        self._lock = threading.Lock()
+        self._conn = None
+        self._last_write = float("-inf")
+
+    def __call__(self, done: int, total: int) -> None:
+        with self._lock:
+            now = self._clock()
+            if done < total and now - self._last_write < self.MIN_INTERVAL:
+                return
+            try:
+                if self._conn is None:
+                    self._conn = self._connect()
+                self._conn.execute(
+                    "INSERT INTO parse_progress (job_id, project_id, pages_done, pages_total) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (job_id) DO UPDATE SET pages_done = EXCLUDED.pages_done, pages_total = EXCLUDED.pages_total, updated_at = now()",
+                    (self._job_id, self._project_id, done, total))
+                self._conn.commit()
+                self._last_write = now
+            except Exception:  # noqa: BLE001
+                self._conn = None
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._conn = None
+
+
+def _accepts_progress(run) -> bool:
+    import inspect
+    try:
+        params = inspect.signature(run).parameters
+    except (TypeError, ValueError):
+        return False
+    return "on_progress" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, ttl_seconds, python, run,
              shutdown=None):
     job_id = lease.job_id
@@ -236,10 +284,12 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
     if hashlib.sha256(data).hexdigest() != doc_sha:
         return _fail(conn, project_id, lease, "artifact_unreadable")
 
+    progress = _ProgressWriter(connect, project_id, job_id)
+    extra = {"on_progress": progress} if _accepts_progress(run) else {}
     with _Heartbeat(connect, project_id, lease, ttl_seconds) as beat:
         try:
             batch = run(data, python=python, cancelled=beat.lost.is_set, document_id=str(doc_id),
-                        budget_ref=budget_ref or "unbudgeted", operation_id=str(operation_id))
+                        budget_ref=budget_ref or "unbudgeted", operation_id=str(operation_id), **extra)
             error = None
         except InspectionError as exc:
             batch, error = None, exc.code
@@ -247,6 +297,8 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
             # Some pages stayed failed after the retry budget: never published as a success. The count
             # goes into the job's transition reason (never page content).
             batch, error = None, f"{exc.code}:{len(exc.failed_pages)}"
+        finally:
+            progress.close()
     if beat.lost.is_set() or error == "cancelled":
         if shutdown is not None and shutdown() and not beat.lost.is_set():
             # The worker is shutting down and its parser children are already cancelled and reaped (the run
@@ -280,5 +332,17 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
     except Exception as exc:
         if is_infrastructure(exc):
             raise
-        return _fail(conn, project_id, lease, "persist_failed")
+        # WHY it failed, without any document content: the exception class, and for a database error its SQLSTATE and constraint name. Until now
+        # the job only said "persist_failed" and the cause was lost (an 834-page parse that ran 7 minutes and then failed).
+        try:
+            diag = getattr(exc, "diag", None)
+            log_error("persist_parse_result", type(exc).__name__, "persist_failed", stage="parse", job_id=str(job_id),
+                      sqlstate=getattr(exc, "sqlstate", None), constraint=getattr(diag, "constraint_name", None),
+                      table=getattr(diag, "table_name", None), pages=len(getattr(getattr(batch, "result", None), "pages", ()) or ()),
+                      evidence_units=len(getattr(batch, "evidence", ()) or ()))
+        except Exception:  # noqa: BLE001 - the log line must never change the outcome
+            pass
+        from lab_db.parse_results import ParseResultTooLarge
+        # a too-large result is its own, readable reason (the page shows the code), not the generic persist failure
+        return _fail(conn, project_id, lease, "result_too_large" if isinstance(exc, ParseResultTooLarge) else "persist_failed")
     return ParseOutcome(job_id, "succeeded", "parsed")

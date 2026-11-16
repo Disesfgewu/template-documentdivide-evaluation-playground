@@ -4,6 +4,7 @@ import { QuestionReview } from "./QuestionReview";
 import { BenchmarkDownload } from "./BenchmarkDownload";
 import { DeveloperPackage, DeveloperUploads } from "./ExternalMethods";
 import { resumeSteps, STATUS_LABEL_ZH } from "./resume";
+import { failureReason, progressView } from "./parseProgress";
 import {
   cancelJob,
   createBenchmark,
@@ -128,6 +129,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
   const [parseError, setParseError] = useState<string | null>(null);
   const [parseJobId, setParseJobId] = useState<string | null>(null);
   const [parseJobDetail, setParseJobDetail] = useState<JobStatusResponse | null>(null);
+  const [parseStartedAt, setParseStartedAt] = useState<number>(() => Date.now());
 
   // Step 4: Benchmark + Plan
   const [benchLogicalIdInput, setBenchLogicalIdInput] = useState("");
@@ -278,6 +280,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
     setParseStatus("running");
     setParseError(null);
     setParseJobDetail(null);
+    setParseStartedAt(Date.now());
 
     const controller = new AbortController();
     activeAbortControllerRef.current = controller;
@@ -299,8 +302,8 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
       const jobId = parseRes.data.job_id;
       setParseJobId(jobId);
 
-      // Poll GET /api/v1/jobs/{job_id} every 3s up to 10 minutes
-      const deadline = Date.now() + 600_000;
+      // Poll GET /api/v1/jobs/{job_id} every 3s up to 35 minutes (the worker's own job deadline is 30: an 834-page document took about 7)
+      const deadline = Date.now() + 2_100_000;
       while (Date.now() < deadline) {
         if (controller.signal.aborted) break;
 
@@ -339,7 +342,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
 
       if (Date.now() >= deadline) {
         setParseStatus("error");
-        setParseError("解析任務逾時（已超過 10 分鐘）");
+        setParseError("解析任務逾時（已超過 35 分鐘）");
       }
     } finally {
       if (activeAbortControllerRef.current === controller) {
@@ -1181,6 +1184,17 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
               解析任務執行中（每 3 秒輪詢）… {parseJobDetail ? `當前狀態：${parseJobDetail.status}` : ""}
             </p>
           )}
+          {parseStatus === "running" && (() => {
+            const view = progressView(parseJobDetail?.progress, Date.now() - parseStartedAt);
+            return view ? (
+              <div data-testid="parse-progress" style={{ margin: "0.25rem 0 0.5rem 0" }}>
+                <progress value={view.percent} max={100} aria-label="解析進度" style={{ width: "100%", maxWidth: "420px" }} />
+                <div className="small" data-testid="parse-progress-text">{view.text}{view.eta ? `；${view.eta}` : ""}</div>
+              </div>
+            ) : (
+              <p className="muted small" data-testid="parse-progress-none">還沒有進度數字（第一批頁面處理完才會出現；頁數多的文件要等一下）。</p>
+            );
+          })()}
           {parseError && (
             <div role="alert" style={errorBoxStyle}>
               <strong>解析失敗：</strong> {parseError}
@@ -1197,6 +1211,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 <li>狀態: <strong data-testid="step3-status">{parseJobDetail.status || "—"}</strong></li>
                 <li>階段 (Stage): {parseJobDetail.stage || "—"}</li>
                 <li>重試次數: {parseJobDetail.attempt ?? "—"}</li>
+                {parseJobDetail.status === "failed" && failureReason(parseJobDetail.transitions) && (
+                  <li data-testid="step3-failure-reason">失敗原因代碼: <strong>{failureReason(parseJobDetail.transitions)}</strong>（可到 logs/app.log 搜尋這個 Job ID）</li>
+                )}
               </ul>
             </div>
           )}

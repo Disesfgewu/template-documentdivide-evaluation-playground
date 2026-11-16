@@ -78,6 +78,7 @@ class ParseWorkerRealDbTests(FreshDatabase):
         """A project, a real uploaded document and a queued parse job; returns (project, job)."""
         with self.connect() as c:
             project, owner = self.make_project(c)
+        self.last_owner = owner
         res = self.client.post(f"/api/v1/documents?project_id={project}&logical_id=f{uuid.uuid4().hex[:6]}",
                                headers=self.headers(owner, **{"Content-Type": "application/pdf"}),
                                content=synthetic_pdf.build(pages))
@@ -397,6 +398,78 @@ class ParseWorkerRealDbTests(FreshDatabase):
         self.assertEqual(self.job_state(job)[:2], ("queued", 1))
         self.assertEqual(len(calls), 3)   # 21 pages: three batches, no page-by-page retry
 
+    # --- Issue #205: progress while a long parse runs, and the cause of a failed persist ---------------------------------------------------
+
+    def test_progress_is_written_while_the_job_runs_and_the_job_status_reports_it(self):
+        from lab_api import parse_worker
+        project, job = self.queue()
+        seen = []
+
+        def run(data, **kw):
+            progress = kw["on_progress"]
+            seen.append(self.client.get(f"/api/v1/jobs/{job}?project_id={project}", headers=self.headers(self.last_owner)).json()["progress"])   # before any batch
+            progress(0, 834)
+            progress(120, 834)
+            seen.append(self.client.get(f"/api/v1/jobs/{job}?project_id={project}", headers=self.headers(self.last_owner)).json())
+            progress(834, 834)
+            return GOOD
+
+        with patch.object(parse_worker._ProgressWriter, "MIN_INTERVAL", 0.0):
+            outcome = self.process(project, job, run)
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertIsNone(seen[0])                                           # no row before the first report: the page says "no number yet"
+        mid = seen[1]
+        self.assertEqual((mid["status"], mid["progress"]["pages_done"], mid["progress"]["pages_total"]), ("running", 120, 834))
+        self.assertIn("updated_at", mid["progress"])
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT pages_done, pages_total FROM parse_progress WHERE job_id = %s", (job,)).fetchone(), (834, 834))
+        done = self.client.get(f"/api/v1/jobs/{job}?project_id={project}", headers=self.headers(self.last_owner)).json()
+        self.assertEqual((done["status"], done["progress"]["pages_done"]), ("succeeded", 834))
+
+    def test_a_job_that_never_reported_progress_has_null_progress_and_a_generate_job_has_none(self):
+        project, job = self.queue()
+        self.process(project, job, self.ok_run())
+        body = self.client.get(f"/api/v1/jobs/{job}?project_id={project}", headers=self.headers(self.last_owner)).json()
+        self.assertIsNone(body["progress"])
+
+    def test_a_progress_write_that_fails_never_fails_the_parse(self):
+        project, job = self.queue()
+
+        def run(data, **kw):
+            kw["on_progress"](5, 10)
+            return GOOD
+
+        def dead_connect():
+            raise OSError("progress database unreachable")
+
+        calls = {"n": 0}
+
+        def connect_for_progress_only():
+            calls["n"] += 1
+            if calls["n"] == 1:            # the heartbeat's connection works; the progress writer's own connect fails
+                return self.connect()
+            raise OSError("progress database unreachable")
+
+        outcome = self.process(project, job, run, connect=connect_for_progress_only)
+        self.assertEqual(outcome.status, "succeeded")
+
+    def test_a_failed_persist_logs_why_without_any_document_content(self):
+        import tempfile as _tf
+        project, job = self.queue()
+
+        def broken(conn, project, lease, batch):
+            raise ValueError("SECRET-DOCUMENT-TEXT must not reach the log")
+
+        with _tf.TemporaryDirectory() as d, patch.dict(os.environ, {"LAB_APP_LOG": "full", "LAB_APP_LOG_FILE": d + "/app.log"}):
+            outcome = self.process(project, job, self.ok_run(), persist=broken)
+            log = Path(d + "/app.log").read_text()
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "persist_failed"))
+        line = [l for l in log.splitlines() if "persist_parse_result" in l and "[ERROR]" in l][0]
+        self.assertIn("ValueError", line)
+        self.assertIn("persist_failed", line)
+        self.assertIn(str(job), line)
+        self.assertNotIn("SECRET-DOCUMENT-TEXT", log)
+
     def test_a_result_over_the_size_cap_fails_the_job_and_stores_nothing(self):
         from lab_db.parse_results import ParseResultTooLarge
         project, job = self.queue()
@@ -405,7 +478,7 @@ class ParseWorkerRealDbTests(FreshDatabase):
             raise ParseResultTooLarge(str(lease.job_id))
 
         outcome = self.process(project, job, self.ok_run(), persist=too_large)
-        self.assertEqual((outcome.status, outcome.reason), ("failed", "persist_failed"))   # deterministic, not requeued
+        self.assertEqual((outcome.status, outcome.reason), ("failed", "result_too_large"))   # deterministic, not requeued, and says what it was
         self.assertEqual(self.job_state(job)[:2], ("failed", 1))
         self.assertEqual(self.persisted_count(), 0)
 

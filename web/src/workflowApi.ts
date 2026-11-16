@@ -356,6 +356,8 @@ export type JobStatusResponse = {
   retryable: boolean;
   transitions?: JobTransition[];
   transitions_truncated?: boolean;
+  /** A parse job: pages whose first attempt is over / pages in the document (Issue #205); a hint, null before the first batch. */
+  progress?: { pages_done: number; pages_total: number; updated_at?: string } | null;
 };
 
 export async function getJobStatus({
