@@ -141,15 +141,15 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         expected_sha = hashlib.sha256(self.pdf_1p).hexdigest()
 
         self.assertIsInstance(res, IngestedPdfArtifact)
-        self.assertEqual(res.outcome, "accept")
-        self.assertIsNone(res.reason)
+        self.assertEqual(res.outcome, "flag")                       # the fixture is a blank page: accepted and flagged as having no text layer (#203)
+        self.assertEqual((res.reason, res.warnings), ("no_text_layer", ("no_text_layer",)))
         self.assertEqual(res.sha256, expected_sha)
         self.assertEqual(res.size_bytes, len(self.pdf_1p))
         self.assertEqual(res.page_count, 1)
         self.assertEqual(res.object_key, f"sha256/{expected_sha[:2]}/{expected_sha}")
         self.assertEqual(res.object_version, OBJECT_VERSION)
         self.assertFalse(res.reused_existing)
-        self.assertEqual(res.warnings, ())
+        self.assertEqual(res.warnings, ("no_text_layer",))
         self.assertEqual(
             res.artifact_path,
             self.artifact_root / "sha256" / expected_sha[:2] / expected_sha,
@@ -355,7 +355,7 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         f05 = next(e for e in doc["fixtures"] if e["id"] == "F05")
         bad_xref_item = next(it for it in f05["items"] if it["id"] == "F05.bad_xref")
         self.source.write_bytes(rc.item_bytes(bad_xref_item))
-        err = self._assert_fail("corrupt_pdf")
+        err = self._assert_fail("pdf_parser_warning")                # readable (pypdf repairs it) with a warning that is not on the list: its own reason (#204)
         self.assertEqual(err.inspection.outcome, "reject")
         self.assertEqual(self._objects(), [])
         self.assertEqual(self._stage_files(), [])
@@ -399,7 +399,7 @@ class TestPdfArtifactIngestion(unittest.TestCase):
         result, pages = inspect_pdf_isolated(self.pdf_1p, Limits(), cancelled=lambda: True)
         self.assertEqual((result.outcome, result.reason, pages), ("reject", "inspection_cancelled", ()))
         result, pages = inspect_pdf_isolated(self.pdf_1p, Limits(), cancelled=lambda: False)
-        self.assertEqual((result.outcome, result.page_count, len(pages)), ("accept", 1, 1))
+        self.assertEqual((result.outcome, result.page_count, len(pages)), ("flag", 1, 1))       # blank page: flagged no_text_layer, still accepted
 
     def test_child_failures_map_to_fixed_codes_and_publish_nothing(self) -> None:
         for child_code, expected in (("timeout", "inspection_timeout"), ("memory_limit", "inspection_failed"),

@@ -286,5 +286,7 @@ def ingest_document(
         )
 
         _insert_pages(conn, doc_version_id, pages)
+        for code in sorted(set(inspection.warnings)):        # the notes the owner is shown: listed reader notes, no text layer
+            conn.execute("INSERT INTO document_version_flags (document_version_id, project_id, code) VALUES (%s, %s, %s)", (doc_version_id, project_id, code))
 
     return doc_version_id

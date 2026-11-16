@@ -224,6 +224,7 @@ export type UploadDocumentResponse = {
   page_count: number;
   flagged?: boolean;
   warnings?: string[];
+  flags?: string[];
 };
 
 export async function uploadPdf({
@@ -517,6 +518,9 @@ export type BenchmarkPlanResponse = {
   status: string;
   parse_job_id: string;
   promotion_rule?: string;
+  /** Notes recorded on the document at upload, and whether the document has no text to ask questions about (a scan). */
+  document_flags?: string[];
+  no_text_layer?: boolean;
   pages?: {
     usable: number[];
     insufficient_material: Record<string, string>;
@@ -1555,6 +1559,7 @@ export async function getSubmissionDetails(ref: { runId: string; projectId: stri
 // ---------------------------------------------------------------------------
 
 export type WorkspaceDocument = {
+  flags?: string[];
   id: string;
   document_version_id: string;
   project_id: string;

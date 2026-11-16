@@ -787,7 +787,9 @@ class RealPdfUploadDownloadTests(FreshDatabase):
         res = self.client.post(f"/api/v1/documents?project_id={project_id}&logical_id=doc-xref",
                                headers=headers, content=bad_pdfs.build("bad_xref"))
         self.assertEqual(res.status_code, 422, res.text)
-        self.assertEqual(res.json()["error"]["code"], "corrupt_pdf")
+        # readable (pypdf repairs it) but the reader reported something that is not on the list of harmless notes: its own code, not "corrupt" (#204)
+        self.assertEqual(res.json()["error"]["code"], "pdf_parser_warning")
+        self.assertIn("can be read, but the reader reported a problem", res.json()["error"]["message"])
         with self.connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute("SELECT count(*) AS cnt FROM document_versions WHERE project_id = %s", (project_id,))
@@ -866,7 +868,7 @@ class RealPdfUploadDownloadTests(FreshDatabase):
             )
             self.assertEqual(res_bad_geom.status_code, 422)
             self.assertEqual(res_bad_geom.json()["error"]["code"], "corrupt_pdf")
-            self.assertEqual(res_bad_geom.json()["error"]["message"], "document rejected: corrupt_pdf")
+            self.assertEqual(res_bad_geom.json()["error"]["message"], "document rejected: corrupt_pdf (the PDF cannot be read: it is damaged or its structure is invalid)")
             self.assertEqual(res_bad_geom.json()["error"]["details"]["reason"], "corrupt_pdf")
 
         # Verify PostgreSQL audit and that rejection did NOT create outbox records

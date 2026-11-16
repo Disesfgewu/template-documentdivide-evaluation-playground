@@ -51,7 +51,11 @@ def _workspace(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.U
             "JOIN document_versions dv ON dv.id = b.document_version_id JOIN resource_versions drv ON drv.id = dv.resource_id "
             "WHERE b.project_id = %s AND rv.resource_type = %s ORDER BY rv.created_at DESC, b.id DESC LIMIT %s",
             (project_id, BENCHMARK_RESOURCE_TYPE, LIMIT)).fetchall()
-    documents = [{"id": str(i), "document_version_id": str(i), "project_id": str(project_id), "logical_id": lid, "revision": int(rev),
+    with conn.transaction():
+        flags: dict = {}
+        for did, code in conn.execute("SELECT document_version_id, code FROM document_version_flags WHERE project_id = %s ORDER BY code", (project_id,)):
+            flags.setdefault(did, []).append(code)
+    documents = [{"id": str(i), "document_version_id": str(i), "flags": flags.get(i, []), "project_id": str(project_id), "logical_id": lid, "revision": int(rev),
                   "page_count": int(pages), "size_bytes": int(size), "sha256": sha, "uploaded_at": created.isoformat(),
                   "latest_parse_job_id": str(job) if job else None, "latest_parse_status": pstatus, "benchmarks": int(nb)}
                  for i, lid, rev, pages, size, sha, created, job, pstatus, nb in docs]

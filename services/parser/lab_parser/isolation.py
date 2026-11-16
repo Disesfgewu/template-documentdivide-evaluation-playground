@@ -63,12 +63,17 @@ class PageGeometry:
     height_pt: float
 
 
+FLAG_CODES = frozenset({"xref_not_zero_indexed", "trailing_bytes_after_eof"})
+
+
 @dataclass(frozen=True)
 class Inspection:
     schema_version: str
     sha256: str
     size_bytes: int
     pages: tuple[PageGeometry, ...] = field(repr=False)
+    warnings: tuple[str, ...] = ()                  # benign, listed pypdf/structure notes (never repaired: the stored bytes are the original)
+    text_pages: tuple[int, int] | None = None       # (pages sampled, pages with a text layer) from a bounded sample; None = not measured
 
     @property
     def page_count(self):
@@ -142,11 +147,20 @@ def _validate(raw: bytes, digest: str, size: int, limits: ProcessLimits) -> Insp
         if type(result) is not dict:
             raise ValueError
         if set(result) == {"error"}:
-            if result["error"] in {"invalid_pdf", "encrypted_pdf", "page_limit_exceeded", "memory_limit"}:
+            if result["error"] in {"invalid_pdf", "encrypted_pdf", "page_limit_exceeded", "memory_limit", "pdf_warning"}:
                 raise InspectionError(result["error"])
             raise ValueError
-        if set(result) != {"schema_version", "sha256", "size_bytes", "pages"}:
+        base = {"schema_version", "sha256", "size_bytes", "pages"}
+        if set(result) not in (base, base | {"warnings", "text_sample"}):
             raise ValueError
+        warnings, text_pages = (), None
+        if "warnings" in result:
+            w, t = result["warnings"], result["text_sample"]
+            if (type(w) is not list or not all(type(c) is str and c in FLAG_CODES for c in w) or len(set(w)) != len(w)
+                    or type(t) is not dict or set(t) != {"pages", "with_text"} or type(t["pages"]) is not int or type(t["with_text"]) is not int
+                    or not 0 <= t["with_text"] <= t["pages"] <= 20):
+                raise ValueError
+            warnings, text_pages = tuple(sorted(w)), (t["pages"], t["with_text"])
         if (result["schema_version"] != "isolated-geometry-2" or result["sha256"] != digest
                 or type(result["size_bytes"]) is not int or result["size_bytes"] != size):
             raise ValueError
@@ -169,7 +183,7 @@ def _validate(raw: bytes, digest: str, size: int, limits: ProcessLimits) -> Insp
                         or page[name] <= 0):
                     raise ValueError
             checked.append(PageGeometry(**page))
-        return Inspection("isolated-geometry-2", digest, size, tuple(checked))
+        return Inspection("isolated-geometry-2", digest, size, tuple(checked), warnings, text_pages)
     except InspectionError:
         raise
     except (ValueError, TypeError, OverflowError, RecursionError, UnicodeError):

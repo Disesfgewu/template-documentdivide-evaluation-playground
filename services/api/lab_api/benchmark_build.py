@@ -137,6 +137,11 @@ def _report(conn: psycopg.Connection, project_id: uuid.UUID, benchmark_id: uuid.
                                {int(k): v for k, v in prov["skipped_pages"].items()}, units, prov["residual_limit"])
     plan.update({"benchmark_revision_id": str(benchmark_id), "logical_id": logical_id, "revision": revision, "status": status,
                  "parse_job_id": str(job_id), "promotion_rule": rule})
+    # the notes recorded on the document at upload; "no_text_layer" also when the plan itself found no usable text page (a scan the upload sample missed)
+    flags = [c for (c,) in conn.execute("SELECT f.code FROM document_version_flags f JOIN benchmark_revisions b ON b.document_version_id = f.document_version_id "
+                                        "WHERE b.id = %s ORDER BY f.code", (benchmark_id,))]
+    plan["document_flags"] = flags
+    plan["no_text_layer"] = "no_text_layer" in flags or plan["buckets"]["general"]["material"]["text_units"] == 0
     return plan
 
 

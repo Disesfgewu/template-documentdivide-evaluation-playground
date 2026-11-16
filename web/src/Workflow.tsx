@@ -5,6 +5,7 @@ import { BenchmarkDownload } from "./BenchmarkDownload";
 import { DeveloperPackage, DeveloperUploads } from "./ExternalMethods";
 import { resumeSteps, STATUS_LABEL_ZH } from "./resume";
 import { failureReason, progressView } from "./parseProgress";
+import { flagNotes, uploadErrorText, usablePagesSummary } from "./documentNotes";
 import {
   cancelJob,
   createBenchmark,
@@ -265,7 +266,7 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
         setUploadedDoc(res.data);
       } else {
         setUploadStatus("error");
-        setUploadError(res.error.message);
+        setUploadError(uploadErrorText(res.error.code, res.error.message));
       }
     } finally {
       if (activeAbortControllerRef.current === controller) {
@@ -1142,6 +1143,9 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 <li>SHA-256: {uploadedDoc.sha256 || "—"}</li>
                 <li>檔案大小: {uploadedDoc.size_bytes !== undefined ? `${uploadedDoc.size_bytes} 位元組` : "—"}</li>
               </ul>
+              {flagNotes(uploadedDoc.flags).map((n) => (
+                <p key={n.text} data-testid="upload-flag" className={n.tone === "warn" ? "tone-bad" : "muted small"} style={{ margin: "0.5rem 0 0 0" }}>{n.text}</p>
+              ))}
             </div>
           )}
         </div>
@@ -1267,12 +1271,15 @@ export function Workflow({ fetchFn = fetch, devToken = ENV_TOKEN, devProjectId =
                 <li>狀態: {planResult.status || "—"}</li>
                 <li>
                   可用頁數 (Usable Pages):{" "}
-                  {planResult.pages?.usable && planResult.pages.usable.length > 0
-                    ? planResult.pages.usable.map((p) => p + 1).join(", ")
-                    : "—"}
+                  <span data-testid="plan-usable-pages">{usablePagesSummary(planResult.pages?.usable)}</span>
                 </li>
                 <li>合規性預測: {planResult.compliance_projection || "—"}</li>
               </ul>
+              {planResult.no_text_layer && (
+                <p data-testid="plan-no-text" className="tone-bad" style={{ margin: "0.5rem 0 0 0" }}>
+                  這份文件沒有可用的文字內容（沒有文字層，通常是掃描圖片）。本系統只處理文字，不做 OCR，所以沒辦法用它出題。請先用 OCR 軟體轉成可選取文字的 PDF，或改用文字 PDF。
+                </p>
+              )}
             </div>
           )}
         </div>
