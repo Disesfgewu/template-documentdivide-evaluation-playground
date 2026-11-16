@@ -46,7 +46,7 @@ def _start(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
     missing = ApiError(404, "not_found", "benchmark revision not found")
     try:
         benchmark_id, _, _, _ = _find(conn, project_id, logical_id, revision)
-        cap, info = _cap(body, lambda: est.estimate_answer(conn, settings, project_id, benchmark_id, body.max_output_tokens))
+        cap, info = _cap(body, lambda: est.estimate_answer(conn, settings, project_id, benchmark_id, body.max_output_tokens, body.model))
         out = start_answer_run(conn, project_id, benchmark_id, actor_id, model=body.model, budget_cap_micros=cap,
                                currency=body.currency, pricing_revision=body.pricing_revision,
                                max_output_tokens=body.max_output_tokens)
@@ -92,7 +92,7 @@ def _start_judge(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid
         row = conn.execute("SELECT benchmark_id FROM runs WHERE id = %s AND project_id = %s", (run_id, project_id)).fetchone()
         if row is None:
             raise NotFound("run")
-        cap, info = _cap(body, lambda: est.estimate_judge(conn, settings, project_id, row[0], run_id, body.max_output_tokens))
+        cap, info = _cap(body, lambda: est.estimate_judge(conn, settings, project_id, row[0], run_id, body.max_output_tokens, body.model))
         out = start_judge_run(conn, project_id, run_id, actor_id, model=body.model, budget_cap_micros=cap,
                               currency=body.currency, pricing_revision=body.pricing_revision, max_output_tokens=body.max_output_tokens)
     except NotFound:

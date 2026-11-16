@@ -30,7 +30,7 @@ from lab_db.storage import LocalArtifactStore
 from lab_api import baseline_eval as be
 from lab_api.generate_worker import CallSpec
 from lab_api.method_judge import (JUDGE_GRADER_SUFFIX, JUDGE_LIMITATION, JUDGE_PROMPT_REVISION, JUDGE_PROMPT_SHA256, MAX_JUDGED_CLAIMS,
-                                  build_judge_call, check_verdict_ex, parse_judge_reply_ex, span_check, span_in_answer)
+                                  build_judge_call, check_verdict_ex, expand_to_sentences, parse_judge_reply_ex, span_check, span_in_answer)
 from lab_scoring import rules
 from .app_log import app_traced, log_op, set_question
 
@@ -124,13 +124,13 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         """Every question of the benchmark with its submission of this run, in order. Deterministic and read-only."""
         out = []
         subs = conn.execute(
-            "SELECT q.id, q.question_key, q.ordinal, s.id, s.answer_status, s.failure_reason, s.payload_hash, a.object_key, a.size_bytes "
+            "SELECT q.id, q.question_key, q.ordinal, q.question_text, s.id, s.answer_status, s.failure_reason, s.payload_hash, a.object_key, a.size_bytes "
             "FROM active_questions q LEFT JOIN submissions s ON s.question_id = q.id AND s.run_id = %s AND s.status = 'accepted' "
             "LEFT JOIN artifacts a ON a.id = s.payload_artifact_id WHERE q.benchmark_id = %s ORDER BY q.ordinal",
             (run_id, benchmark_id)).fetchall()
-        for qid, qkey, ordinal, sid, status, failure, phash, object_key, size in subs:
+        for qid, qkey, ordinal, qtext, sid, status, failure, phash, object_key, size in subs:
             set_question(qkey, ordinal)
-            item = {"qid": qid, "qkey": qkey, "ordinal": ordinal, "sid": sid, "status": status, "failure": failure,
+            item = {"qid": qid, "qkey": qkey, "ordinal": ordinal, "question": qtext, "sid": sid, "status": status, "failure": failure,
                     "call_id": f"j{ordinal:04d}", "facts": None, "weights": None, "response": None, "claims": None}
             gold = conn.execute("SELECT payload FROM gold_answers WHERE question_id = %s AND kind = 'semantic'", (qid,)).fetchone()
             facts = (gold[0].get("required_facts") if gold else None) or []
@@ -175,7 +175,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         for it in load(conn, benchmark_id):
             if judgeable(it):
                 set_question(it["qkey"], it["ordinal"])
-                calls.append(build_judge_call(it["call_id"], it["facts"], it["response"].answer.text, it["claims"], it["hit_text"]))
+                calls.append(build_judge_call(it["call_id"], it["facts"], it["response"].answer.text, it["claims"], it["hit_text"], it.get("question", "")))
         set_question(None)
         return calls
 
@@ -194,7 +194,8 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
             if v in ("stated", "contradicted") and not span_in_answer(span, answer):
                 v, code = "missing", "judge_span_not_in_answer"
             elif v == "stated":
-                new_v, why = span_check(it["facts"][int(label[1:]) - 1], span)
+                # the numbers and entities are read in the SENTENCE that holds the span (a condition may come before the copied piece)
+                new_v, why = span_check(it["facts"][int(label[1:]) - 1], expand_to_sentences(span, answer), it.get("question", ""))
                 if new_v != "ok":
                     v, code = new_v, why
             if code:

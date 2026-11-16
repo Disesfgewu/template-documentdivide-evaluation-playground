@@ -12,7 +12,7 @@ and the results say so (`retrieval_gold.page_level_questions` and a note). To ge
 `not_found` and counts against citation precision. On a page-level question it keeps the whole-page credit, as before.
 
 **The judge (judge-v3, redesigned after the first real run).** The model first compares each gold fact with the ANSWER only and, for every
-`stated` or `contradicted` fact, copies the verbatim `answer_span` that says it (at most 15 words); `missing` has no span. Two worked examples
+`stated` or `contradicted` fact, copies the verbatim `answer_span` that says it (at most 30 words); `missing` has no span. Two worked examples
 are in the prompt, and the facts-vs-answer task comes before the claims-vs-passages task. Then code decides, per fact, and records every downgrade:
 - **No span, no credit**: a `stated`/`contradicted` verdict whose span is not a (whitespace/case-normalised) substring of the answer becomes
   `missing` (`judge_span_not_in_answer`).
@@ -25,7 +25,17 @@ are in the prompt, and the facts-vs-answer task comes before the claims-vs-passa
 Limits: a number written in words is not found; a restated comparison ("B is 19% higher than A" for "A is 19% lower than B") is downgraded; a
 paraphrase that shares under 40 % of a number-free fact's words is downgraded. The output cap is 500 tokens (the owner's D7 cap), so the spans are
 short and a judged answer may have at most 8 claims. Each downgrade is in the correctness row's reason codes and in the `question_summary` line.
-The judge model is chosen per judge run on the page; the estimate uses the configured prices, which belong to the configured model.
+Three refinements after the second real run: (1) a NUMBER is free-standing: digits inside identifiers (all-0s, all-1s, Ge2Sb2Te5, CPU2017, 3D) are
+not numbers, and a hyphenated word is an entity name only when it has a capital (Flip-N-Write, SET-bit; not all-1s); (2) the numbers and entities are
+read in the whole SENTENCE of the answer that holds the span (the span itself must still be verbatim), so a condition stated before the copied
+piece counts; (3) the judge receives the QUESTION and reads the answer as a reply to it ("60%." answers "what fraction ...?"): the question's words
+count toward a fact's entity and coverage, but the span must itself bring at least one of the fact's words that the question lacks (the value or name).
+
+**Judge model and its price.** The model is chosen per judge run on the page. Its price is looked up by model name: `LAB_GEN_MODEL_PRICES` (owner JSON,
+`{"claude-sonnet-5-5": [2000000, 10000000]}`, micro-USD per million tokens, in and out) > a built-in table > the configured `LAB_GEN_PRICE_*` pair (the owner's
+model, claude-haiku-4-5 by default, which is deliberately not in the table). Built-in, UNVERIFIED list prices (the Claude API reference table cached
+2026-11-03; check them against your invoice): haiku-5-5 $0.10/$0.50 (prompts up to 100K tokens), sonnet-5-5 $2/$10, opus-5-5 $4/$20 per million tokens. The estimate,
+the derived cap and the worker's charge all use the job's model price; the page shows the price used and where it comes from.
 
 **No passage offered** (every quote invented or none given): the prompt says so and the judge still decides each fact from the answer alone;
 faithfulness and citation scores stay 0 by construction.

@@ -602,6 +602,11 @@ export type RunEstimate = {
   plan_total?: number;
   split?: { general: number; cross_page: number; confusable: number };
   bound?: boolean;
+  /** The model the figures are for and where its price comes from (Issue #197): builtin_unverified = a list price not checked against the invoice. */
+  model?: string;
+  price_source?: "owner_override" | "builtin_unverified" | "configured";
+  price_in_micros_per_mtok?: number;
+  price_out_micros_per_mtok?: number;
 };
 
 export type StartGenerationResponse = {
@@ -1347,6 +1352,8 @@ export async function getRunEstimate(ref: {
   questionCount?: number;
   /** The run to judge (phase "judge" only). */
   runId?: string;
+  /** The model that will be used: its price decides the estimate. */
+  model?: string;
   token: string;
   fetchFn?: typeof fetch;
   signal?: AbortSignal;
@@ -1361,6 +1368,7 @@ export async function getRunEstimate(ref: {
   const qs = new URLSearchParams({ project_id: ref.projectId.trim(), phase: ref.phase });
   if (ref.questionCount !== undefined) qs.set("question_count", String(Math.floor(ref.questionCount)));
   if (ref.runId) qs.set("run_id", ref.runId);
+  if (ref.model && ref.model.trim()) qs.set("model", ref.model.trim());
   const endpoint = `${ref.baseUrl ?? ""}/api/v1/benchmarks/${encodeURIComponent(ref.logicalId.trim())}/revisions/${ref.revision ?? 1}/estimate?${qs.toString()}`;
   return executeFetch<RunEstimate>(endpoint, { method: "GET", headers: { Authorization: `Bearer ${token}` } }, token,
     ref.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, ref.fetchFn ?? fetch, ref.signal);

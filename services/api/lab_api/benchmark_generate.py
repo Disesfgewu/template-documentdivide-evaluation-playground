@@ -12,6 +12,7 @@
 The call itself is made later by the generation worker (``python -m lab_api.generate_worker_main``); this API makes none."""
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Optional
 
@@ -56,11 +57,11 @@ def _derive_or_explicit(conn, settings, actor_id, project_id, benchmark_id, page
             if body.budget_cap_micros is not None:                          # explicit cap: still validate the count and record the split
                 requested = est.split_question_count(page_count, count) if body.question_count is not None else None
                 return body.budget_cap_micros, requested, None
-            info, requested = est.estimate_generate(conn, settings, project_id, benchmark_id, page_count, count, body.max_output_tokens)
+            info, requested = est.estimate_generate(conn, settings, project_id, benchmark_id, page_count, count, body.max_output_tokens, body.model)
             return info["estimated_max_micros"], requested, info
         if body.budget_cap_micros is not None:
             return body.budget_cap_micros, None, None
-        info = est.estimate_validate(conn, settings, project_id, actor_id, benchmark_id, body.max_output_tokens)
+        info = est.estimate_validate(conn, settings, project_id, actor_id, benchmark_id, body.max_output_tokens, body.model)
         return info["estimated_max_micros"], None, info
     except est.EstimateError as exc:
         raise ApiError(409 if "ceiling" in str(exc) or "prices" in str(exc) else 400, "conflict" if "ceiling" in str(exc) or "prices" in str(exc)
@@ -105,7 +106,7 @@ def _start(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID,
 
 
 def _estimate(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UUID, logical_id: str, revision: int, phase: str,
-              question_count: Optional[int], settings, run_id: Optional[uuid.UUID] = None) -> dict:
+              question_count: Optional[int], settings, run_id: Optional[uuid.UUID] = None, model: Optional[str] = None) -> dict:
     """What the next run of ``phase`` (generate / validate / answer / judge of ``run_id``) can cost at most, before it starts."""
     missing = ApiError(404, "not_found", "benchmark revision not found")
     _authorize(conn, project_id, actor_id, BUILD_ACTION, missing)
@@ -113,18 +114,18 @@ def _estimate(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid.UU
     try:
         if phase == "generate":
             count = question_count if question_count is not None else est.default_question_count(page_count)
-            return est.estimate_generate(conn, settings, project_id, benchmark_id, page_count, count)[0]
+            return est.estimate_generate(conn, settings, project_id, benchmark_id, page_count, count, model=model)[0]
         if question_count is not None:
             raise ApiError(400, "bad_request", "question_count only applies to generation")
         if phase == "validate":
-            return est.estimate_validate(conn, settings, project_id, actor_id, benchmark_id)
+            return est.estimate_validate(conn, settings, project_id, actor_id, benchmark_id, model=model)
         if phase == "answer":
-            return est.estimate_answer(conn, settings, project_id, benchmark_id)
+            return est.estimate_answer(conn, settings, project_id, benchmark_id, model=model)
         if phase == "judge":
             if run_id is None or conn.execute("SELECT 1 FROM runs WHERE id = %s AND project_id = %s AND benchmark_id = %s",
                                               (run_id, project_id, benchmark_id)).fetchone() is None:
                 raise ApiError(404, "not_found", "run not found")
-            return est.estimate_judge(conn, settings, project_id, benchmark_id, run_id)
+            return est.estimate_judge(conn, settings, project_id, benchmark_id, run_id, model=model)
     except est.EstimateError as exc:
         raise ApiError(409, "conflict", str(exc)) from None
     raise ApiError(400, "bad_request", "phase must be generate, validate, answer or judge")
@@ -232,12 +233,15 @@ async def estimate_handler(logical_id: str, revision: int, request: Request, con
         run_id = uuid.UUID(request.query_params["run_id"]) if "run_id" in request.query_params else None
     except ValueError:
         raise ApiError(400, "bad_request", "run_id must be a UUID") from None
+    model = request.query_params.get("model")
+    if model is not None and not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", model):
+        raise ApiError(400, "bad_request", "model must be 1..128 characters of letters, digits, . _ -")
     raw_count = request.query_params.get("question_count")
     if raw_count is not None and (not raw_count.isascii() or not raw_count.isdigit() or not 1 <= int(raw_count) <= 1000):
         raise ApiError(400, "bad_request", "question_count must be an integer 1..1000")
     return JSONResponse(status_code=200, content=await _run_blocking(
         request, "meta", _estimate, conn, actor_id, project_id, logical_id, revision, request.query_params.get("phase", "generate"),
-        int(raw_count) if raw_count is not None else None, request.app.state.settings, run_id))
+        int(raw_count) if raw_count is not None else None, request.app.state.settings, run_id, model))
 
 
 async def progress_handler(logical_id: str, revision: int, request: Request, conn: psycopg.Connection = Depends(get_db),
