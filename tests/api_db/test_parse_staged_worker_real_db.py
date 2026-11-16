@@ -290,6 +290,39 @@ class StagedParseWorkerRealDbTests(FreshDatabase):
         with self.connect() as c:
             self.assertIsNone(ps.progress(c, job))
 
+    def test_the_staged_path_works_for_a_non_superuser_application_role(self):
+        """The production application role gets DML only (no blanket DELETE): the parse worker must be able to stage, finish and delete the staging
+        with exactly the privileges ``grant_app_privileges`` gives it, and the final tables stay append-only for it."""
+        import psycopg
+        from lab_db.repo import grant_app_privileges
+        role = f"lab_app_{uuid.uuid4().hex[:10]}"
+        with self.connect() as c:
+            c.execute(f'CREATE ROLE "{role}" NOLOGIN')
+            grant_app_privileges(c, role)
+            c.commit()
+
+        def drop():
+            with self.connect(autocommit=True) as c:
+                c.execute(f'DROP OWNED BY "{role}"')
+                c.execute(f'DROP ROLE IF EXISTS "{role}"')
+        self.addCleanup(drop)
+        project, job = self.queue()
+
+        def as_role():
+            c = self.connect()
+            c.execute(f'SET ROLE "{role}"')
+            c.commit()
+            return c
+        with as_role() as conn:
+            outcome = process_parse_job(conn, project, job, store=self.store, persist=lambda *a: self.fail("staged"), worker="w", max_pdf_bytes=64 * 1024 * 1024,
+                                        connect=as_role, ttl_seconds=60, run=staged_run(FakeParser()))
+        self.assertEqual((outcome.status, outcome.reason), ("succeeded", "parsed"))
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_staging WHERE job_id = %s", (job,)).fetchone()[0], 0)      # deleted by the app role
+            self.assertEqual(c.execute("SELECT count(*) FROM parse_page_results WHERE job_id = %s", (job,)).fetchone()[0], PAGES)
+        with as_role() as conn, self.assertRaises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("DELETE FROM parse_page_results WHERE job_id = %s", (job,))                                         # the final tables stay append-only
+
     # --- the legacy contract still works -----------------------------------------------------------------------------------------------
     def test_a_run_double_that_returns_a_batch_still_goes_through_persist(self):
         from types import SimpleNamespace
