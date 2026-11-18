@@ -123,6 +123,7 @@ class Worker:
         self.once_timeout = once_timeout
         self.heartbeat_file = heartbeat_file
         self._last_pass = 0.0
+        self._last_sweep = float("-inf")
         self.backoff = Backoff(backoff, jitter=jitter)
         self.counts: dict[str, int] = {}
         self._lock = threading.Lock()
@@ -148,6 +149,8 @@ class Worker:
         def run(data, cancelled=None, **kw):
             inner = cancelled or (lambda: False)
             return base(data, cancelled=lambda: inner() or self.abort.is_set(), **kw)
+        from .parse_worker import _accepts_sinks
+        run.accepts_sinks = _accepts_sinks(base)          # the wrapper passes every keyword through: it takes the staging sinks iff the real runner does
         return run
 
     def _process(self, conn: psycopg.Connection, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome:
@@ -218,6 +221,22 @@ class Worker:
             futures.add(pool.submit(self._handle, project_id, job_id))
         return len(picked)
 
+    SWEEP_EVERY = 3600.0
+
+    def _sweep_staging(self, force: bool = False) -> None:
+        """Delete the staging of parse jobs that ended (a crash between the transition and the delete) or went quiet for a day. At start and hourly."""
+        if self.KIND != "document.parse" or (not force and time.monotonic() - self._last_sweep < self.SWEEP_EVERY):
+            return
+        self._last_sweep = time.monotonic()
+        try:
+            from lab_db import parse_staging
+            with self.connect() as conn:
+                n = parse_staging.sweep_orphans(conn)
+            if n:
+                LOG.info("staging sweep: removed %d orphaned staging area(s)", n)
+        except Exception as exc:  # noqa: BLE001 - housekeeping never stops the worker
+            LOG.warning("staging sweep failed (%s)", type(exc).__name__)
+
     def run_once(self) -> dict[str, int]:
         """Process what is claimable right now, then return. A job that backs off is not waited
         for (run ``--once`` again later); the call also ends at ``once_timeout`` seconds."""
@@ -240,7 +259,9 @@ class Worker:
         pool = ThreadPoolExecutor(self.concurrency, thread_name_prefix="parse")
         futures: set[Future] = set()
         try:
+            self._sweep_staging(force=True)
             while not self.stop.is_set():
+                self._sweep_staging()
                 submitted = self.pass_once(pool, futures)
                 if futures:
                     _, futures = wait(futures, timeout=self.interval, return_when=FIRST_COMPLETED)

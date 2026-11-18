@@ -117,6 +117,23 @@ SPEC 12.2 以 Go 實作 agentKit workflow graph。這個 consumer 用 **Python**
 CI：手動 `workflow_dispatch` 的 `worker_image` 輸入執行 `worker-image` job：建置映像、以 compose 啟動、檢查非 root／唯讀／capability／健康狀態／映像沒有機密，並用 `deploy/worker_smoke.py` 在**執行中的容器內**以合成單頁 PDF 走完整條路徑（建立專案、上傳、排隊、由容器自己的 worker 以真實 unstructured 解析、讀回結果），最後優雅停止。
 
 
-## 解析進度（Issue #205）
+## 逐頁寫入（Issue #205、#204 PM-DECISION GO）
 
-長文件解析要好幾分鐘（834 頁約 7 分鐘）。`parse_in_batches(on_progress=...)` 在第一輪每一批（10 頁）結束時回報 `(已處理頁數, 總頁數)`；失敗的批也算「已嘗試」（它的頁面之後逐頁重試），重試不再推進進度，最後停在總數。worker 用自己的連線把它寫進 `parse_progress`（migration 0024，每個 job 一列，會被覆寫；至少間隔 2 秒才寫一次，最後一筆一定寫；任何寫入失敗都被吞掉，進度不值得讓解析失敗）。`GET /api/v1/jobs/{id}` 對 parse job 多回 `progress {pages_done, pages_total, updated_at}`（還沒有第一批時是 `null`）。進度只是提示，job 狀態才是真相。網頁在解析中畫進度條與「已處理 N / M 頁（x%）」，完成至少 5% 後才顯示粗略的剩餘分鐘數；解析失敗時顯示原因代碼（例如 `result_too_large`）。網頁等待上限從 10 分鐘改為 35 分鐘（worker 自己的 job 期限是 30 分鐘）。
+解析結果不再「整份做完才一次寫入」。每一頁一定稿（ok／needs_review 的頁在它那一批回來後立刻；失敗的頁在重試用完定案後），就用自己的一筆短交易存進**暫存區**（migration 0025：`parse_staging`、`parse_staging_pages`、`parse_staging_runs`），受 job 的 lease 保護。Unstructured 一次回傳一批 10 頁，所以最細只能做到「每批回來就逐頁寫入」。
+
+- **讀取端看不到暫存區（結構上，不靠過濾條件）**：沒有任何讀取端查暫存表。最終的 `parse_results`／`parse_page_results`（只增不改）只在 job 的原子 `succeeded` 交易內建立；進行中、失敗、取消的 job 在 parse-results API、promote／plan、題庫建立、出題讀的任何表裡都沒有列。有測試（含原始碼層級的「只有解析 worker 的檔案提到 parse_staging」）。
+- **完成交易**（`finish_from_staging`，`jobs.finish` 的 hook）：確認 0..N-1 每頁都在、把 raw 輸出（暫存期間存在 `parse_staging_runs`）提交成 artifact、`INSERT … SELECT` 伺服器端把頁複製進最終表、刪暫存、標 `succeeded`。`record_sha256` 逐頁累積計算，位元組和舊的整筆 canonical JSON 完全一樣（有測試對照），記憶體只放一頁。整段有 heartbeat 保護 lease。
+- **接續（選「接續」）**：下一次嘗試讀 `parse_staging.identity`（文件 sha、profile、adapter 版本、批次大小、operation_id、總頁數）；全部相同才接續：一批的所有核心頁都已暫存就不再跑，缺任何一頁就整批重跑，重存時頁雜湊必須相同，否則丟棄整個暫存從第 0 頁重來（一次）。身分有任何差異：丟棄重來。不會有重複頁、不會新舊混在一起。
+- **清理**：job 失敗、取消時在同一個流程刪暫存；worker 啟動時和之後每小時掃描一次孤兒（結束的 job 的暫存；超過 24 小時沒動的非執行中 job 的暫存），涵蓋「狀態轉換後、刪除前當機」。重試不會讓儲存無限增長。
+- **大小**：沒有整份文件的大小上限，只有每頁 `MAX_PAGE_BYTES`（32 MiB，資料庫另外對每個 JSON 欄位設 16 MiB）。標頭裡「所有證據編號清單」超過 8 MiB 時省略並寫 `evidence_refs_omitted`（2000 頁、每頁 94 個證據時是 13.2 MB，逼近 16 MiB 欄位上限；沒有任何讀取端讀它，編號都在各頁資料裡）。
+- **進度**：`GET /api/v1/jobs/{id}` 的 `progress {pages_done, pages_total, updated_at}` 直接數暫存頁（成功後數最終頁）；`parse_progress`（0024）在 0025 刪除。進度條、剩餘時間估計和失敗原因代碼在網頁上。
+- **job 的階段**：`parsing`、`storing`、`finishing`（失敗的 job 顯示它失敗的階段，不是 `queued`）；失敗原因代碼如 `pages_failed:N`、`page_write_failed:<例外類別>`、`page_too_large`、`staging_conflict`、`persist_failed`、`staging_incomplete`。
+- **app.log**：每存一頁一行 `page_staged`（頁碼、狀態、區塊數、observation 數、位元組、run），每批一行 `run_staged`，完成一行 `parse_finished`（頁數、位元組、raw artifact 數、完成交易秒數、record_sha256）；寫入失敗記 ERROR（例外類別、SQLSTATE、constraint 名稱，不含文件內容）。
+- **相容**：測試替身的 `run`（回傳整份 `NormalizedBatch`、沒有明確宣告 `page_sink`／`run_sink`／`staged` 參數）仍走舊的 `persist` 契約。
+
+量測（合成資料，密度取自 834 頁實測：每頁 94 個 evidence + 94 個 observation，約 100 KB 一頁；本機 PostgreSQL；`LAB_SCALE=1 python -m unittest tests.api_db.test_parse_staging_scale_real_db`）：
+
+| 頁數 | 逐頁寫入 | 完成交易 | 頁資料量 | 完成時多出的記憶體 | 進度查詢 |
+|---|---|---|---|---|---|
+| 834 | 3.3 s（4 ms／頁） | 1.5 s | 93 MB | 約 0 MiB（RSS 沒增加） | 1 ms |
+| 2000 | 8.5 s | 3.5 s | 223 MB | 約 +75 MiB（RSS 109→183） | 1.4 ms |

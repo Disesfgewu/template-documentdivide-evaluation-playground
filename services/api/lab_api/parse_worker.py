@@ -34,11 +34,12 @@ from typing import Callable
 import psycopg
 import psycopg.errors
 
-from lab_db import jobs
+from lab_db import jobs, parse_staging as ps
 from lab_db.storage import LocalArtifactStore
 from lab_parser.isolation import InspectionError
 from lab_parser.normalize import NormalizedBatch
-from lab_parser.batch_parse import PartialParseFailure, parse_in_batches
+from lab_parser.batch_parse import PartialParseFailure, StagedParse, parse_in_batches
+from .parse_staged import StagingSinks, build_header, identity_of
 from .app_log import app_traced, log_op, log_alarm, log_error, ContextScope, log_page_statuses
 
 LOG = logging.getLogger("lab.parse_worker")
@@ -116,7 +117,8 @@ class _Heartbeat:
 
 
 def _fail(conn, project_id, lease, code) -> ParseOutcome:
-    jobs.finish(conn, project_id, lease, "failed", code)
+    jobs.finish(conn, project_id, lease, "failed", code, stage=_stage_for(code))
+    _discard_if_terminal(conn, project_id, lease.job_id)         # a failed job's partial pages must not stay behind
     return ParseOutcome(lease.job_id, "failed", code)
 
 
@@ -142,6 +144,7 @@ def _stopped(conn, project_id, job_id) -> ParseOutcome:
     """The lease is gone while we ran: acknowledge a cancel, otherwise leave it to the new owner."""
     try:
         if jobs.acknowledge_cancel(conn, project_id, job_id):
+            _discard_if_terminal(conn, project_id, job_id)
             return ParseOutcome(job_id, "cancelled", "cancel_acknowledged")
     except Exception as exc:
         if is_infrastructure(exc):
@@ -203,51 +206,67 @@ def process_parse_job(
             raise
 
 
-class _ProgressWriter:
-    """Writes "pages done / pages total" for a running parse job on its OWN connection (Issue #205). Called from batch threads: serialised, at most
-    one write per ``MIN_INTERVAL`` seconds (the last value is always written), and every failure is swallowed: progress never fails a parse."""
-    MIN_INTERVAL = 2.0
-
-    def __init__(self, connect, project_id, job_id, clock=time.monotonic):
-        self._connect, self._project_id, self._job_id, self._clock = connect, project_id, job_id, clock
-        self._lock = threading.Lock()
-        self._conn = None
-        self._last_write = float("-inf")
-
-    def __call__(self, done: int, total: int) -> None:
-        with self._lock:
-            now = self._clock()
-            if done < total and now - self._last_write < self.MIN_INTERVAL:
-                return
-            try:
-                if self._conn is None:
-                    self._conn = self._connect()
-                self._conn.execute(
-                    "INSERT INTO parse_progress (job_id, project_id, pages_done, pages_total) VALUES (%s, %s, %s, %s) "
-                    "ON CONFLICT (job_id) DO UPDATE SET pages_done = EXCLUDED.pages_done, pages_total = EXCLUDED.pages_total, updated_at = now()",
-                    (self._job_id, self._project_id, done, total))
-                self._conn.commit()
-                self._last_write = now
-            except Exception:  # noqa: BLE001
-                self._conn = None
-
-    def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._conn = None
-
-
-def _accepts_progress(run) -> bool:
+def _accepts_sinks(run) -> bool:
+    """True when ``run`` names the staging sinks explicitly (the real ``parse_in_batches`` does; a test double with ``**kw`` is not given them)."""
     import inspect
+    if hasattr(run, "accepts_sinks"):
+        return bool(run.accepts_sinks)
     try:
         params = inspect.signature(run).parameters
     except (TypeError, ValueError):
         return False
-    return "on_progress" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    return {"page_sink", "run_sink", "staged"} <= set(params)
+
+
+def _discard_if_terminal(conn, project_id, job_id) -> None:
+    """Delete a job's staging when the job has ended (failed or cancelled). A job that is queued or running keeps it: the next attempt resumes."""
+    try:
+        with conn.transaction():
+            status = conn.execute("SELECT status::text FROM jobs WHERE project_id = %s AND id = %s", (project_id, job_id)).fetchone()
+        if status is not None and status[0] in ("failed", "cancelled", "succeeded"):
+            n = ps.discard_staging(conn, job_id)
+            if n:
+                log_op("staging_discarded", stage="parse", job_id=str(job_id), pages=n, job_status=status[0])
+    except Exception as exc:  # noqa: BLE001 - never change the outcome; the orphan sweep removes it later
+        LOG.warning("job %s: staging discard failed (%s); the orphan sweep will remove it", job_id, type(exc).__name__)
+
+
+_STAGE_OF = {"page_write_failed": "storing", "page_too_large": "storing", "persist_failed": "finishing", "staging_incomplete": "finishing",
+             "artifact_unavailable": "loading", "artifact_unreadable": "loading", "pages_failed": "parsing"}
+
+
+def _stage_for(code: str) -> str:
+    return _STAGE_OF.get(code.split(":")[0], "parsing")
+
+
+def _finish_staged(conn, project_id, lease, store, staged, operation_id, page_count, connect, ttl_seconds) -> ParseOutcome:
+    """The atomic succeeded transition of a staged parse: build the header from what is staged, then one transaction copies the staged pages into the final
+    append-only tables (server side), commits the raw outputs as artifacts, deletes the staging and marks the job succeeded. A heartbeat keeps the lease
+    alive meanwhile (the copy, the artifact commits and the hash pass are bounded but not instant)."""
+    job_id = lease.job_id
+    started = time.monotonic()
+    try:
+        jobs.set_stage(conn, project_id, lease, "finishing")
+        with _Heartbeat(connect, project_id, lease, ttl_seconds):
+            header = build_header(conn, job_id, operation_id, page_count)
+            info: dict = {}
+            jobs.finish(conn, project_id, lease, "succeeded", "parsed",
+                        hook=lambda c: info.update(ps.finish_from_staging(c, store, project_id, lease, header, page_count)))
+    except jobs.LeaseLost:
+        raise
+    except Exception as exc:
+        if is_infrastructure(exc):
+            raise
+        try:
+            diag = getattr(exc, "diag", None)
+            log_error("finish_from_staging", type(exc).__name__, "persist_failed", stage="parse", job_id=str(job_id), sqlstate=getattr(exc, "sqlstate", None),
+                      constraint=getattr(diag, "constraint_name", None), table=getattr(diag, "table_name", None), pages=page_count)
+        except Exception:  # noqa: BLE001
+            pass
+        return _fail(conn, project_id, lease, "staging_incomplete" if isinstance(exc, ps.StagingIncomplete) else "persist_failed")
+    log_op("parse_finished", stage="parse", job_id=str(job_id), pages=info.get("pages"), bytes=info.get("bytes"), raw_artifacts=info.get("raw_artifacts"),
+           finish_seconds=round(time.monotonic() - started, 2), record_sha256=info.get("record_sha256"))
+    return ParseOutcome(job_id, "succeeded", "parsed")
 
 
 def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, ttl_seconds, python, run,
@@ -284,21 +303,46 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
     if hashlib.sha256(data).hexdigest() != doc_sha:
         return _fail(conn, project_id, lease, "artifact_unreadable")
 
-    progress = _ProgressWriter(connect, project_id, job_id)
-    extra = {"on_progress": progress} if _accepts_progress(run) else {}
-    with _Heartbeat(connect, project_id, lease, ttl_seconds) as beat:
-        try:
-            batch = run(data, python=python, cancelled=beat.lost.is_set, document_id=str(doc_id),
-                        budget_ref=budget_ref or "unbudgeted", operation_id=str(operation_id), **extra)
-            error = None
-        except InspectionError as exc:
-            batch, error = None, exc.code
-        except PartialParseFailure as exc:
-            # Some pages stayed failed after the retry budget: never published as a success. The count
-            # goes into the job's transition reason (never page content).
-            batch, error = None, f"{exc.code}:{len(exc.failed_pages)}"
-        finally:
-            progress.close()
+    staged_mode = _accepts_sinks(run)
+    sinks = StagingSinks(connect, project_id, lease) if staged_mode else None
+    batch, error = None, None
+    try:
+        if staged_mode:
+            jobs.set_stage(conn, project_id, lease, "parsing")
+        with _Heartbeat(connect, project_id, lease, ttl_seconds) as beat:
+            for attempt_of_staging in (1, 2):
+                extra = {}
+                if staged_mode:
+                    resume = ps.begin(conn, project_id, lease, identity_of(doc_sha, profile, operation_id, page_count))
+                    staged, staged_obs = ps.staged_summary(conn, job_id) if resume.resumed else ({}, False)
+                    if resume.resumed:
+                        log_op("parse_resumed", stage="parse", job_id=str(job_id), pages_already_staged=len(staged), pages_total=page_count)
+                    extra = {"page_sink": sinks.page, "run_sink": sinks.run, "staged": staged, "staged_any_observation": staged_obs}
+                try:
+                    batch = run(data, python=python, cancelled=beat.lost.is_set, document_id=str(doc_id),
+                                budget_ref=budget_ref or "unbudgeted", operation_id=str(operation_id), **extra)
+                    error = None
+                except InspectionError as exc:
+                    batch, error = None, exc.code
+                except PartialParseFailure as exc:
+                    # Some pages stayed failed after the retry budget: never published as a success. The count
+                    # goes into the job's transition reason (never page content).
+                    batch, error = None, f"{exc.code}:{len(exc.failed_pages)}"
+                except ps.StagingConflict:
+                    # a page came out different from what an earlier attempt stored: the stored pages cannot be trusted. Start again from page 0, once.
+                    n = ps.discard_staging(conn, job_id)
+                    log_alarm("parse_staging", "staging_conflict_restart", stage="parse", job_id=str(job_id), pages_discarded=n, attempt=attempt_of_staging)
+                    if attempt_of_staging == 1:
+                        continue
+                    batch, error = None, "staging_conflict"
+                except Exception as exc:  # noqa: BLE001 - a page write failed (already logged with the real class by the sink)
+                    if not staged_mode or is_infrastructure(exc) or isinstance(exc, jobs.LeaseLost):
+                        raise
+                    batch, error = None, "page_too_large" if str(exc) == "page_too_large" else f"page_write_failed:{type(exc).__name__}"
+                break
+    finally:
+        if sinks is not None:
+            sinks.close()
     if beat.lost.is_set() or error == "cancelled":
         if shutdown is not None and shutdown() and not beat.lost.is_set():
             # The worker is shutting down and its parser children are already cancelled and reaped (the run
@@ -321,6 +365,8 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
             jobs.finish(conn, project_id, lease, "queued", error)
             return ParseOutcome(job_id, "queued", error)
         return _fail(conn, project_id, lease, error)
+    if isinstance(batch, StagedParse):
+        return _finish_staged(conn, project_id, lease, store, batch, operation_id, page_count, connect, ttl_seconds)
     log_page_statuses(batch)
     if batch.quarantine_reason is not None:
         return _fail(conn, project_id, lease, "quarantined:" + batch.quarantine_reason)
@@ -332,8 +378,7 @@ def _execute(conn, project_id, lease, store, persist, max_pdf_bytes, connect, tt
     except Exception as exc:
         if is_infrastructure(exc):
             raise
-        # WHY it failed, without any document content: the exception class, and for a database error its SQLSTATE and constraint name. Until now
-        # the job only said "persist_failed" and the cause was lost (an 834-page parse that ran 7 minutes and then failed).
+        # WHY it failed, without any document content: the exception class, and for a database error its SQLSTATE and constraint name.
         try:
             diag = getattr(exc, "diag", None)
             log_error("persist_parse_result", type(exc).__name__, "persist_failed", stage="parse", job_id=str(job_id),

@@ -13,7 +13,7 @@ import unittest
 
 from lab_contracts.parse import PageStatus, ModelRevision, PageMapEntry, ParseManifest, ParseRequest, RenderSettings
 from lab_parser.batch_coverage import BatchLimits
-from lab_parser.batch_parse import PartialParseFailure, parse_in_batches
+from lab_parser.batch_parse import PartialParseFailure, StagedParse, parse_in_batches
 from lab_parser.isolation import InspectionError
 from lab_parser.unstructured_runner import LOST_TEXT_DIAGNOSTIC
 from lab_parser.normalize import ADAPTER_REVISION, DisplayFrame, UnstructuredParser, UnstructuredProfile
@@ -344,6 +344,101 @@ class BatchParseTests(unittest.TestCase):
         for bad in (-1, 6, True, 1.5):
             with self.subTest(bad), self.assertRaises(InspectionError):
                 self.parse(Recorder(), retry_rounds=bad)
+
+
+class Sinks:
+    """What the worker stores: pages and runs as they become final. Thread-safe (batches run in threads)."""
+    def __init__(self, fail_on_page=None):
+        self.pages, self.runs, self.lock, self.fail_on_page = [], [], threading.Lock(), fail_on_page
+
+    def page(self, index, status, diagnostics, evidence, observations, run_key=None):
+        if self.fail_on_page == index:
+            raise RuntimeError("the page write failed")
+        with self.lock:
+            self.pages.append((index, status, list(diagnostics), len(evidence), len(observations), run_key))
+
+    def run(self, key, batch):
+        with self.lock:
+            self.runs.append((key, len(batch.artifacts), batch.result.raw_result_refs))
+
+
+class SinkModeTests(unittest.TestCase):
+    def setUp(self):
+        self.pdf = build_pdf([{"mediabox": (0, 0, 595, 842)}] * PAGES)
+
+    def parse(self, run, sinks, **kw):
+        return parse_in_batches(self.pdf, document_id="doc-batch", budget_ref="b", operation_id="op", run_batch=run, page_sink=sinks.page, run_sink=sinks.run, **kw)
+
+    def test_every_page_and_every_run_goes_to_the_sinks_and_nothing_is_merged(self):
+        sinks = Sinks()
+        out = self.parse(Recorder(), sinks)
+        self.assertIsInstance(out, StagedParse)
+        self.assertEqual(sorted(p[0] for p in sinks.pages), list(range(PAGES)))
+        self.assertTrue(all(p[1] == "ok" and p[3] == 1 and p[4] == 1 for p in sinks.pages))       # content reached the sink: 1 unit, 1 observation each
+        self.assertEqual(len(sinks.runs), 3)                                                       # one per batch, with its raw outputs
+        self.assertEqual({p[5] for p in sinks.pages}, {k for k, _, _ in sinks.runs})               # every page says which run it came from
+        self.assertTrue(all(r[1] >= 2 for r in sinks.runs))
+        self.assertEqual(out.pages, PAGES)
+        self.assertEqual(out.statuses, {p: "ok" for p in range(PAGES)})
+        self.assertFalse(hasattr(out, "evidence"))
+
+    def test_a_retried_page_is_sunk_once_when_it_settles_and_a_failed_batch_is_not_sunk(self):
+        def behaviour(pages, nth):
+            if pages == tuple(range(10, 20)) and nth == 1:
+                raise InspectionError("timeout")
+        sinks = Sinks()
+        self.parse(Recorder(behaviour), sinks)
+        self.assertEqual(sorted(p[0] for p in sinks.pages), list(range(PAGES)))                    # each page exactly once
+        self.assertEqual(len(sinks.pages), PAGES)
+
+    def test_a_page_that_stays_failed_is_never_sunk_and_the_job_fails_as_before(self):
+        def behaviour(pages, nth):
+            if set(pages) & set(range(10, 20)):
+                raise InspectionError("child_failed")
+        sinks = Sinks()
+        with self.assertRaises(PartialParseFailure) as ctx:
+            self.parse(Recorder(behaviour), sinks, retry_rounds=2)
+        self.assertEqual(ctx.exception.failed_pages, tuple(range(10, 20)))
+        self.assertFalse({p[0] for p in sinks.pages} & set(range(10, 20)))
+        self.assertEqual(sorted(p[0] for p in sinks.pages), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 20])   # the good pages were stored: a retry of the job resumes from them
+
+    def test_resume_skips_a_batch_whose_pages_are_all_staged_and_reruns_a_partly_staged_one(self):
+        staged = {p: ("ok", []) for p in range(0, 10)}                    # batch 0 complete
+        staged.update({p: ("ok", []) for p in range(10, 15)})             # batch 1 only half
+        run = Recorder()
+        sinks = Sinks()
+        out = self.parse(run, sinks, staged=staged, staged_any_observation=True)
+        self.assertNotIn(tuple(range(0, 10)), run.calls)                  # not run again
+        self.assertIn(tuple(range(10, 20)), run.calls)                    # run again as a whole
+        self.assertIn((20,), run.calls)
+        self.assertEqual(sorted(p[0] for p in sinks.pages), list(range(10, 21)))
+        self.assertEqual(out.statuses, {p: "ok" for p in range(PAGES)})   # the resumed pages are part of the answer
+
+    def test_progress_counts_the_resumed_pages_too(self):
+        seen = []
+        self.parse(Recorder(), Sinks(), staged={p: ("ok", []) for p in range(0, 10)}, on_progress=lambda d, t: seen.append(d))
+        self.assertEqual(max(seen), PAGES)
+
+    def test_a_sink_that_raises_stops_the_parse_with_its_exception(self):
+        with self.assertRaises(RuntimeError):
+            self.parse(Recorder(), Sinks(fail_on_page=3))
+
+    def test_the_whole_document_text_loss_check_still_applies_in_sink_mode(self):
+        def behaviour(pages, nth):
+            return BatchParseTests.suspect(fake_batch(pages, "doc-batch", f"op{nth}", "b", blank=set(pages)), set(pages))
+        with self.assertRaises(InspectionError) as ctx:
+            self.parse(Recorder(behaviour), Sinks())
+        self.assertEqual(ctx.exception.code, "text_extraction_empty")
+        # with earlier staged pages that had observations the same blank batches are not a total loss
+        def lost_tail(pages, nth):
+            if pages == (20,):
+                return BatchParseTests.suspect(fake_batch(pages, "doc-batch", f"op{nth}", "b", blank=set(pages)), set(pages))
+        out = self.parse(Recorder(lost_tail), Sinks(), staged={p: ("ok", []) for p in range(0, 20)}, staged_any_observation=True)
+        self.assertEqual(out.statuses[20], "needs_review")
+
+    def test_one_sink_alone_is_refused(self):
+        with self.assertRaises(InspectionError):
+            parse_in_batches(self.pdf, document_id="d", budget_ref="b", operation_id="op", run_batch=Recorder(), page_sink=Sinks().page)
 
 
 if __name__ == "__main__":
