@@ -482,6 +482,17 @@ class PresenceAnywhereTests(unittest.TestCase):
         self.assertEqual(expand_to_sentences(span, answer), answer)                           # two initials do not split the sentence
         self.assertEqual(span_check(fact, expand_to_sentences(span, answer), "", answer), ("ok", ""))
 
+    def test_a_name_colon_value_list_still_catches_the_swapped_values(self):
+        # PM-REVIEW on #208: the value after a colon belongs to the name before it, in the same sentence
+        fact = "PreSET is 19% lower than Baseline"
+        for answer in ("PreSET: 10% lower; Flip-N-Write: 19% lower",
+                       "Latency vs Baseline - PreSET: 10%. Flip-N-Write: 19%.",
+                       "PreSET 10% lower, Flip-N-Write 19% lower",
+                       "PreSET is 10% lower than Baseline; Flip-N-Write is 19% lower"):
+            self.assertEqual(span_check(fact, answer, "", answer), ("missing", "number_other_entity"), answer)
+        right = "PreSET: 19% lower; Flip-N-Write: 10% higher"
+        self.assertEqual(span_check(fact, right, "", right), ("ok", ""))
+
     def test_a_correct_downgrade_reason_is_kept_per_fact_for_the_page(self):
         helper = ExactScoresFromAHandWrittenVerdictTests()
         out = helper.derive(["PreSET is 19% lower than Baseline", "Flip-N-Write is 10% higher than Baseline"],

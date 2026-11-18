@@ -283,8 +283,36 @@ def _subjects(toks: list, lo: int, hi: int) -> set[str]:
     return {toks[j][0] for j in range(max(0, lo), min(len(toks), hi)) if _named(toks[j], j == 0) and not _compared_to(toks, j)}
 
 
-def _clauses(span: str) -> list[list[tuple[str, str]]]:
-    return [c for c in (_tokens(part) for part in _CLAUSE_BREAK.split(span)) if c]
+def _clauses(text: str) -> list[tuple[list[tuple[str, str]], int, bool]]:
+    """[(tokens, sentence index, the clause follows a colon)] for every clause of ``text``; the sentence index lets a clause that names nobody look back
+    only inside its own sentence, the colon flag marks the "Name: value" shape."""
+    out = []
+    for si, sentence in enumerate(_sentences(text) or [text]):
+        last = 0
+        for m in list(_CLAUSE_BREAK.finditer(sentence)) + [None]:
+            end = m.start() if m else len(sentence)
+            toks = _tokens(sentence[last:end])
+            if toks:
+                after_colon = last > 0 and sentence[last - 1] == ":"
+                out.append((toks, si, after_colon))
+            if m:
+                last = m.end()
+    return out
+
+
+def _colon_owner(clauses: list, ci: int) -> set[str]:
+    """The entity a "Name: 19% lower" value belongs to: for a clause that names nobody and follows a colon, the entities of the nearest preceding clause
+    of the same sentence that names one. Only after a colon: "(Statistical Science, 1986)" is a citation, not a value of "Science"."""
+    toks, si, after_colon = clauses[ci]
+    if not after_colon:
+        return set()
+    for k in range(ci - 1, -1, -1):
+        if clauses[k][1] != si:
+            break
+        owners = _subjects(clauses[k][0], 0, len(clauses[k][0]))
+        if owners:
+            return owners
+    return set()
 
 
 def _polarity(toks: list, i: int) -> set[str]:
@@ -309,7 +337,8 @@ def span_check(fact: str, span: str, question: str = "", answer: str = "") -> tu
     * at least one of the fact's subjects (named entities within 8 tokens of a number, either side, not the reference of a comparison such as
       "than Baseline") must be in the span or the question, else ("missing", "entity_absent");
     * BINDING, used only to catch a number attached to a DIFFERENT entity (the swapped values): a number in the span must not sit in a clause (broken at
-      , ; : . ( ) while whereas but) that names an entity but none of those subjects (a clause that names nobody is fine); a number that is
+      , ; : . ( ) while whereas but) that names an entity but none of those subjects (a clause that names nobody is fine, except the value after a colon, "PreSET: 10% lower; Flip-N-Write: 19% lower", which belongs to the entity named
+      before the colon in the same sentence); a number that is
       not in the span but elsewhere in the answer is bound in the answer's own clauses (some clause holding it must belong to one of the subjects);
       a number only the question names is not bound at all;
     * a direction word within 3 tokens of the bound number that is the opposite of the fact's (and none of the same) gives ("contradicted", ...).
@@ -348,15 +377,16 @@ def span_check(fact: str, span: str, question: str = "", answer: str = "") -> tu
         else:
             continue                            # named only by the question: nothing to bind or contradict
         passed = False
-        for ci, clause in enumerate(clauses):
+        for ci, (clause, _si, _colon) in enumerate(clauses):
             for ai in [i for i, (t, _) in enumerate(clause) if t == value]:
                 owners = _subjects(clause, 0, len(clause))
                 if not subjects:
                     entity_ok = True
                 elif owners:
                     entity_ok = bool(owners & subjects)
-                else:        # a clause that names nobody ("60%.", "1986)", "is 10% higher"): nothing in it can be attached to a different entity
-                    entity_ok = True
+                else:        # a clause that names nobody ("60%.", "1986)", "is 10% higher"): nothing in it can be attached to a different entity ...
+                    inherited = _colon_owner(clauses, ci)          # ... unless it is the value of a "Name: 19% lower" list item, then it belongs to Name
+                    entity_ok = not inherited or bool(inherited & subjects)
                 here = _polarity(clause, ai)
                 opposite = bool(direction) and bool(here) and not (direction & here)
                 if entity_ok and not opposite:
