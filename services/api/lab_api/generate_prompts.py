@@ -178,13 +178,21 @@ class ParsedReply:
     facts: tuple[str, ...]
 
 
+def _spread(n_items: int, wanted: int) -> list[int]:
+    """``wanted`` positions out of ``n_items``, evenly spaced and in order (the first is always 0): 30 of 834 are 0, 27, 55, ... , never "the first 30"."""
+    return [(i * n_items) // wanted for i in range(wanted)]
+
+
 def select_pages(usable_text_pages: Sequence[int], needed: int) -> list[int]:
-    """Deterministic round-robin over the clean text pages: page order, repeating from the first page when more
-    questions are needed than pages (each repeat is a new call for the same page; duplicates are dropped by hash)."""
+    """Deterministic and SPREAD over the clean text pages (Issue #205, the 834-page walk-through): with fewer questions than pages, evenly spaced pages from
+    the first to the last third of the document, not the first few pages (30 questions of an 834-page manual were all from its first 24 pages: title, contents
+    and preface). When more questions are needed than pages, whole passes over the pages in order first (each repeat is a new call for the same page;
+    duplicates are dropped by hash), then an even spread for the remainder."""
     pages = sorted(set(usable_text_pages))
     if needed <= 0 or not pages:
         return []
-    return [pages[i % len(pages)] for i in range(needed)]
+    full, rest = divmod(needed, len(pages))
+    return pages * full + [pages[i] for i in _spread(len(pages), rest)]
 
 
 _EVIDENCE_TAG = re.compile(r"<\s*/?\s*evidence", re.IGNORECASE)
@@ -282,13 +290,26 @@ class CrossReply:
 
 
 def select_page_pairs(usable_text_pages: Sequence[int], needed: int) -> list[tuple[int, int]]:
-    """Deterministic page pairs (a < b): closest pages first, then in page order, round-robin when more questions are
-    needed than pairs. Fewer than two clean text pages give no pair (never a pair of the same page)."""
+    """Deterministic page pairs (a < b), SPREAD over the document: closest pairs first (distance 1, then 2, ...), and within one distance an even spread over
+    the document instead of the first pairs (Issue #205). Round-robin passes when more questions are needed than pairs. Fewer than two clean text pages
+    give no pair (never a pair of the same page)."""
     pages = sorted(set(usable_text_pages))
-    pairs = sorted(((a, b) for i, a in enumerate(pages) for b in pages[i + 1:]), key=lambda ab: (ab[1] - ab[0], ab[0]))
-    if needed <= 0 or not pairs:
+    if needed <= 0 or len(pages) < 2:
         return []
-    return [pairs[i % len(pairs)] for i in range(needed)]
+    by_distance: list[list[tuple[int, int]]] = []
+    for d in range(1, len(pages)):
+        by_distance.append([(pages[i], pages[i + d]) for i in range(len(pages) - d)])
+    total = sum(len(g) for g in by_distance)
+    full, rest = divmod(needed, total)
+    ordered = [pair for g in by_distance for pair in g]
+    out = ordered * full
+    for g in by_distance:
+        if rest <= 0:
+            break
+        take = min(rest, len(g))
+        out.extend(g[i] for i in _spread(len(g), take))
+        rest -= take
+    return out
 
 
 def shown_by_page(units: Sequence[tuple[str, str, int]], page_chars: int = DEFAULT_PAGE_CHARS) -> list[tuple[str, str, int]]:

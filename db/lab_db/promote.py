@@ -138,8 +138,7 @@ def promote_parse_result(conn: psycopg.Connection, project_id: uuid.UUID, benchm
                    for u in units for r in u.regions):
                 report.skipped_pages[page_index] = "evidence_region_outside_its_page_or_document"
                 continue
-            for unit in units:
-                _write_unit(conn, project_id, document_version_id, parse_job_id, page_index, unit)
+            _write_units(conn, project_id, document_version_id, parse_job_id, page_index, units)
             report.evidence_units += len(units)
             report.promoted_pages.append(page_index)
 
@@ -163,6 +162,46 @@ def promote_parse_result(conn: psycopg.Connection, project_id: uuid.UUID, benchm
              f"rule={PROMOTION_RULE} pages={report.pages_total} promoted={len(report.promoted_pages)} "
              f"skipped={len(report.skipped_pages)} units={report.evidence_units}", op_id))
         return report
+
+
+def _write_units(conn, project_id, document_version_id, parse_job_id, page_index, units: list) -> None:
+    """Insert the evidence units of ONE page with their regions and their source rows for THIS job, unless a unit already exists; the same result as
+    ``_write_unit`` per unit, in a handful of statements per page instead of about four per unit (Issue #205: an 834-page manual has 78,000 units and the one
+    request that promotes them took 91 s). One advisory lock per document version for the whole promotion (concurrent promotions are serialised as before)."""
+    if not units:
+        return
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("evidence:" + str(document_version_id),))
+    existing = {key: (uid, raw) for key, uid, raw in conn.execute(
+        "SELECT evidence_key, id, raw_content FROM evidence_units WHERE document_version_id = %s AND evidence_key = ANY(%s)",
+        (document_version_id, [u.evidence_id for u in units])).fetchall()}
+    new_units, unit_rows, region_rows, source_rows = [], [], [], []
+    for unit in units:
+        found = existing.get(unit.evidence_id)
+        if found is not None:
+            # Same id = same raw artifact, page and pointer (the id is a hash of them): it must be the same content.
+            if found[1] != unit.raw_content:
+                raise PromoteError("evidence_key_collision_with_different_content")
+            source_rows.append((found[0], project_id, parse_job_id, unit.evidence_id, page_index))      # provenance for this job too
+            continue
+        unit_id = uuid.uuid4()
+        unit_rows.append((unit_id, project_id, document_version_id, unit.evidence_id, unit.raw_content, unit.normalized_content, unit.extractor_revision,
+                          unit.ocr_confidence))
+        for ordinal, region in enumerate(unit.regions):
+            x0, y0, x1, y1 = region.bbox
+            region_rows.append((unit_id, ordinal, document_version_id, region.page_index, x0, y0, x1, y1,
+                                region.kind.value if hasattr(region.kind, "value") else str(region.kind), region.quote))
+        source_rows.append((unit_id, project_id, parse_job_id, unit.evidence_id, page_index))
+    with conn.cursor() as cur:
+        if unit_rows:
+            cur.executemany(
+                "INSERT INTO evidence_units (id, project_id, document_version_id, evidence_key, raw_content, normalized_content, extractor_revision, ocr_confidence) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", unit_rows)
+            cur.executemany(
+                "INSERT INTO evidence_regions (evidence_unit_id, ordinal, document_version_id, page_index, x0, y0, x1, y1, kind, quote) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", region_rows)
+        cur.executemany(
+            "INSERT INTO evidence_unit_sources (evidence_unit_id, project_id, parse_job_id, source_evidence_id, page_index) VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT DO NOTHING", source_rows)
 
 
 def _write_unit(conn, project_id, document_version_id, parse_job_id, page_index, unit: EvidenceUnit) -> None:
