@@ -209,6 +209,47 @@ class PromoteRealDbTests(PromoteFixtures, FreshDatabase):
             self.promote(project, bench, job2, owner)                       # the pin never moves (D1)
         self.assertEqual(self.counts(doc), before)
 
+    def test_promotion_writes_a_page_in_a_handful_of_statements_not_four_per_unit(self):
+        """Issue #205, the 834-page walk-through: 78,000 units took 91 s in one request, about four round trips per unit. A page is now a few statements."""
+        from lab_db import promote as promote_module
+        from lab_contracts.benchmark import EvidenceUnit
+        from lab_contracts.source import RegionKind, SourceRegion
+        sha = "a" * 64
+        units = [EvidenceUnit(evidence_id=f"e-{k:04d}", regions=[SourceRegion(document_id="d", document_sha256=sha, page_index=2, bbox=(0.1, 0.3 + k * 0.001, 0.9, 0.31 + k * 0.001),
+                                                                               kind=RegionKind.text, quote=None)],
+                              raw_content=f"unit {k}", normalized_content=f"unit {k}", extractor_revision="x", ocr_confidence=None, asset_refs=[]) for k in range(94)]
+        project, owner, doc, sha0 = self.seed()
+        job = self.parsed(project, owner, doc, sha0)            # a finished parse job: the source rows reference its stored result
+        executed = []
+
+        class Counting:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def execute(self, sql, *a, **k):
+                executed.append(sql)
+                return self.inner.execute(sql, *a, **k)
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        with self.connect() as c:
+            before = c.execute("SELECT count(*) FROM evidence_units WHERE document_version_id = %s", (doc,)).fetchone()[0]
+            promote_module._write_units(Counting(c), project, doc, job, 2, units)
+            self.assertEqual(c.execute("SELECT count(*) FROM evidence_units WHERE document_version_id = %s", (doc,)).fetchone()[0], before + 94)
+            self.assertEqual(c.execute("SELECT count(*) FROM evidence_regions WHERE document_version_id = %s", (doc,)).fetchone()[0], before + 94)
+            self.assertEqual(c.execute("SELECT count(*) FROM evidence_unit_sources s JOIN evidence_units u ON u.id = s.evidence_unit_id "
+                                       "WHERE u.document_version_id = %s", (doc,)).fetchone()[0], before + 94)
+            self.assertLessEqual(len(executed), 3)                                          # the lock, the existence lookup (the inserts are executemany)
+            executed.clear()
+            promote_module._write_units(Counting(c), project, doc, job, 2, units)          # again: nothing new, provenance only, no duplicate rows
+            self.assertEqual(c.execute("SELECT count(*) FROM evidence_units WHERE document_version_id = %s", (doc,)).fetchone()[0], before + 94)
+            self.assertEqual(c.execute("SELECT count(*) FROM evidence_unit_sources s JOIN evidence_units u ON u.id = s.evidence_unit_id "
+                                       "WHERE u.document_version_id = %s", (doc,)).fetchone()[0], before + 94)
+            changed = [units[0].model_copy(update={"raw_content": "different"})]
+            with self.assertRaises(PromoteError):                                           # the same id with other content is still refused
+                promote_module._write_units(Counting(c), project, doc, job, 2, changed)
+
     def test_two_benchmarks_over_the_same_parse_job_share_the_evidence_units(self):
         project, owner, doc, sha = self.seed()
         job = self.parsed(project, owner, doc, sha)
