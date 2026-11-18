@@ -171,6 +171,8 @@ APPEND_ONLY_TABLES = ("audit_events", "operation_results", "benchmark_transition
                       "embedding_spaces", "vector_items", "vector_item_regions", "vector_index_revisions",
                       "vector_queries", "parse_jobs", "parse_results", "parse_page_results", "generate_jobs", "llm_calls", "gold_answers", "question_validations", "question_exclusions", "external_submissions", "submission_source_matches",
                       "evidence_unit_sources", "benchmark_parse_sources")
+# Mutable on purpose: the parse worker deletes a finished, failed or abandoned job's staging (migration 0025); everything else here is never deleted.
+DELETABLE_TABLES = ("parse_staging", "parse_staging_pages", "parse_staging_runs")
 READ_ONLY_TABLES = ("schema_migrations", "benchmark_transitions_allowed", "job_transitions_allowed")
 
 
@@ -193,6 +195,8 @@ def grant_app_privileges(conn: psycopg.Connection, role: str) -> None:
             conn.execute(sql.SQL("GRANT {} ON {} TO {}").format(sql.SQL(privs), sql.Identifier(t), ident))
         conn.execute(sql.SQL("GRANT SELECT ON active_questions TO {}").format(ident))   # a view: not in pg_tables
         conn.execute(sql.SQL("GRANT DELETE ON artifacts TO {}").format(ident))  # staged clean-up only (trigger-guarded)
+        for t in DELETABLE_TABLES:
+            conn.execute(sql.SQL("GRANT DELETE ON {} TO {}").format(sql.Identifier(t), ident))
         conn.execute(sql.SQL("GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO {}").format(ident))
 
 

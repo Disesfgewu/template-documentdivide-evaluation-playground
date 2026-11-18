@@ -146,7 +146,16 @@ def estimate_judge(conn: psycopg.Connection, settings: Settings, project_id: uui
                      "AND failure_reason IS NULL", (run_id,)).fetchone()[0]
     uploaded = conn.execute("SELECT 1 FROM runs r JOIN method_revisions m ON m.id = r.method_revision_id WHERE r.id = %s "
                             "AND m.execution_mode = 'offline_file'", (run_id,)).fetchone() is not None
-    # an uploaded file: the judge sees at most 10 submitted passages of 2000 characters (up to 3 bytes each) and a 4000-character answer
-    shown = (10 * 2000 + 4000) * 3 if uploaded else _largest_pages_bytes(conn, project_id, benchmark_id)
-    per_call = _bound_worst(settings, len(JUDGE_SYSTEM.encode("utf-8")) + JUDGE_FIXED_BYTES + shown, max_output_tokens, model)
+    base = len(JUDGE_SYSTEM.encode("utf-8")) + JUDGE_FIXED_BYTES
+    if uploaded:
+        # An uploaded file (Issue #205, the 834-page walk-through): the judge sees ONLY the system's own text of the quotes that were found, each cut at
+        # MAX_HIT_CHARS characters (up to 3 bytes each), and that text is in the database, so the bound uses the real size of each submission's passages
+        # instead of an assumed 72 KB per call (which put 24 answers at 7.3 USD, over the 5 USD ceiling, at 3/15 USD per MTok).
+        rows = conn.execute(
+            "SELECT s.id, coalesce(sum(LEAST(octet_length(m.matched_text), %s)) FILTER (WHERE m.text_found), 0) FROM submissions s "
+            "LEFT JOIN submission_source_matches m ON m.submission_id = s.id WHERE s.run_id = %s AND s.status = 'accepted' AND s.answer_status = 'answered' "
+            "AND s.failure_reason IS NULL GROUP BY s.id", (MAX_HIT_CHARS * 3, run_id)).fetchall()
+        total = sum(_bound_worst(settings, base + int(shown), max_output_tokens, model) for _, shown in rows)
+        return _result("judge", len(rows), total, {"bound": True, **_model_info(settings, model)})
+    per_call = _bound_worst(settings, base + _largest_pages_bytes(conn, project_id, benchmark_id), max_output_tokens, model)
     return _result("judge", int(n), int(n) * per_call, {"bound": True, **_model_info(settings, model)})

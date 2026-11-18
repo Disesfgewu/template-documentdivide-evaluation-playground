@@ -350,6 +350,23 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
             self.assertIn("recall_at_k", {m["metric_name"] for m in res["metrics"]})
 
 
+    def test_the_judge_estimate_of_an_uploaded_file_is_a_real_bound_not_a_flat_guess(self):
+        """Walk-through at 834 pages: the flat 72 KB per call guess put 24 answers at 7.3 USD (over the 5 USD ceiling). The bound now uses the real size of
+        each submission's found passages, and it must still be at least what the real prompts cost in the worst case."""
+        from lab_api.run_estimate import JUDGE_FIXED_BYTES
+        from lab_db.generation import worst_case_micros
+        project, owner = self.frozen()
+        run = self.upload(owner, project, self.file(owner, project)).json()["run_id"]
+        est = self.get(owner, project, f"{BASE}/estimate?phase=judge&run_id={run}")
+        self.assertEqual(est.status_code, 200, est.text)
+        estimated = est.json()["estimated_max_micros"]
+        prompts, _, _ = self.judge_with_capture(owner, project, run)
+        real = sum(worst_case_micros(len((p["system"] + p["user"]).encode("utf-8")), 500, 3_000_000, 15_000_000) for p in prompts)
+        self.assertEqual(est.json()["calls"], len(prompts))
+        self.assertGreaterEqual(estimated, real)                                             # still a bound
+        flat = len(prompts) * worst_case_micros(len(prompts[0]["system"].encode()) + JUDGE_FIXED_BYTES + (10 * 2000 + 4000) * 3, 500, 3_000_000, 15_000_000)
+        self.assertLess(estimated, flat)                                                      # and much tighter than the old flat guess
+
     # --- Issue #197: gold evidence is the units that support each fact; a located quote beats an invented one; a changed number is not "stated" ---
 
     def score_of(self, evaluation, key, metric):

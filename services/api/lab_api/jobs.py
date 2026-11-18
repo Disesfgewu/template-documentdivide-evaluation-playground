@@ -99,10 +99,15 @@ def _get_job(conn: psycopg.Connection, actor_id: uuid.UUID, job_id: uuid.UUID) -
 
     progress = None
     if kind == "document.parse":
-        # pages whose first attempt is over / pages in the document, written by the parse worker after every batch (Issue #205); a hint only
-        row = conn.execute("SELECT pages_done, pages_total, updated_at FROM parse_progress WHERE project_id = %s AND job_id = %s",
-                           (project_id, job_id)).fetchone()
-        if row is not None:
+        # pages stored / pages in the document (Issue #205): counted from the staged pages while the job runs, from the final pages after it succeeded;
+        # a hint only, the job status stays the truth. None before the first page is stored.
+        row = conn.execute(
+            "SELECT (SELECT count(*) FROM parse_staging_pages p WHERE p.job_id = s.job_id), (s.identity->>'pages_total')::int, s.touched_at "
+            "FROM parse_staging s WHERE s.project_id = %s AND s.job_id = %s", (project_id, job_id)).fetchone()
+        if row is None and status == "succeeded":
+            row = conn.execute("SELECT count(*), count(*), max(r.created_at) FROM parse_page_results p JOIN parse_results r ON r.job_id = p.job_id "
+                               "WHERE p.project_id = %s AND p.job_id = %s", (project_id, job_id)).fetchone()
+        if row is not None and row[1]:
             progress = {"pages_done": int(row[0]), "pages_total": int(row[1]),
                         "updated_at": row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2])}
     return {
