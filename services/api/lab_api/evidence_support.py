@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from lab_api.validate_questions import MIN_FACT_COVERAGE, _NUMBER, _norm, content_tokens
+from lab_api.validate_questions import MIN_FACT_COVERAGE, _NUMBER, _norm, canonical_number, grounding_tokens
 
 MAX_UNITS_PER_FACT = 4
 HEADER_BAND = 0.08          # a unit that lies wholly inside the top / bottom 8 % of the page is a running header / footer
@@ -22,7 +22,7 @@ class NotAttributable(ValueError):
 
 
 def _numbers(text: str) -> set[str]:
-    return {n.replace(",", "") for n in _NUMBER.findall(_norm(text))}
+    return {canonical_number(n) for n in _NUMBER.findall(_norm(text))}
 
 
 def _bare_number(text: str) -> bool:
@@ -96,7 +96,7 @@ def _rows(cands: list) -> list[list]:
 
 def support_units(statement: str, units: Sequence, exclude: frozenset[str] = frozenset()) -> list:
     """The fewest units (in reading order) that together carry ``statement``, or raise ``NotAttributable``."""
-    words = set(content_tokens(statement))
+    words = set(grounding_tokens(statement))
     numbers = _numbers(statement)
     if not words and not numbers:
         raise NotAttributable("empty_fact")
@@ -105,7 +105,7 @@ def support_units(statement: str, units: Sequence, exclude: frozenset[str] = fro
         if u.evidence_id in exclude:
             continue
         text = u.normalized_content
-        candidates.append((pos, u, words & set(content_tokens(text)), numbers & _numbers(text)))
+        candidates.append((pos, u, words & set(grounding_tokens(text)), numbers & _numbers(text)))
     groups = _rows(candidates)
     chosen: list = []          # groups, each one slot of MAX_UNITS_PER_FACT
     got_words: set[str] = set()

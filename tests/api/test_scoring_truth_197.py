@@ -76,6 +76,27 @@ class TableManualTests(unittest.TestCase):
         self.assertTrue({"t2-r1a", "t2-r1b"} <= {u.evidence_id for u in got})
         self.assertTrue(all(u.evidence_id.startswith("t2-") for u in got))
 
+    def test_a_sentence_fact_with_function_words_and_a_glued_unit_is_attributable(self):
+        # page 1 rows: ("Load power", "900.0", "W"); the model writes a sentence, glues the unit and drops the decimal zero (Issue #215)
+        for fact in ("The mean load power for the unit is 900W", "Load power is 900 W", "The load power of the unit is 900.0 W"):
+            got = support_units(fact, self.pages[1], self.boiler)
+            self.assertTrue({"t1-r0a", "t1-r0b"} <= {u.evidence_id for u in got}, fact)
+
+    def test_a_changed_number_is_still_not_attributable(self):
+        for fact in ("The load power is 90 W", "The load power is 900.5 W", "The load power is 9000 W"):
+            with self.assertRaises(NotAttributable, msg=fact):
+                support_units(fact, self.pages[1], self.boiler)
+
+    def test_the_grounding_check_reads_numbers_and_units_the_same_way(self):
+        from lab_api.validate_questions import canonical_number, code_checks, grounding_tokens
+        self.assertEqual([canonical_number(n) for n in ("900.0", "94.20", "1,000", "100", "0.50")], ["900", "94.2", "1000", "100", "0.5"])
+        self.assertEqual(grounding_tokens("900W at 230V"), ["900", "230"])
+        shown = "Input voltage 230 V Load power 900.0 W Efficiency 94.2 %"
+        self.assertTrue(code_checks(shown, "", ["The load power for the unit is 900W"])["passed"])
+        self.assertTrue(code_checks(shown, "", ["when the input voltage is 230 V"])["passed"])            # a confusable condition
+        self.assertFalse(code_checks(shown, "", ["The load power is 90 W"])["passed"])                   # a changed number still fails
+        self.assertFalse(code_checks(shown, "", ["The cooling fan speed is configurable"])["passed"])    # a fact the cells do not carry still fails
+
     def test_a_running_header_that_drifted_out_of_the_band_is_still_furniture(self):
         pages = {p: [unit(f"d{p}-hdr", "Acme Power Manual rev 7", p, (0.1, 0.10, 0.9, 0.12)), unit(f"d{p}-b", f"Section {p} text about voltage", p)]
                  for p in range(1, 11)}

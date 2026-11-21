@@ -304,6 +304,9 @@ def _derive_confusable(reply: ConfusableReply, answer_units: Sequence[EvidenceUn
     return question, semantic, TextualAnswer(question_id=qid, checks=[]), source
 
 
+MAX_REJECTIONS_KEPT = 400
+
+
 def _content_words(text: str) -> set[str]:
     """The content tokens of ``validate_questions.content_tokens`` (words of 3+ letters/digits, CJK character bigrams)."""
     from lab_api.validate_questions import content_tokens
@@ -330,6 +333,19 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
         ordinal = conn.execute("SELECT COALESCE(max(ordinal) + 1, 0) FROM questions WHERE benchmark_id = %s",
                                (benchmark_id,)).fetchone()[0]
         stats = GenerationStats()
+        # what was rejected and why, owner-local (migration 0028): only the last generation job's rows are kept, at most MAX_REJECTIONS_KEPT of them
+        conn.execute("DELETE FROM generation_rejections WHERE benchmark_id = %s AND job_id <> %s", (benchmark_id, job_id))
+        kept = [0]
+
+        def reject(kind: str, call_id: str, reason: str, question: str, facts, units) -> None:
+            if kept[0] >= MAX_REJECTIONS_KEPT:
+                return
+            kept[0] += 1
+            conn.execute(
+                "INSERT INTO generation_rejections (id, project_id, benchmark_id, job_id, call_id, kind, reason, question, facts, shown) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (uuid.uuid4(), project_id, benchmark_id, job_id, call_id, kind, reason[:200], question, Jsonb(list(facts)),
+                 Jsonb([[u.evidence_id, u.normalized_content[:400]] for u in units])))
 
         def accept(question, semantic, textual, source, units) -> str:
             """Validate and write one derived question: 'written', 'duplicate' or 'invalid' (never raises on bad input); the reason of an
@@ -390,6 +406,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 # ... the confusion_reason must refer to something that is really in B (weak check: it shares a content word) ...
                 reason_ok = bool(_content_words(reply.confusion_reason) & _content_words(text_b))
                 # ... and only the B units that actually overlap the question or the facts are distractors (not every unit of B)
+                original_d_units = d_units
                 d_units = select_distractors(d_units, reply.question, reply.facts)
                 if not grounded or not condition_ok or b_also_supports or not reason_ok or not d_units:
                     stats.invalid += 1
@@ -398,12 +415,18 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                                          (not d_units, "no_overlapping_distractor_unit")):
                         if failed:
                             stats.drop("confusable:check:" + code)
+                    reject("confusable", row["call_id"],
+                           ",".join(code for failed, code in ((not grounded, "answer_or_fact_not_grounded"), (not condition_ok, "condition_not_grounded"),
+                                                              (b_also_supports, "b_supports_a_fact"), (not reason_ok, "reason_not_in_b"),
+                                                              (not d_units, "no_overlapping_distractor_unit")) if failed),
+                           reply.question, [*reply.facts, f"condition: {reply.disambiguating_condition}", f"reason: {reply.confusion_reason}"], a_units + original_d_units)
                     continue
                 try:
                     derived = _derive_confusable(reply, a_units, d_units, ordinal, boiler)
                 except NotAttributable:
                     stats.invalid += 1
                     stats.drop("confusable:check:fact_not_attributable")
+                    reject("confusable", row["call_id"], "fact_not_attributable", reply.question, reply.facts, a_units)
                     continue
                 except Exception:
                     stats.invalid += 1
@@ -438,12 +461,14 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 if not all(code_checks(texts[src], "", [st])["passed"] for st, src in reply.facts):
                     stats.invalid += 1
                     stats.drop("cross_page:check:fact_not_in_its_page")
+                    reject("cross_page", row["call_id"], "fact_not_in_its_page", reply.question, [f"{src}: {st}" for st, src in reply.facts], a_units + b_units)
                     continue
                 try:
                     derived = _derive_cross(reply, shown, ordinal, boiler)
                 except NotAttributable:
                     stats.invalid += 1
                     stats.drop("cross_page:check:fact_not_attributable")
+                    reject("cross_page", row["call_id"], "fact_not_attributable", reply.question, [f"{src}: {st}" for st, src in reply.facts], a_units + b_units)
                     continue
                 except Exception:
                     stats.invalid += 1
@@ -482,6 +507,7 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                 except NotAttributable:
                     stats.invalid += 1
                     stats.drop("general:check:fact_not_attributable")
+                    reject("general", row["call_id"], "fact_not_attributable", reply.question, reply.facts, units)
                     continue
                 except Exception:
                     stats.invalid += 1
