@@ -38,6 +38,55 @@ BODY = ["PreSET's access latency is 19% lower than the Baseline.",
         "Table 3 lists the simulated system configuration and the PCM timing parameters."]
 
 
+def table_page(page, rows):
+    """A page of the owner's table-heavy manual (Issue #212): a column-header row that repeats on every page at a DIFFERENT height, then one
+    unit per cell, values that repeat across pages, a footer page number. rows = [(label, value, unit_text)]."""
+    top = 0.10 + 0.04 * (page % 15)                       # the table sits at a different height on most pages
+    units = [unit(f"t{page}-h{i}", h, page, (0.1 + 0.25 * i, top, 0.3 + 0.25 * i, top + 0.02)) for i, h in enumerate(["Parameter", "Mean", "Units"])]
+    for r, (label, value, u) in enumerate(rows):
+        y = top + 0.05 + 0.04 * r
+        units += [unit(f"t{page}-r{r}a", label, page, (0.10, y, 0.30, y + 0.02)), unit(f"t{page}-r{r}b", value, page, (0.35, y, 0.55, y + 0.02)),
+                  unit(f"t{page}-r{r}c", u, page, (0.60, y, 0.80, y + 0.02))]
+    units.append(unit(f"t{page}-num", str(300 + page), page, (0.45, 0.95, 0.55, 0.98)))
+    return units
+
+
+class TableManualTests(unittest.TestCase):
+    """Issue #212: short body cells and bare numbers that repeat across pages are body text, a table row is one candidate."""
+
+    def setUp(self):
+        rows = [("Load power", "900.0", "W"), ("Efficiency", "94.2", "%")]
+        self.pages = {p: table_page(p, rows if p % 2 else [("Standby power", "0.5", "W"), ("Efficiency", "94.2", "%")]) for p in range(1, 21)}
+        self.boiler = boilerplate_ids(self.pages)
+
+    def test_body_cells_and_bare_numbers_survive_but_the_footer_page_number_does_not(self):
+        body = [u.evidence_id for us in self.pages.values() for u in us if "-num" not in u.evidence_id]
+        self.assertEqual([i for i in body if i in self.boiler], [], "no body cell may be thrown away")
+        for p in self.pages:
+            self.assertIn(f"t{p}-num", self.boiler)
+
+    def test_a_table_fact_is_attributable_and_gold_is_the_cells_of_its_row(self):
+        got = support_units("The mean load power is 900.0 W", self.pages[1], self.boiler)
+        ids = {u.evidence_id for u in got}
+        self.assertTrue({"t1-r0a", "t1-r0b"} <= ids, ids)                       # the row label and its value
+        self.assertTrue(all(i.startswith("t1-") and "-r0" in i or i.startswith("t1-h") for i in ids), ids)  # nothing from another row or page
+
+    def test_a_repeated_value_is_attributed_on_the_page_it_was_shown(self):
+        got = support_units("Efficiency 94.2 %", self.pages[2], self.boiler)
+        self.assertTrue({"t2-r1a", "t2-r1b"} <= {u.evidence_id for u in got})
+        self.assertTrue(all(u.evidence_id.startswith("t2-") for u in got))
+
+    def test_a_running_header_that_drifted_out_of_the_band_is_still_furniture(self):
+        pages = {p: [unit(f"d{p}-hdr", "Acme Power Manual rev 7", p, (0.1, 0.10, 0.9, 0.12)), unit(f"d{p}-b", f"Section {p} text about voltage", p)]
+                 for p in range(1, 11)}
+        boiler = boilerplate_ids(pages)
+        self.assertTrue(all(f"d{p}-hdr" in boiler and f"d{p}-b" not in boiler for p in pages))
+
+    def test_two_pages_repeating_a_body_line_is_not_furniture(self):
+        pages = {1: [unit("a", "See Table 3", 1)], 2: [unit("b", "See Table 3", 2)], 3: [unit("c", "other", 3)], 4: [unit("d", "more", 4)]}
+        self.assertEqual(boilerplate_ids(pages), frozenset())
+
+
 class SupportUnitsTests(unittest.TestCase):
     def setUp(self):
         self.pages = {1: paper_page(1, BODY), 2: paper_page(2, ["Another page about wear leveling in phase change memory."])}
