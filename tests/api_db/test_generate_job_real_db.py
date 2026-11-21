@@ -214,7 +214,7 @@ class GenerateJobRealDbTests(GenerateFixtures, FreshDatabase):
         project, owner, bench = self.planning_benchmark()
         job = self.enqueue(project, owner, bench)
         with self.connect() as c:                                                    # a job that ended without the worker settling the benchmark (cancelled here)
-            c.execute("UPDATE jobs SET status = 'cancelled' WHERE id = %s", (job,))
+            c.execute("UPDATE jobs SET status = 'cancelled', row_version = row_version + 1 WHERE id = %s", (job,))
         self.assertEqual(self.bench_status(bench), "generating")
         again = self.enqueue(project, owner, bench)
         self.assertEqual(self.job_state(again), "queued")
@@ -231,7 +231,7 @@ class GenerateJobRealDbTests(GenerateFixtures, FreshDatabase):
         top_up = self.enqueue(project, owner, bench)
         self.assertEqual((self.job_state(top_up), self.bench_status(bench)), ("queued", "generating"))
         with self.connect() as c:
-            c.execute("UPDATE jobs SET status = 'cancelled' WHERE id = %s", (top_up,))
+            c.execute("UPDATE jobs SET status = 'cancelled', row_version = row_version + 1 WHERE id = %s", (top_up,))
             version = c.execute("SELECT row_version FROM benchmark_revisions WHERE id = %s", (bench,)).fetchone()[0]
             transition_benchmark(c, project, bench, version, "needs_review", "test", owner)
         with self.assertRaises(GenerationError):                                     # a benchmark in review is not generated again
