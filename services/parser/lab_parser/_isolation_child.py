@@ -36,14 +36,28 @@ def main() -> int:
     import json
     import logging
 
+    # Exact pypdf messages that are benign, fixed text (no PDF-controlled content) and well understood, mapped to the code recorded on the document
+    # version (Issue #204, PM-DECISION). Any other warning, whatever it says, is still an invalid PDF. The stored bytes are never repaired.
+    ALLOWED = {"Xref table not zero-indexed. ID numbers for objects will be corrected.": "xref_not_zero_indexed"}
+
     class WarningCounter(logging.Handler):
-        warned = False
+        warned = False                      # a warning that is NOT on the list
+        allowed: set = set()
 
         def emit(self, record):
-            # Never format or retain PDF-controlled diagnostic content.
-            self.warned = True
+            # Never format or retain PDF-controlled diagnostic content: only a fixed template that is exactly on the list is recognised.
+            try:
+                template = record.msg if isinstance(record.msg, str) and not record.args else None
+            except Exception:
+                template = None
+            code = ALLOWED.get(template) if template is not None else None
+            if code is None:
+                self.warned = True
+            else:
+                self.allowed.add(code)
 
     counter = WarningCounter(logging.WARNING)
+    counter.allowed = set()
     logger = logging.getLogger("pypdf")
     logger.handlers = [counter]
     logger.setLevel(logging.WARNING)
@@ -73,15 +87,44 @@ def main() -> int:
                     document.close()
                 if not len(reader.pages) == len(pages) == renderer_pages:
                     raise ValueError("page_count_disagreement")
+                # a text-layer sample (PDFium, at most 20 pages spread over the document): a scan has none (Issue #203). Best effort: a failure here
+                # means "not measured", never a rejected document.
+                sampled, with_text = [], 0
+                try:
+                    document = pypdfium2.PdfDocument(data)
+                    try:
+                        n = len(document)
+                        for i in sorted({(k * n) // min(n, 20) for k in range(min(n, 20))}):
+                            page = document[i]
+                            try:
+                                text = page.get_textpage()
+                                try:
+                                    has = text.count_chars() > 0
+                                finally:
+                                    text.close()
+                            finally:
+                                page.close()
+                            sampled.append(i)
+                            with_text += 1 if has else 0
+                    finally:
+                        document.close()
+                except Exception:
+                    sampled, with_text = [], 0
+                trailing = data[data.rfind(b"%%EOF") + 5:].strip(b" \t\r\n\f\0") if b"%%EOF" in data else b""
+                codes = set(counter.allowed)
+                if trailing and not counter.warned:
+                    codes.add("trailing_bytes_after_eof")
                 result = {
                     "schema_version": "isolated-geometry-2",
+                    "warnings": sorted(codes), "text_sample": {"pages": len(sampled), "with_text": with_text},
                     "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
                     "pages": [{"page_index": p.page_index, "page_label": p.page_label, "rotation": p.rotation,
                                "width_pt": p.display_width_pt, "height_pt": p.display_height_pt}
                               for p in pages],
                 }
         if counter.warned:
-            result = {"error": "invalid_pdf"}
+            # readable, but the reader reported something that is not on the list: a different message from "cannot be read"
+            result = {"error": "pdf_warning"} if result.get("error") is None else {"error": "invalid_pdf"}
     except MemoryError:
         result = {"error": "memory_limit"}
     except Exception:

@@ -234,7 +234,7 @@ class RejectionResponseContractTests(unittest.TestCase):
                 body = json.loads(resp.body.decode("utf-8"))
                 err = body["error"]
                 self.assertEqual(err["code"], expected_code)
-                self.assertEqual(err["message"], f"document rejected: {reason}")
+                self.assertTrue(err["message"].startswith(f"document rejected: {reason}"), err["message"])     # the reason in words follows (#204)
                 self.assertFalse(err["retryable"])
                 self.assertEqual(err["request_id"], "req-test-1")
                 self.assertIsNone(err["retry_after"])

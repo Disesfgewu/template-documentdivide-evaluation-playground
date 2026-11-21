@@ -105,7 +105,7 @@ class IsolatedGeometryTests(unittest.TestCase):
         writer.root_object[NameObject("/Type")] = NameObject("/InvalidCanary")
         stream = io.BytesIO()
         writer.write(stream)
-        self.assert_code("invalid_pdf", inspect_geometry, stream.getvalue())
+        self.assert_code("pdf_warning", inspect_geometry, stream.getvalue())      # readable, but the reader said something that is not on the list (#204)
         writer = PdfWriter()
         writer.add_blank_page(width=100, height=100)
         bad = writer.add_blank_page(width=100, height=100)

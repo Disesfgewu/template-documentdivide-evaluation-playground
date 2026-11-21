@@ -170,7 +170,7 @@ APPEND_ONLY_TABLES = ("audit_events", "operation_results", "benchmark_transition
                       "visual_observations", "evidence_verifications",
                       "embedding_spaces", "vector_items", "vector_item_regions", "vector_index_revisions",
                       "vector_queries", "parse_jobs", "parse_results", "parse_page_results", "generate_jobs", "llm_calls", "gold_answers", "question_validations", "question_exclusions", "external_submissions", "submission_source_matches",
-                      "evidence_unit_sources", "benchmark_parse_sources")
+                      "evidence_unit_sources", "benchmark_parse_sources", "document_version_flags")
 # Mutable on purpose: the parse worker deletes a finished, failed or abandoned job's staging (migration 0025); everything else here is never deleted.
 DELETABLE_TABLES = ("parse_staging", "parse_staging_pages", "parse_staging_runs")
 READ_ONLY_TABLES = ("schema_migrations", "benchmark_transitions_allowed", "job_transitions_allowed")

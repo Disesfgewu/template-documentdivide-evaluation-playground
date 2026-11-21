@@ -125,6 +125,7 @@ def _open_regular_nofollow(
 
 _CHILD_CODES = {
     "invalid_pdf": "corrupt_pdf",
+    "pdf_warning": "pdf_parser_warning",
     "encrypted_pdf": "encrypted_pdf",
     "page_limit_exceeded": "page_limit_exceeded",
     "timeout": "inspection_timeout",
@@ -177,8 +178,10 @@ def _run_child(data: bytes, sha256: str, limits: Limits, cancelled=None) -> tupl
     except InspectionError as exc:
         return ImportResult(outcome="reject", reason=_CHILD_CODES.get(exc.code, "inspection_failed"),
                             sha256=sha256, size_bytes=size_bytes, page_count=None, warnings=()), ()
-    return ImportResult(outcome="accept", reason=None, sha256=sha256, size_bytes=size_bytes,
-                        page_count=inspection.page_count, warnings=()), inspection.pages
+    # a listed benign note, or a document without a text layer, is accepted AND flagged (recorded on the document version, shown to the owner)
+    flags = tuple(inspection.warnings) + (("no_text_layer",) if inspection.text_pages and inspection.text_pages[1] == 0 and inspection.text_pages[0] > 0 else ())
+    return ImportResult(outcome="flag" if flags else "accept", reason=flags[0] if flags else None, sha256=sha256, size_bytes=size_bytes,
+                        page_count=inspection.page_count, warnings=flags), inspection.pages
 
 
 def inspect_pdf_isolated(data: bytes, limits: Limits, cancelled=None) -> tuple[ImportResult, tuple]:

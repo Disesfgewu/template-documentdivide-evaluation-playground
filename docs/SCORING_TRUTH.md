@@ -39,3 +39,14 @@ the derived cap and the worker's charge all use the job's model price; the page 
 
 **No passage offered** (every quote invented or none given): the prompt says so and the judge still decides each fact from the answer alone;
 faithfulness and citation scores stay 0 by construction.
+
+## What the upload accepts and what it tells you (Issues #204 and #203)
+
+A PDF is read in an isolation child by pypdf (strict) and PDFium, and their page counts must agree. A pypdf warning used to make ANY file "corrupt". Now:
+- **Listed benign notes are accepted and recorded** on the document version (`document_version_flags`, append-only; the upload response's `flags`, the workspace, app.log `document_flagged`):
+  `xref_not_zero_indexed` (the exact pypdf message "Xref table not zero-indexed. ID numbers for objects will be corrected."; the numbering is corrected in memory)
+  and `trailing_bytes_after_eof` (non-blank bytes after the last `%%EOF`, only when pypdf itself says nothing about them). The stored bytes and sha256 are the original: nothing is repaired.
+- **Any other warning rejects, with its own code** `pdf_parser_warning` ("the PDF can be read, but the reader reported a problem that is not on the list of harmless
+  ones"), different from `corrupt_pdf` ("the PDF cannot be read"). The 422 message names the reason in words; the page shows it in zh-TW with the server's message in brackets.
+- **No text layer (a scan)**: a bounded PDFium sample (at most 20 pages, evenly spread) finding no text accepts the document with the flag `no_text_layer`; the plan repeats it
+  (`no_text_layer`, also when the parse itself found no text) and the page says in zh-TW that the text-only pipeline cannot use it (no OCR). A failed sample means "not measured", never a rejection.

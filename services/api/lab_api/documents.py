@@ -80,9 +80,22 @@ REJECTION_CODE_MAP = {
     "empty_file": ("empty_file", 422),
     "not_a_pdf": ("invalid_pdf", 422),
     "corrupt_pdf": ("corrupt_pdf", 422),
+    "pdf_parser_warning": ("pdf_parser_warning", 422),
     "encrypted_pdf": ("unsupported_encryption", 422),
     "page_limit_exceeded": ("page_limit_exceeded", 422),
     "file_too_large": ("payload_too_large", 413),
+}
+
+
+# The reason in words (Issue #204): "cannot be read" and "can be read but the reader reported a problem that is not on the list of harmless ones" are different.
+REJECTION_WORDS = {
+    "corrupt_pdf": "the PDF cannot be read: it is damaged or its structure is invalid",
+    "pdf_parser_warning": "the PDF can be read, but the reader reported a problem that is not on the list of harmless ones, so it was not accepted",
+    "not_a_pdf": "the file is not a PDF",
+    "empty_file": "the file is empty",
+    "encrypted_pdf": "the PDF is encrypted; remove the password first",
+    "page_limit_exceeded": "the PDF has more pages than the limit",
+    "file_too_large": "the file is larger than the limit",
 }
 
 
@@ -109,7 +122,7 @@ def _rejection_error(
     code, status_code = REJECTION_CODE_MAP.get(reason, ("invalid_pdf", 422))
     return status_code, {
         "code": code,
-        "message": f"document rejected: {reason}",
+        "message": f"document rejected: {reason}" + (f" ({REJECTION_WORDS[reason]})" if reason in REJECTION_WORDS else ""),
         "retryable": False,
         "details": {
             "reason": reason,
@@ -675,6 +688,8 @@ def _upload_core(
 
         resource_id, artifact_id, revision = row
 
+        if inspection.warnings:
+            log_op("document_flagged", stage="upload", document_version_id=str(doc_version_id), flags=list(inspection.warnings), pages=inspection.page_count)
         created = {
             "id": str(doc_version_id),
             "document_version_id": str(doc_version_id),
@@ -688,6 +703,7 @@ def _upload_core(
             "page_count": inspection.page_count,
             "flagged": inspection.outcome == "flag",
             "warnings": list(inspection.warnings),
+            "flags": list(inspection.warnings),            # the notes recorded on this document version (listed reader notes, no_text_layer)
         }
         if op_intent_id is not None:
             _save_result(conn, proj_id, op_intent_id, 201, created)

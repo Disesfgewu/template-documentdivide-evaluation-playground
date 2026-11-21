@@ -85,6 +85,7 @@ class DocumentVersionResponse(ResponseModel):
     page_count: int = Field(..., ge=1, description="Total number of pages in the document")
     flagged: bool = Field(..., description="Whether the document was flagged during inspection")
     warnings: list[str] = Field(..., description="Warnings identified during inspection")
+    flags: Optional[list[str]] = Field(None, description="Notes recorded on this document version: listed benign reader notes (xref_not_zero_indexed, trailing_bytes_after_eof) and no_text_layer")
 
 
 class DocumentUploadReplayResponse(ResponseModel):
@@ -101,6 +102,7 @@ class DocumentUploadReplayResponse(ResponseModel):
     replayed: Literal[True] = Field(..., description="Indicates an idempotent replay of a previously processed upload")
     flagged: Optional[bool] = Field(None, description="Whether the document was flagged during inspection")
     warnings: Optional[list[str]] = Field(None, description="Warnings identified during inspection")
+    flags: Optional[list[str]] = Field(None, description="Notes recorded on this document version")
 
 
 class DocumentMetadataResponse(ResponseModel):
