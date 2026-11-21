@@ -250,7 +250,7 @@ def _finish_staged(conn, project_id, lease, store, staged, operation_id, page_co
         with _Heartbeat(connect, project_id, lease, ttl_seconds):
             header = build_header(conn, job_id, operation_id, page_count)
             info: dict = {}
-            jobs.finish(conn, project_id, lease, "succeeded", "parsed",
+            jobs.finish(conn, project_id, lease, "succeeded", "parsed", stage="done",
                         hook=lambda c: info.update(ps.finish_from_staging(c, store, project_id, lease, header, page_count)))
     except jobs.LeaseLost:
         raise

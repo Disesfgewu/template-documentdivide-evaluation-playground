@@ -127,7 +127,7 @@ class StagedParseWorkerRealDbTests(FreshDatabase):
         # the old path: the same cached batches merged in memory and written as one record
         old = parse_in_batches(synthetic_pdf.build(PAGES), document_id=str(self.doc), budget_ref="unbudgeted", operation_id=str(stored[1]), run_batch=parser)
         self.assertEqual(stored[0], hashlib.sha256(_canonical(record_from_batch(old))).hexdigest())
-        self.assertEqual(self.job_row(job)[:2], ("succeeded", "finishing"))
+        self.assertEqual(self.job_row(job)[:2], ("succeeded", "done"))   # a finished job no longer reports the stage it was in
         res = self.client.get(f"/api/v1/documents/{self.doc}/parse-results/{job}", headers=self.headers(self.owner))
         self.assertEqual(res.status_code, 200, res.text)
         done = self.job_api(project, job)["progress"]

@@ -22,7 +22,7 @@ function backend(opts: { flags?: string[]; reject?: { code: string; message: str
         flagged: Boolean(opts.flags?.length), flags: opts.flags ?? [] }, 201);
     }
     if (u.includes("/parse") && method === "POST") return json({ job_id: JOB, status: "queued" }, 202);
-    if (u.includes(`/api/v1/jobs/${JOB}`)) return json({ id: JOB, project_id: U1, kind: "document.parse", stage: "finishing", status: "succeeded", row_version: 1, attempt: 1, max_attempts: 3, retryable: true });
+    if (u.includes(`/api/v1/jobs/${JOB}`)) return json({ id: JOB, project_id: U1, kind: "document.parse", stage: "done", status: "succeeded", row_version: 1, attempt: 1, max_attempts: 3, retryable: true });
     if (u.includes("/api/v1/benchmarks?") && method === "POST") return json({ benchmark_revision_id: U1, logical_id: "b", revision: 1, status: "parsing", document_version_id: U2, n_target: 20, q_min: 2 }, 201);
     if (u.includes("/plan") && method === "POST") {
       return json({ benchmark_revision_id: U1, logical_id: "b", revision: 1, status: "planning", parse_job_id: JOB, compliance_projection: "partial",
