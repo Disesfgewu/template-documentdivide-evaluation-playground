@@ -116,7 +116,7 @@ class SpanCheckTests(unittest.TestCase):
 
 class JudgePromptTests(unittest.TestCase):
     def test_v3_asks_for_a_copied_span_does_the_facts_first_and_has_two_worked_examples(self):
-        self.assertEqual(JUDGE_PROMPT_REVISION, "judge-v3")
+        self.assertEqual(JUDGE_PROMPT_REVISION, "judge-v3.1")
         for word in ("answer_span", "No span copied from the answer, no credit", "Example A", "Example B", "missing", "contradicted", "word for word"):
             self.assertIn(word, SYSTEM)
         self.assertLess(SYSTEM.index("TASK 1"), SYSTEM.index("TASK 2"))
@@ -245,7 +245,7 @@ class ExactScoresFromAHandWrittenVerdictTests(unittest.TestCase):
     def test_row_8_two_of_three_facts_for_the_right_reason(self):
         out = self.derive(self.Q8_FACTS, self.Q8_ANSWER, [("f1", "stated", self.Q8_ANSWER), ("f2", "stated", self.Q8_ANSWER), ("f3", "stated", self.Q8_ANSWER)])
         self.assertAlmostEqual(out["correctness"].raw_value, 200 / 3, places=6)
-        self.assertEqual(out["correctness"].reason_codes, ["judge_overruled_by_number_check"])
+        self.assertEqual(out["correctness"].reason_codes, ["judge_overruled_by_number_check", "fact_downgraded:f3:span_does_not_carry_fact"])
         self.assertEqual(self.log.count("DOWNGRADE"), 1)
         self.assertIn("f3: missing (judge said stated)", self.log)
 
@@ -282,12 +282,12 @@ class ExactScoresFromAHandWrittenVerdictTests(unittest.TestCase):
         out = self.derive(["PreSET is 19% lower than Baseline"], "PreSET is 19% higher than Baseline", [("f1", "contradicted", "PreSET is 19% higher than Baseline")])
         self.assertEqual((out["correctness"].raw_value, out["correctness"].reason_codes), (0.0, ["contradicted_fact"]))
         out = self.derive(["PreSET is 19% lower than Baseline"], "PreSET is 19% higher than Baseline", [("f1", "contradicted", "something never said")])
-        self.assertEqual(out["correctness"].reason_codes, ["judge_span_not_in_answer"])
+        self.assertEqual(out["correctness"].reason_codes, ["judge_span_not_in_answer", "fact_downgraded:f1:judge_span_not_in_answer"])
 
     def test_a_stated_fact_whose_span_says_the_opposite_becomes_contradicted(self):
         answer = "PreSET is 19% higher than Baseline"
         out = self.derive(["PreSET is 19% lower than Baseline"], answer, [("f1", "stated", answer)])
-        self.assertEqual((out["correctness"].raw_value, out["correctness"].reason_codes), (0.0, ["contradicted_fact", "judge_overruled_by_number_check"]))
+        self.assertEqual((out["correctness"].raw_value, out["correctness"].reason_codes), (0.0, ["contradicted_fact", "judge_overruled_by_number_check", "fact_downgraded:f1:opposite_direction"]))
 
 
 class AcceptanceRunTwoRegressionTests(unittest.TestCase):
@@ -457,3 +457,53 @@ class FalseDowngradeRegressionTests(unittest.TestCase):
         # the fixture's shape: the question happens to contain the digit 1 ("variant 1"), the fact is about page 1, the answer says page 7
         self.assertEqual(span_check("Text on page 1", "Text on page 7", "Which statement says Text on pg (variant 1)?"), ("missing", "number_absent"))
         self.assertEqual(span_check("Text on page 1", "Text on page 1", "Which statement says Text on pg (variant 1)?"), ("ok", ""))
+
+
+class PresenceAnywhereTests(unittest.TestCase):
+    """PM on #197: a number of the fact that stands anywhere in the answer satisfies presence; binding is only for catching a number on a DIFFERENT entity."""
+
+    def test_a_number_elsewhere_in_the_answer_is_present_when_it_belongs_to_the_facts_entity(self):
+        fact = "Letham published work on stroke prediction in 2015"
+        answer = "In 2015, the work on stroke prediction was published by Benjamin Letham."
+        self.assertEqual(span_check(fact, "the work on stroke prediction was published by Benjamin Letham", "", answer), ("ok", ""))
+        self.assertEqual(span_check(fact, "the work on stroke prediction was published by Benjamin Letham", "", "")[1], "number_absent")
+
+    def test_a_number_elsewhere_in_the_answer_on_another_entity_is_still_the_swap(self):
+        fact = "PreSET is 19% lower than Baseline"
+        answer = "PreSET's latency is 10% higher than Baseline, while Flip-N-Write's is 19% lower"
+        # the span names PreSET but not the number; 19 is in the answer, in the clause of Flip-N-Write
+        self.assertEqual(span_check(fact, "PreSET's latency is higher", "", answer), ("missing", "number_other_entity"))
+
+    def test_a_paper_reference_style_case_authors_and_year_with_initials(self):
+        fact = "Hastie and Tibshirani published Generalized additive models in 1986"
+        answer = "Trevor J. Hastie and Robert J. Tibshirani published it (Statistical Science, 1986)."
+        from lab_api.method_judge import expand_to_sentences
+        span = "Trevor J. Hastie and Robert J. Tibshirani published it"
+        self.assertEqual(expand_to_sentences(span, answer), answer)                           # two initials do not split the sentence
+        self.assertEqual(span_check(fact, expand_to_sentences(span, answer), "", answer), ("ok", ""))
+
+    def test_a_name_colon_value_list_still_catches_the_swapped_values(self):
+        # PM-REVIEW on #208: the value after a colon belongs to the name before it, in the same sentence
+        fact = "PreSET is 19% lower than Baseline"
+        for answer in ("PreSET: 10% lower; Flip-N-Write: 19% lower",
+                       "Latency vs Baseline - PreSET: 10%. Flip-N-Write: 19%.",
+                       "PreSET 10% lower, Flip-N-Write 19% lower",
+                       "PreSET is 10% lower than Baseline; Flip-N-Write is 19% lower"):
+            self.assertEqual(span_check(fact, answer, "", answer), ("missing", "number_other_entity"), answer)
+        right = "PreSET: 19% lower; Flip-N-Write: 10% higher"
+        self.assertEqual(span_check(fact, right, "", right), ("ok", ""))
+
+    def test_a_correct_downgrade_reason_is_kept_per_fact_for_the_page(self):
+        helper = ExactScoresFromAHandWrittenVerdictTests()
+        out = helper.derive(["PreSET is 19% lower than Baseline", "Flip-N-Write is 10% higher than Baseline"],
+                            "PreSET's access latency is 10% higher than Baseline, while Flip-N-Write's is 19% lower",
+                            [("f1", "stated", "PreSET's access latency is 10% higher than Baseline, while Flip-N-Write's is 19% lower"),
+                             ("f2", "stated", "Flip-N-Write's is 19% lower")])
+        codes = out["correctness"].reason_codes
+        self.assertIn("fact_downgraded:f1:number_other_entity", codes)
+        self.assertIn("fact_downgraded:f2:number_other_entity", codes)
+        self.assertEqual(out["correctness"].raw_value, 0.0)
+
+    def test_the_prompt_says_the_span_comes_from_the_answer_block_only(self):
+        for word in ("copied from inside the <answer> block ONLY", "never from the passages", "never re-ordered"):
+            self.assertIn(word, SYSTEM)

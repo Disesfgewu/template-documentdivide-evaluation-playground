@@ -223,7 +223,7 @@ class ExternalSubmissionRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertNotIn("cheese", prompts[0]["user"])
         self.assertIn('cites=""', prompts[0]["user"])                    # the claim has no passage to be supported by
         self.assertIn("NO PASSAGES WERE OFFERED", prompts[0]["user"])    # and the judge is told so: the facts are judged against the answer alone (#197)
-        self.assertIn("judge-v3", json.dumps(results["judge"]))
+        self.assertIn("judge-v3.1", json.dumps(results["judge"]))
         self.assertAlmostEqual(metrics["correctness"]["mean"], 100.0 / 18, places=6)     # the ANSWER is still judged: 1 of 18 at 100, the 17 abstentions score 0
         with self.connect() as c:
             row = c.execute("SELECT raw_value FROM question_scores s JOIN questions q ON q.id = s.question_id WHERE s.evaluation_id = %s "

@@ -195,7 +195,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                 v, code = "missing", "judge_span_not_in_answer"
             elif v == "stated":
                 # the numbers and entities are read in the SENTENCE that holds the span (a condition may come before the copied piece)
-                new_v, why = span_check(it["facts"][int(label[1:]) - 1], expand_to_sentences(span, answer), it.get("question", ""))
+                new_v, why = span_check(it["facts"][int(label[1:]) - 1], expand_to_sentences(span, answer), it.get("question", ""), answer)
                 if new_v != "ok":
                     v, code = new_v, why
             if code:
@@ -219,7 +219,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
         fully = sum(1 for ok, hids in supported.values() if ok and hids)
         correctness = rules.correctness(qkey, facts, False, grader)
         contradicted = sum(1 for _, v in final if v == "contradicted")
-        codes = (["contradicted_fact"] if contradicted else []) + (["judge_overruled_by_number_check"] if overruled else []) + (["judge_span_not_in_answer"] if span_missing else [])
+        codes = (["contradicted_fact"] if contradicted else []) + (["judge_overruled_by_number_check"] if overruled else []) + (["judge_span_not_in_answer"] if span_missing else []) + [f"fact_downgraded:{label}:{why}" for label, why in downgrades]
         if codes:          # the rule scores a contradicted fact as 0 like a missing one; the row says it was contradicted / overruled
             correctness = correctness.model_copy(update={"reason_codes": codes})
         out = [correctness,
