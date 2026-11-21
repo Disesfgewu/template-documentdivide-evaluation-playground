@@ -179,6 +179,11 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
                                                             confusable_target(page_count))
         have = dict(conn.execute("SELECT quota_bucket, count(*) FROM questions WHERE benchmark_id = %s GROUP BY 1",
                                  (benchmark_id,)).fetchall())
+        # A top-up (Issue #215) asks again for the missing questions: the focus variant starts after the earlier runs, so the model is not
+        # shown the same prompts again (it would return the same questions, dropped as duplicates). Runs that made calls only: the job being
+        # built has not reserved anything yet, so an estimate and the real run agree.
+        base = int(conn.execute("SELECT count(DISTINCT l.job_id) FROM llm_calls l JOIN generate_jobs g ON g.project_id = l.project_id AND g.job_id = l.job_id "
+                                "WHERE l.project_id = %s AND l.benchmark_id = %s AND g.phase = 'generate'", (project_id, benchmark_id)).fetchone()[0])
         needed = max(0, want_general - int(have.get("general", 0)))
         chosen = select_pages(sorted(pages), needed)
         seen: dict[int, int] = {}
@@ -186,6 +191,7 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
         for k, page in enumerate(chosen):
             variant = seen.get(page, 0)
             seen[page] = variant + 1
+            variant += base
             units = [(u.evidence_id, u.normalized_content) for u in pages[page][:MAX_UNITS_IN_PROMPT]]
             calls.append(build_page_call(call_id(k, page), page, units, page_chars, variant))
         # cross_page: two DIFFERENT clean text pages per call (no pair, no call, when fewer than two clean pages exist);
@@ -195,6 +201,7 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
         for k, (a_page, b_page) in enumerate(select_page_pairs(sorted(pages), needed_cross)):
             variant = pair_seen.get((a_page, b_page), 0)
             pair_seen[(a_page, b_page)] = variant + 1
+            variant += base
             pair = [(pg, [(u.evidence_id, u.normalized_content) for u in pages[pg][:MAX_UNITS_IN_PROMPT]]) for pg in (a_page, b_page)]
             calls.append(build_cross_page_call(cross_call_id(k, a_page, b_page), pair, page_chars, variant))
         # confusable: passage A answers, passage B is the similar-looking distractor (two different clean text pages; the
@@ -205,6 +212,7 @@ def make_build_calls(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
             a_page, d_page = (p1, p2) if k % 2 == 0 else (p2, p1)
             variant = conf_seen.get((a_page, d_page), 0)
             conf_seen[(a_page, d_page)] = variant + 1
+            variant += base
             pair = [(pg, [(u.evidence_id, u.normalized_content) for u in pages[pg][:MAX_UNITS_IN_PROMPT]]) for pg in (a_page, d_page)]
             calls.append(build_confusable_call(confusable_call_id(k, a_page, d_page), pair, page_chars, variant))
         return calls
