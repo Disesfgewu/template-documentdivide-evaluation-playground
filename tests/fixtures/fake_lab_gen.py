@@ -21,16 +21,16 @@ m, cap = inp["model"], inp["model"]["max_output_tokens"]
 if os.environ.get("FAKE_LAB_GEN_MAX_CALLS") and len(inp["calls"]) > int(os.environ["FAKE_LAB_GEN_MAX_CALLS"]):
     print(json.dumps({"status": "refused", "reason": "calls must be 1..%s" % os.environ["FAKE_LAB_GEN_MAX_CALLS"], "calls": []}))   # like labgen.go maxCalls
     sys.exit(0)
-if os.environ.get("FAKE_LAB_GEN_FAIL_AFTER") and os.environ.get("FAKE_LAB_GEN_LOG"):   # tests only: crash from the Nth invocation on
-    try:
-        earlier = sum(1 for _ in open(os.environ["FAKE_LAB_GEN_LOG"], encoding="utf-8"))
-    except OSError:
-        earlier = 0
-    if earlier >= int(os.environ["FAKE_LAB_GEN_FAIL_AFTER"]):
-        sys.exit(3)
+_earlier = 0
 if os.environ.get("FAKE_LAB_GEN_LOG"):                       # tests only: one line per invocation, with its number of calls
+    try:
+        _earlier = sum(1 for _ in open(os.environ["FAKE_LAB_GEN_LOG"], encoding="utf-8"))
+    except OSError:
+        _earlier = 0
     with open(os.environ["FAKE_LAB_GEN_LOG"], "a", encoding="utf-8") as log_file:
         log_file.write("%d\n" % len(inp["calls"]))
+if os.environ.get("FAKE_LAB_GEN_FAIL_AFTER") and _earlier >= int(os.environ["FAKE_LAB_GEN_FAIL_AFTER"]):   # tests only: crash from the Nth invocation on
+    sys.exit(3)
 if os.environ.get("FAKE_LAB_GEN_DELAY"):
     time.sleep(float(os.environ["FAKE_LAB_GEN_DELAY"]))       # a call that takes a while, so the worker's heartbeat runs meanwhile
 if mode == "crash":
