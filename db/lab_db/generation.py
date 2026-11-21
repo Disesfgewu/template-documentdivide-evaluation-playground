@@ -91,7 +91,11 @@ def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, act
         if bench is None:
             raise NotFound("benchmark")
         needed = "planning" if phase == "generate" else "validating"
-        if bench[0] != needed:
+        # Generating can also start from 'validating' (a TOP-UP: fewer questions were written than the owner asked for; the missing ones
+        # are generated, duplicates dropped by hash) and from 'generating' when no job is active any more (a job that failed or was
+        # lost: Issue #215). Frozen and ready_to_freeze revisions are never generated again.
+        allowed = (needed, "validating", "generating") if phase == "generate" else (needed,)
+        if bench[0] not in allowed:
             raise GenerationError(f"benchmark_is_not_in_{needed}")
         if conn.execute("SELECT 1 FROM benchmark_parse_sources WHERE benchmark_id = %s", (benchmark_id,)).fetchone() is None:
             raise GenerationError("benchmark_has_no_pinned_parse")
@@ -115,8 +119,9 @@ def enqueue_generate_job(conn: psycopg.Connection, *, project_id: uuid.UUID, act
             "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, outcome, operation_id) "
             "VALUES (%s, %s, %s, %s, 'generate_job', %s, 'succeeded', %s)",
             (uuid.uuid4(), project_id, actor_id, "generate.requested" if phase == "generate" else "validate.requested", job_id, op_id))
-        if phase == "generate":
-            transition_benchmark(conn, project_id, benchmark_id, bench[1], "generating", "generation job queued", actor_id)
+        if phase == "generate" and bench[0] != "generating":
+            transition_benchmark(conn, project_id, benchmark_id, bench[1], "generating",
+                                 "generation job queued" if bench[0] == "planning" else "generation job queued to top up the questions", actor_id)
     return job_id
 
 

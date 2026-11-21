@@ -42,6 +42,7 @@ __all__ = ["CallSpec", "GenModelConfig", "LabGenOutputInvalid", "parse_lab_gen_o
 
 KEY_ENV = "LAB_GEN_API_KEY"
 MAX_STDOUT_BYTES = 8 * 1024 * 1024
+MAX_CALLS_PER_CHILD = 200      # lab-gen refuses a batch of more than 200 calls (labgen.go maxCalls): a bigger job runs as several invocations
 _STATUSES = {"ok", "failed", "skipped_budget", "skipped_after_stop", "outcome_unknown"}
 _CALL_KEYS = {"id", "status", "reason", "text", "usage_known", "input_tokens", "output_tokens", "charged_micros",
               "held_micros", "transport_attempts", "request_sha256", "text_sha256"}
@@ -266,8 +267,8 @@ def process_generate_job(conn: psycopg.Connection, project_id: uuid.UUID, job_id
             return _unreachable(job_id)
         raise
     try:
-        return _execute(conn, project_id, lease, worker, lab_gen_cmd, cfg, build_calls, connect, api_key, on_results,
-                        ttl_seconds, child_timeout, extra_env, shutdown)
+        outcome = _execute(conn, project_id, lease, worker, lab_gen_cmd, cfg, build_calls, connect, api_key, on_results,
+                           ttl_seconds, child_timeout, extra_env, shutdown)
     except jobs.LeaseLost:
         return _stopped(conn, project_id, job_id)
     except Exception as exc:
@@ -275,13 +276,44 @@ def process_generate_job(conn: psycopg.Connection, project_id: uuid.UUID, job_id
             return _unreachable(job_id)
         LOG.warning("job %s: internal error (%s)", job_id, type(exc).__name__)   # the type only, never a message
         try:
-            return _fail(conn, project_id, lease, "internal_error")
+            outcome = _fail(conn, project_id, lease, "internal_error")
         except jobs.LeaseLost:
             return _stopped(conn, project_id, job_id)
         except Exception as again:
             if is_infrastructure(again):
                 return _unreachable(job_id)
             raise
+    if outcome.status == "failed":
+        _settle_benchmark(conn, project_id, job_id)
+    return outcome
+
+
+def _settle_benchmark(conn, project_id, job_id) -> None:
+    """A generation job that failed must not leave its benchmark stuck in 'generating' (Issue #215): it goes back to 'validating' when
+    questions exist (a top-up or a partial run) and to 'planning' when none were written, so generate can be started again. Best effort:
+    it never changes the job's outcome (a start of generate also accepts a 'generating' benchmark that has no active job)."""
+    try:
+        with conn.transaction():
+            row = conn.execute("SELECT g.benchmark_id, g.phase, g.requested_by FROM generate_jobs g WHERE g.project_id = %s AND g.job_id = %s",
+                               (project_id, job_id)).fetchone()
+            if row is None or row[1] != "generate":
+                return
+            benchmark_id, _, actor = row
+            conn.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
+            status = conn.execute("SELECT status::text FROM benchmark_revisions WHERE project_id = %s AND id = %s FOR UPDATE",
+                                  (project_id, benchmark_id)).fetchone()
+            if status is None or status[0] != "generating":
+                return
+            n = conn.execute("SELECT count(*) FROM questions WHERE benchmark_id = %s", (benchmark_id,)).fetchone()[0]
+            to = "validating" if n else "planning"
+            conn.execute("SELECT set_config('lab.transition_reason', %s, true)",
+                         (f"generation job failed; the benchmark has {n} question(s), generate can be started again",))
+            conn.execute("UPDATE benchmark_revisions SET status = %s, row_version = row_version + 1 WHERE project_id = %s AND id = %s AND status = 'generating'",
+                         (to, project_id, benchmark_id))
+    except Exception as exc:  # noqa: BLE001 - never change the job's outcome
+        if is_infrastructure(exc):
+            return
+        LOG.warning("job %s: could not settle the benchmark status (%s)", job_id, type(exc).__name__)
 
 
 def _pseudo_row(call_id: str, status: str) -> dict:
@@ -341,35 +373,85 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
             return ParseOutcome(job_id, "failed", "budget_exhausted")
         return _fail(conn, project_id, lease, "budget_exhausted")
     send = [c for c in calls if c.id in sent_ids]
-    reserved = [(c, worst[c.id]) for c in send]
-    payload = {
-        "model": {"name": model, "protocol": cfg.protocol, "base_url": cfg.base_url, "allowed_host": cfg.allowed_host,
-                  "max_output_tokens": cap_tokens, "input_micros_per_mtok": cfg.input_micros_per_mtok,
-                  "output_micros_per_mtok": cfg.output_micros_per_mtok, "currency": currency,
-                  "pricing_revision": pricing_rev, "timeout_seconds": cfg.timeout_seconds, "max_retries": cfg.max_retries,
-                  "requests_per_minute": cfg.requests_per_minute},
-        "budget": {"limit_micros": hold_total},
-        "calls": [{"id": c.id, "system": c.system, "user": c.user} for c in send]}
-    with _Heartbeat(connect, project_id, lease, ttl) as beat:
-        stdout, why = run_lab_gen(cmd, payload, key=api_key, timeout=child_timeout,
-                                  cancelled=lambda: beat.lost.is_set() or (shutdown is not None and shutdown()),
-                                  extra_env=extra_env)
+    # lab-gen refuses a batch of more than MAX_CALLS_PER_CHILD calls, so a bigger job is several invocations, one after the other, of the
+    # SAME job: one budget (every call was reserved above), one ledger, one final transaction. A chunk that fails stops the run: the paid
+    # results of the finished chunks are kept, the calls that were never sent get their holds released.
+    chunks = [send[i:i + MAX_CALLS_PER_CHILD] for i in range(0, len(send), MAX_CALLS_PER_CHILD)]
+    done_rows: list[dict] = []
+    failed_at: Optional[int] = None
     parsed = None
-    if stdout is not None:
-        try:
-            parsed = parse_lab_gen_output(stdout, send, model=model, max_output_tokens=cap_tokens, budget_limit=hold_total)
-        except LabGenOutputInvalid as exc:
-            why = f"invalid_output:{exc}"
+    why = None
+    for index, chunk in enumerate(chunks):
+        chunk_reserved = [(c, worst[c.id]) for c in chunk]
+        chunk_hold = sum(w for _, w in chunk_reserved)
+        payload = {
+            "model": {"name": model, "protocol": cfg.protocol, "base_url": cfg.base_url, "allowed_host": cfg.allowed_host,
+                      "max_output_tokens": cap_tokens, "input_micros_per_mtok": cfg.input_micros_per_mtok,
+                      "output_micros_per_mtok": cfg.output_micros_per_mtok, "currency": currency,
+                      "pricing_revision": pricing_rev, "timeout_seconds": cfg.timeout_seconds, "max_retries": cfg.max_retries,
+                      "requests_per_minute": cfg.requests_per_minute},
+            "budget": {"limit_micros": chunk_hold},
+            "calls": [{"id": c.id, "system": c.system, "user": c.user} for c in chunk]}
+        with _Heartbeat(connect, project_id, lease, ttl) as beat:
+            stdout, why = run_lab_gen(cmd, payload, key=api_key, timeout=child_timeout,
+                                      cancelled=lambda: beat.lost.is_set() or (shutdown is not None and shutdown()),
+                                      extra_env=extra_env)
+        parsed = None
+        if stdout is not None:
+            try:
+                parsed = parse_lab_gen_output(stdout, chunk, model=model, max_output_tokens=cap_tokens, budget_limit=chunk_hold)
+            except LabGenOutputInvalid as exc:
+                why = f"invalid_output:{exc}"
+        if parsed is not None and parsed["status"] == "ok":
+            done_rows += parsed["calls"]
+            continue
+        failed_at = index
+        reserved = chunk_reserved
+        break
+    rest = [c for chunk in chunks[(failed_at + 1 if failed_at is not None else len(chunks)):] for c in chunk]
+    rest_reserved = [(c, worst[c.id]) for c in rest]
 
     def record(c, rows):
         record_llm_calls(c, project_id, benchmark_id, job_id, attempt, model, currency, pricing_rev, rows)
 
+    def release_unsent(c):
+        if rest_reserved:
+            record(c, _released_rows(rest_reserved, model, "not sent: an earlier batch of the job failed"))
+
+    if failed_at is None:
+        parsed = {"status": "ok", "calls": done_rows}
+    elif failed_at > 0:
+        # Some batches finished and were paid: keep them, whatever happened to the next one; the job fails as a partial run.
+        if beat.lost.is_set():
+            with conn.transaction():
+                record(conn, [{k: v for k, v in r.items() if k != "text"} for r in done_rows] + _unknown_rows(reserved, model, "batch result lost"))
+            raise jobs.LeaseLost()
+        if parsed is not None and parsed["status"] == "refused":
+            lost = _released_rows(reserved, model, "lab-gen refused before any call")
+            partial_rows: list[dict] = []
+        elif parsed is not None:                      # a partial batch: its rows are real
+            lost, partial_rows = [], parsed["calls"]
+        else:
+            lost, partial_rows = _unknown_rows(reserved, model, "batch result lost"), []
+        rows = done_rows + partial_rows
+        pseudo = [_pseudo_row(r.id, "failed") for r, _ in reserved[len(partial_rows):]] + [_pseudo_row(r.id, "failed") for r, _ in rest_reserved]
+
+        def partial_hook(c):
+            record(c, [{k: v for k, v in r.items() if k != "text"} for r in rows] + lost)
+            release_unsent(c)
+            if on_results is not None:
+                if not answer:
+                    c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
+                on_results(c, project_id, benchmark_id, rows + (pseudo + skipped_rows if rowwise else []), job_id)
+        jobs.finish(conn, project_id, lease, "failed", "partial_calls", hook=partial_hook)
+        return ParseOutcome(job_id, "failed", "partial_calls")
     if parsed is not None and parsed["status"] == "refused":
-        # No call was made: release the holds (fenced, together with the job's final status).
+        # No call was made in this batch: release the holds (fenced, together with the job's final status).
         def refused_hook(c):
             record(c, _released_rows(reserved, model, "lab-gen refused before any call"))
+            release_unsent(c)
             if rowwise and on_results is not None:
-                on_results(c, project_id, benchmark_id, [_pseudo_row(r.id, "failed") for r, _ in reserved] + skipped_rows, job_id)
+                on_results(c, project_id, benchmark_id, [_pseudo_row(r.id, "failed") for r, _ in reserved + rest_reserved] + skipped_rows, job_id)
         jobs.finish(conn, project_id, lease, "failed", "lab_gen_refused", hook=refused_hook)
         return ParseOutcome(job_id, "failed", "lab_gen_refused")
     if parsed is None:
@@ -388,8 +470,10 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
             return ParseOutcome(job_id, "queued", "released: worker shutdown")
         def failed_hook(c):
             record(c, rows)
+            release_unsent(c)
             if rowwise and on_results is not None:      # every question still gets its submission, as an unknown outcome
-                on_results(c, project_id, benchmark_id, [_pseudo_row(r.id, "outcome_unknown") for r, _ in reserved] + skipped_rows, job_id)
+                on_results(c, project_id, benchmark_id, [_pseudo_row(r.id, "outcome_unknown") for r, _ in reserved] +
+                           [_pseudo_row(r.id, "failed") for r, _ in rest_reserved] + skipped_rows, job_id)
         jobs.finish(conn, project_id, lease, "failed", "lab_gen_failed", hook=failed_hook)
         return ParseOutcome(job_id, "failed", "lab_gen_failed")
     rows = parsed["calls"]
@@ -400,10 +484,11 @@ def _execute(conn, project_id, lease, worker, cmd, cfg, build_calls, connect, ap
 
     def hook(c):
         record(c, plain)
+        release_unsent(c)
         if on_results is not None:
             if not answer:
                 c.execute("SELECT set_config('lab.actor_id', %s, true)", (str(actor),))
-            on_results(c, project_id, benchmark_id, rows + (skipped_rows if rowwise else []), job_id)   # only 'ok' rows carry text
+            on_results(c, project_id, benchmark_id, rows + ([_pseudo_row(r.id, "failed") for r, _ in rest_reserved] + skipped_rows if rowwise else []), job_id)   # only 'ok' rows carry text
 
     try:
         jobs.finish(conn, project_id, lease, "succeeded" if ok else "failed",

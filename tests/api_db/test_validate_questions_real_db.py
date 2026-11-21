@@ -147,9 +147,10 @@ class ValidateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
         with self.connect() as c, self.assertRaises(PermissionDenied):
             enqueue_generate_job(c, project_id=project, actor_id=participant, benchmark_id=bench, model="m", max_output_tokens=500,
                                  budget_cap_micros=10, currency="USD", pricing_revision="t1", phase="validate")
-        with self.connect() as c, self.assertRaises(GenerationError):                 # and a generation job cannot be started now
-            enqueue_generate_job(c, project_id=project, actor_id=owner, benchmark_id=bench, model="m", max_output_tokens=500,
-                                 budget_cap_micros=10, currency="USD", pricing_revision="t1")
+        with self.connect() as c:                                                      # generate is a TOP-UP now (Issue #215), not refused
+            top_up = enqueue_generate_job(c, project_id=project, actor_id=owner, benchmark_id=bench, model="m", max_output_tokens=500,
+                                          budget_cap_micros=10, currency="USD", pricing_revision="t1")
+            self.assertIsNotNone(top_up)
 
     def test_validations_are_append_only_and_hidden_from_participants(self):
         project, owner, bench = self.generated()

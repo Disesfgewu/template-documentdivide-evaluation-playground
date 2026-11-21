@@ -3,6 +3,9 @@
 * ``POST /api/v1/benchmarks/{logical_id}/revisions/{revision}/generate`` queues ONE ``document.generate`` job
   (``enqueue_generate_job``: owner/maintainer only, the benchmark must be in ``planning`` with a pinned parse, the output cap
   is at most 500 tokens, the budget cap must be positive) and moves the benchmark to ``generating``. 202 + job id.
+  Generate can be asked again (Issue #215): on a ``validating`` benchmark it TOPS UP (only the missing questions are generated, ``question_count``
+  is the total wanted, duplicates are dropped by hash) and on a ``generating`` one whose job failed or was lost. A run of more than 200 calls is
+  several lab-gen invocations of the same job.
 * ``POST .../validate`` (same body and rules, benchmark in ``validating``) queues the automated validation job
   (P-D slice 4); ``GET`` then also reports the verdict counts (never question text).
 * ``GET .../generate`` reports progress for roles that may read generation context: the job status, the ledger

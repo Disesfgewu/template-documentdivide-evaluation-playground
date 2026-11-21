@@ -18,7 +18,7 @@ for _sub in (_REPO, _REPO / "db", _REPO / "services" / "api", _REPO / "services"
         sys.path.insert(0, str(_sub))
 
 from lab_api.generate_worker import CallSpec, GenModelConfig, process_generate_job
-from lab_db.generation import (GenerationError, benchmark_budget, enqueue_generate_job, record_llm_calls,
+from lab_db.generation import (GenerateJobActive, GenerationError, benchmark_budget, enqueue_generate_job, record_llm_calls,
                                request_sha256, reserve_batch)
 from lab_db.repo import NotFound, PermissionDenied, transition_benchmark
 from tests.api_db.test_promote_real_db import ADMIN_URL, FreshDatabase, PromoteFixtures
@@ -57,6 +57,7 @@ class GenerateFixtures(PromoteFixtures):
         role = kw.pop("role", None)
         builder = kw.pop("build_calls", build_calls)
         hook = kw.pop("on_results", None)
+        env = {"FAKE_LAB_GEN_MODE": mode, **kw.pop("env", {})}
 
         def on_results(conn, p, b, rows, job_id):
             if seen is not None:
@@ -68,7 +69,7 @@ class GenerateFixtures(PromoteFixtures):
                 c.execute(f'SET ROLE "{role}"')            # a non-superuser application role: row level security applies
             return process_generate_job(c, project, job, worker="w1", lab_gen_cmd=STUB, cfg=CFG, build_calls=builder,
                                         connect=self.connect, api_key="k", on_results=on_results,
-                                        extra_env={"FAKE_LAB_GEN_MODE": mode}, **kw)
+                                        extra_env=env, **kw)
 
     def app_role(self):
         """A non-superuser application role with the app privileges (so RLS is NOT bypassed)."""
@@ -156,6 +157,85 @@ class GenerateJobRealDbTests(GenerateFixtures, FreshDatabase):
             self.enqueue(project, owner, draft)
 
     # ---- processing -------------------------------------------------------------------------------------------
+
+    # ---- Issue #215: more than 200 calls, a failed chunk, a stuck benchmark, a top-up ---------------------------------------------
+
+    def many_calls(self, n):
+        return lambda conn, project_id, benchmark_id: [CallSpec(f"c{i:04d}", "sys", f"prompt number {i}") for i in range(n)]
+
+    def invocations(self, log):
+        return [int(x) for x in Path(log).read_text().split()] if Path(log).exists() else []
+
+    def test_a_job_of_more_than_200_calls_runs_as_several_invocations_of_the_same_job(self):
+        import tempfile
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=10_000_000)
+        log = str(Path(tempfile.mkdtemp()) / "log")
+        seen = []
+        out = self.process(project, job, "ok", build_calls=self.many_calls(450), seen=seen,
+                           env={"FAKE_LAB_GEN_MAX_CALLS": "200", "FAKE_LAB_GEN_LOG": log})
+        self.assertEqual((out.status, out.reason), ("succeeded", "generated"))
+        self.assertEqual(self.invocations(log), [200, 200, 50])                    # no batch above lab-gen's limit
+        rows = self.calls(job)
+        self.assertEqual(len(rows), 450)
+        self.assertTrue(all(r[1] == "ok" and r[4] == 0 for r in rows))             # every call settled, nothing left held
+        self.assertEqual(len(seen), 450)                                           # the hook got every reply, once, in ONE final transaction
+        self.assertEqual(self.budget(project, bench).held, 0)
+
+    def test_a_failed_later_chunk_keeps_the_paid_chunks_and_releases_what_was_never_sent(self):
+        import tempfile
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=10_000_000)
+        log = str(Path(tempfile.mkdtemp()) / "log")
+        seen = []
+        out = self.process(project, job, "ok", build_calls=self.many_calls(450), seen=seen,
+                           env={"FAKE_LAB_GEN_MAX_CALLS": "200", "FAKE_LAB_GEN_LOG": log, "FAKE_LAB_GEN_FAIL_AFTER": "1"})
+        self.assertEqual((out.status, out.reason), ("failed", "partial_calls"))
+        self.assertEqual(self.invocations(log), [200, 200])                         # the second one crashed, the third never ran
+        by_status = {}
+        for _, status, _, _, held in self.calls(job):
+            by_status.setdefault(status, []).append(held)
+        self.assertEqual(len(by_status["ok"]), 200)                                  # the first chunk was paid and is kept
+        self.assertEqual(len(seen), 200 + 0)                                         # and reached the hook
+        self.assertEqual(len(by_status.get("outcome_unknown", [])) + len(by_status.get("skipped_after_stop", [])), 250)
+        self.assertGreater(sum(by_status.get("outcome_unknown", [0])), 0)            # the lost chunk stays held, never counted as free
+        self.assertEqual(sum(by_status.get("skipped_after_stop", [0])), 0)           # the never-sent chunk is released
+
+    def test_a_failed_job_that_wrote_nothing_gives_the_benchmark_back_so_generate_can_start_again(self):
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench)
+        out = self.process(project, job, "refused")
+        self.assertEqual((out.status, out.reason), ("failed", "lab_gen_refused"))
+        self.assertEqual(self.bench_status(bench), "planning")
+        again = self.enqueue(project, owner, bench)
+        self.assertEqual((self.job_state(again), self.bench_status(bench)), ("queued", "generating"))
+
+    def test_generate_can_be_started_on_a_generating_benchmark_without_an_active_job(self):
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench)
+        with self.connect() as c:                                                    # a job that ended without the worker settling the benchmark (cancelled here)
+            c.execute("UPDATE jobs SET status = 'cancelled', row_version = row_version + 1 WHERE id = %s", (job,))
+        self.assertEqual(self.bench_status(bench), "generating")
+        again = self.enqueue(project, owner, bench)
+        self.assertEqual(self.job_state(again), "queued")
+        with self.assertRaises(GenerateJobActive):                                   # but never two at once
+            self.enqueue(project, owner, bench)
+
+    def test_a_top_up_is_possible_on_a_validating_benchmark_but_never_on_one_in_review(self):
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench)
+        self.process(project, job, "ok")
+        with self.connect() as c:
+            version = c.execute("SELECT row_version FROM benchmark_revisions WHERE id = %s", (bench,)).fetchone()[0]
+            transition_benchmark(c, project, bench, version, "validating", "test", owner)
+        top_up = self.enqueue(project, owner, bench)
+        self.assertEqual((self.job_state(top_up), self.bench_status(bench)), ("queued", "generating"))
+        with self.connect() as c:
+            c.execute("UPDATE jobs SET status = 'cancelled', row_version = row_version + 1 WHERE id = %s", (top_up,))
+            version = c.execute("SELECT row_version FROM benchmark_revisions WHERE id = %s", (bench,)).fetchone()[0]
+            transition_benchmark(c, project, bench, version, "needs_review", "test", owner)
+        with self.assertRaises(GenerationError):                                     # a benchmark in review is not generated again
+            self.enqueue(project, owner, bench)
 
     def test_a_good_batch_succeeds_and_every_call_is_recorded_without_any_reply_text(self):
         project, owner, bench = self.planning_benchmark()
