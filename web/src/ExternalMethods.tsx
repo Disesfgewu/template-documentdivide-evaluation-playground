@@ -6,6 +6,8 @@ import {
   getJobStatus,
   getRunEstimate,
   getRunResults,
+  getRunReviews,
+  recordRunReviews,
   getSubmissionDetails,
   getSubmissionFormat,
   listUploads,
@@ -13,6 +15,7 @@ import {
   uploadAnswers,
   type RunEstimate,
   type RunResultsResponse,
+  type RunReviews,
   type SubmissionDetailItem,
   type SubmissionFormatDoc,
   type UploadProblem,
@@ -136,6 +139,7 @@ export function DeveloperUploads({ fetchFn = fetch, token, projectId, logicalId,
   const [last, setLast] = useState<UploadReport | null>(null);
   const [uploads, setUploads] = useState<UploadedMethod[]>([]);
   const [results, setResults] = useState<Record<string, RunResultsResponse>>({});
+  const [reviews, setReviews] = useState<Record<string, RunReviews>>({});
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
@@ -144,12 +148,17 @@ export function DeveloperUploads({ fetchFn = fetch, token, projectId, logicalId,
       if (controller.signal.aborted || !res.ok) return;
       setUploads(res.data.items);
       const next: Record<string, RunResultsResponse> = {};
+      const nextReviews: Record<string, RunReviews> = {};
       for (const u of res.data.items) {
         const r = await getRunResults({ runId: u.run_id, token, fetchFn, signal: controller.signal });
         if (controller.signal.aborted) return;
         if (r.ok) next[u.run_id] = r.data;
+        const rv = await getRunReviews({ runId: u.run_id, projectId, token, fetchFn, signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (rv.ok) nextReviews[u.run_id] = rv.data;          // gold-side: a role that may not read it simply gets none
       }
       setResults(next);
+      setReviews(nextReviews);
     });
     return () => controller.abort();
   }, [projectId, logicalId, token, fetchFn, reload]);
@@ -239,9 +248,9 @@ export function DeveloperUploads({ fetchFn = fetch, token, projectId, logicalId,
       <h4 style={{ margin: "1rem 0 0.25rem" }}>已上傳的方法</h4>
       {uploads.length === 0 ? <p className="muted small">還沒有上傳任何答案檔。</p> : (
         <>
-          <ComparisonTable uploads={uploads} results={results} />
+          <ComparisonTable uploads={uploads} results={results} reviews={reviews} />
           {uploads.map((u) => (
-            <UploadCard key={u.run_id} u={u} result={results[u.run_id]} common={{ fetchFn, token, projectId, logicalId }} onChanged={() => setReload((n) => n + 1)} />
+            <UploadCard key={u.run_id} u={u} result={results[u.run_id]} reviews={reviews[u.run_id]} common={{ fetchFn, token, projectId, logicalId }} onChanged={() => setReload((n) => n + 1)} />
           ))}
         </>
       )}
@@ -259,7 +268,8 @@ function meanText(r: RunResultsResponse | undefined, metric: string): { text: st
 }
 
 /** Every uploaded method side by side, one column each, one row per metric: no total and no ranking, as in SPEC 9.1. */
-function ComparisonTable({ uploads, results }: { uploads: UploadedMethod[]; results: Record<string, RunResultsResponse> }) {
+function ComparisonTable({ uploads, results, reviews }: { uploads: UploadedMethod[]; results: Record<string, RunResultsResponse>; reviews: Record<string, RunReviews> }) {
+  const anyReviewed = uploads.some((u) => (reviews[u.run_id]?.summary.questions_reviewed ?? 0) > 0);
   const graders = new Set(uploads.map((u) => u.grader_revision));
   return (
     <div data-testid="comparison">
@@ -278,6 +288,12 @@ function ComparisonTable({ uploads, results }: { uploads: UploadedMethod[]; resu
                 {uploads.map((u) => { const c = meanText(results[u.run_id], key); return <td key={u.run_id} className={`tone-${c.tone}`}>{c.text}</td>; })}
               </tr>
             ))}
+            {anyReviewed && (
+              <tr data-testid="reviewed-correctness-row">
+                <td>答案正確性（覆核後）<div className="muted small">覆核過的題用覆核值，其餘用評分模型的值</div></td>
+                {uploads.map((u) => <td key={u.run_id}><ReviewedMean summary={reviews[u.run_id]?.summary} /></td>)}
+              </tr>
+            )}
             <tr>
               <td>未提交的題數</td>
               {uploads.map((u) => <td key={u.run_id}>{u.counts.not_submitted}</td>)}
@@ -296,12 +312,64 @@ function ComparisonTable({ uploads, results }: { uploads: UploadedMethod[]; resu
         每個指標各自比較，不加總、不排名。{graders.size > 1 ? "這些方法的評分狀態不同（有的已用評分模型評分、有的還沒），不同狀態的欄位不能直接比較。" : ""}
         在引用的頁面找不到的引文不會被評分模型看到（它只看系統自己解析出的原文），所以不會替答案加分；每個方法被排除了幾段，在上面那一列。
         答案品質的分數由同一家模型評出、沒有用人工標註校準，都是暫定的。
+        {anyReviewed && "「覆核後」是另外一列：評分模型的分數沒有被改動；覆核值的來源（人工或模型協助）標在數字下面，模型協助的覆核不是人工覆核。"}
       </p>
     </div>
   );
 }
 
-function UploadCard({ u, result, common, onChanged }: { u: UploadedMethod; result?: RunResultsResponse; common: Common; onChanged: () => void }) {
+const KIND_TEXT: Record<string, string> = { human: "人工覆核", model_assisted: "模型協助覆核" };
+
+function ReviewedMean({ summary }: { summary?: RunReviews["summary"] }) {
+  if (!summary || summary.questions_reviewed === 0 || summary.reviewed_mean === null) return <span className="tone-none">—</span>;
+  const parts = [summary.reviewed_by.human > 0 ? `人工 ${summary.reviewed_by.human}` : "", summary.reviewed_by.model_assisted > 0 ? `模型協助 ${summary.reviewed_by.model_assisted}` : ""].filter(Boolean);
+  return (
+    <>
+      <span className="tone-good">{summary.reviewed_mean.toFixed(1)}</span>
+      <div className="muted small">覆核 {summary.questions_reviewed} 題（{parts.join("、")}）{summary.judge_mean !== null ? `；評分模型 ${summary.judge_mean.toFixed(1)}` : ""}</div>
+    </>
+  );
+}
+
+/** The reviewed correctness of one question next to the judge's value, and a small form so the owner can record or change it (Issue #218). */
+function ReviewCell({ d, review, runId, common, onChanged }: { d: SubmissionDetailItem; review?: RunReviews["items"][number]; runId: string; common: Common; onChanged: () => void }) {
+  const { fetchFn = fetch, token, projectId } = common;
+  const [value, setValue] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const parsed = value.trim() === "" ? NaN : Number(value);
+  const valid = Number.isFinite(parsed) && parsed >= 0 && parsed <= 100;
+  const save = async () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    setErr(null);
+    const res = await recordRunReviews({ runId, projectId, token, fetchFn, reviews: [{ question_id: d.question_id, value: parsed, reviewer_kind: "human", reviewer_label: "owner", ...(note.trim() ? { note: note.trim() } : {}) }] });
+    setBusy(false);
+    if (res.ok) { setValue(""); setNote(""); onChanged(); } else setErr(res.error.message);
+  };
+  return (
+    <div data-testid={`review-${d.ordinal}`} style={{ marginTop: "0.25rem" }}>
+      {review && (
+        <div className="tone-good" data-testid={`review-value-${d.ordinal}`}>
+          覆核後正確性：{review.value.toFixed(0)}
+          <span className="muted"> （{KIND_TEXT[review.reviewer_kind]}，{review.reviewer_label}{review.versions > 1 ? `，第 ${review.versions} 次` : ""}）</span>
+          {review.note && <div className="muted">{review.note}</div>}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: "0.25rem", alignItems: "center", flexWrap: "wrap" }}>
+        <input type="number" min={0} max={100} step={1} value={value} aria-label={`第 ${d.ordinal + 1} 題的覆核分數（0–100）`} placeholder="覆核 0–100" onChange={(e) => setValue(e.target.value)} style={{ width: "6rem" }} />
+        <input type="text" value={note} maxLength={500} aria-label={`第 ${d.ordinal + 1} 題的覆核備註`} placeholder="備註（選填）" onChange={(e) => setNote(e.target.value)} style={{ width: "9rem" }} />
+        <button type="button" className="secondary" disabled={!valid || busy} onClick={() => void save()} style={{ padding: "0.2rem 0.6rem", borderRadius: "6px", border: "1px solid var(--primary)", cursor: "pointer" }}>
+          記錄覆核
+        </button>
+      </div>
+      {err && <div role="alert" className="tone-bad small">{err}</div>}
+    </div>
+  );
+}
+
+function UploadCard({ u, result, reviews, common, onChanged }: { u: UploadedMethod; result?: RunResultsResponse; reviews?: RunReviews; common: Common; onChanged: () => void }) {
   const { fetchFn = fetch, token, projectId } = common;
   const [est, setEst] = useState<RunEstimate | null>(null);
   const [judging, setJudging] = useState(false);
@@ -410,6 +478,7 @@ function UploadCard({ u, result, common, onChanged }: { u: UploadedMethod; resul
                       const sc = d.scores[k];
                       return <div key={k}>{k === "recall_at_k" ? "檢索命中" : "正確性"}：{sc ? (sc.status === "scored" && sc.value !== null ? `${sc.value.toFixed(0)}` : sc.status === "pending" ? "尚未評分" : sc.reason_codes[0] ?? sc.status) : "—"}</div>;
                     })}
+                    <ReviewCell d={d} review={reviews?.items.find((r) => r.question_id === d.question_id)} runId={u.run_id} common={common} onChanged={onChanged} />
                     {downgradeNotes(d.scores.correctness?.reason_codes).length > 0 && (
                       <div data-testid={`downgrade-${d.ordinal}`} className="tone-wait" style={{ marginTop: "0.25rem" }}>
                         {downgradeNotes(d.scores.correctness?.reason_codes).map((line) => <div key={line}>{line}</div>)}

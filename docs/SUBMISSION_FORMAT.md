@@ -45,3 +45,9 @@
 
 `GET /api/v1/benchmarks/{id}/revisions/{n}/submissions` 列出上傳過的方法與狀態；`GET /api/v1/runs/{run_id}/results` 是分數；`GET /api/v1/runs/{run_id}/submission-details`（owner／maintainer，含 gold）是逐題：
 他的答案、他的引用（找到或找不到）、分數、標準答案與要點。網頁步驟 9 把每個方法並排比較（每個指標各自一列，不加總、不排名）。
+
+### 覆核分數（owner／maintainer，含 gold）
+
+`POST /api/v1/runs/{run_id}/reviews` 記錄逐題的「答案正確性」覆核值：`{"reviews": [{"question_id": "q-…", "value": 0–100, "reviewer_kind": "human" | "model_assisted", "reviewer_label": "…", "note": "…(選填，500 字內)"}]}`，一次最多 100 題；`question_id` 就是 submission-details 裡的 `question_id`。
+`GET` 同一個路徑回每題最新的覆核值（較早的版本留著，`versions` 是次數）和摘要。覆核值只新增、不覆蓋：評分模型的分數一個都不會被改；同一題最新一筆為準；`model_assisted` 永遠標成模型協助、不會顯示成人工。
+網頁步驟 9 另外多一列「答案正確性（覆核後）」：覆核過的題用覆核值，其餘用評分模型的值，並寫出覆核了幾題、人工或模型協助。開發人員那一側的端點（results、comparisons）不會回覆核值。
