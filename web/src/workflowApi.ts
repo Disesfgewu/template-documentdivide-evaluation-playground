@@ -1559,6 +1559,50 @@ export async function getSubmissionDetails(ref: { runId: string; projectId: stri
 }
 
 // ---------------------------------------------------------------------------
+// Reviewed correctness next to the judge's value (Issue #218)
+// ---------------------------------------------------------------------------
+
+export type ReviewerKind = "human" | "model_assisted";
+export type RunReview = { question_id: string; value: number; reviewer_kind: ReviewerKind; reviewer_label: string; note: string | null; reviewed_at: string; versions: number };
+export type RunReviewSummary = {
+  questions_reviewed: number;
+  reviewed_by: { human: number; model_assisted: number };
+  judge_scored: number;
+  judge_mean: number | null;
+  reviewed_mean: number | null;
+  questions_in_reviewed_mean: number;
+  rule: string;
+};
+export type RunReviews = { run_id: string; items: RunReview[]; summary: RunReviewSummary };
+
+type ReviewRef = { runId: string; projectId: string; token: string; fetchFn?: typeof fetch; signal?: AbortSignal; baseUrl?: string };
+
+function reviewRefError(ref: ReviewRef): ApiResult<never> | null {
+  if (!ref.token.trim()) return { ok: false, error: { message: "未提供認證 Token", status: 401, code: "unauthorized" } };
+  if (!validateUuid(ref.runId) || !validateUuid(ref.projectId.trim())) {
+    return { ok: false, error: { message: "ID 格式錯誤（須為 UUID）", status: 400, code: "bad_request" } };
+  }
+  return null;
+}
+
+/** Owner/maintainer only (it is gold-side data). The judge's own values are never in this answer and are never changed by it. */
+export async function getRunReviews(ref: ReviewRef): Promise<ApiResult<RunReviews>> {
+  const bad = reviewRefError(ref);
+  if (bad) return bad;
+  return executeFetch(`${ref.baseUrl ?? ""}/api/v1/runs/${ref.runId}/reviews?project_id=${encodeURIComponent(ref.projectId.trim())}`,
+    { method: "GET", headers: { Authorization: `Bearer ${ref.token.trim()}` } }, ref.token.trim(), 60_000, ref.fetchFn ?? fetch, ref.signal);
+}
+
+export async function recordRunReviews(ref: ReviewRef & { reviews: { question_id: string; value: number; reviewer_kind: ReviewerKind; reviewer_label: string; note?: string }[] }):
+  Promise<ApiResult<{ recorded: number; summary: RunReviewSummary }>> {
+  const bad = reviewRefError(ref);
+  if (bad) return bad;
+  return executeFetch(`${ref.baseUrl ?? ""}/api/v1/runs/${ref.runId}/reviews?project_id=${encodeURIComponent(ref.projectId.trim())}`,
+    { method: "POST", headers: { Authorization: `Bearer ${ref.token.trim()}`, "Content-Type": "application/json" }, body: JSON.stringify({ reviews: ref.reviews }) },
+    ref.token.trim(), 60_000, ref.fetchFn ?? fetch, ref.signal);
+}
+
+// ---------------------------------------------------------------------------
 // Resume: what already exists in the project (Issue #194)
 // ---------------------------------------------------------------------------
 
