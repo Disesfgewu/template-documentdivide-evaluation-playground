@@ -141,9 +141,13 @@ def estimate_answer(conn: psycopg.Connection, settings: Settings, project_id: uu
 
 
 def estimate_judge(conn: psycopg.Connection, settings: Settings, project_id: uuid.UUID, benchmark_id: uuid.UUID, run_id: uuid.UUID,
-                   max_output_tokens: int = MAX_OUTPUT_TOKENS, model: Optional[str] = None) -> dict:
+                   max_output_tokens: int = MAX_OUTPUT_TOKENS, model: Optional[str] = None, only_errors: bool = False) -> dict:
+    """The worst case of the judge calls of this run; ``only_errors`` counts only the questions a re-judge of the error rows would send (Issue #215 item 3)."""
+    from lab_api.judge_redo import redo_state
+    redo = sorted(redo_state(conn, run_id)["question_ids"]) if only_errors else None
+    only = "" if redo is None else " AND question_id = ANY(%s)"
     n = conn.execute("SELECT count(*) FROM submissions WHERE run_id = %s AND status = 'accepted' AND answer_status = 'answered' "
-                     "AND failure_reason IS NULL", (run_id,)).fetchone()[0]
+                     "AND failure_reason IS NULL" + only, (run_id,) if redo is None else (run_id, redo)).fetchone()[0]
     uploaded = conn.execute("SELECT 1 FROM runs r JOIN method_revisions m ON m.id = r.method_revision_id WHERE r.id = %s "
                             "AND m.execution_mode = 'offline_file'", (run_id,)).fetchone() is not None
     base = len(JUDGE_SYSTEM.encode("utf-8")) + JUDGE_FIXED_BYTES
@@ -154,7 +158,8 @@ def estimate_judge(conn: psycopg.Connection, settings: Settings, project_id: uui
         rows = conn.execute(
             "SELECT s.id, coalesce(sum(LEAST(octet_length(m.matched_text), %s)) FILTER (WHERE m.text_found), 0) FROM submissions s "
             "LEFT JOIN submission_source_matches m ON m.submission_id = s.id WHERE s.run_id = %s AND s.status = 'accepted' AND s.answer_status = 'answered' "
-            "AND s.failure_reason IS NULL GROUP BY s.id", (MAX_HIT_CHARS * 3, run_id)).fetchall()
+            "AND s.failure_reason IS NULL" + ("" if redo is None else " AND s.question_id = ANY(%s)") + " GROUP BY s.id",
+            (MAX_HIT_CHARS * 3, run_id) if redo is None else (MAX_HIT_CHARS * 3, run_id, redo)).fetchall()
         total = sum(_bound_worst(settings, base + int(shown), max_output_tokens, model) for _, shown in rows)
         return _result("judge", len(rows), total, {"bound": True, **_model_info(settings, model)})
     per_call = _bound_worst(settings, base + _largest_pages_bytes(conn, project_id, benchmark_id), max_output_tokens, model)

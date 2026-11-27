@@ -26,10 +26,12 @@ from lab_db.repo import NotFound, PermissionDenied
 router = APIRouter()
 
 
-def _cap(body: GenerateRequest, derive) -> tuple[int, dict | None]:
+def _cap(body: GenerateRequest, derive, judge: bool = False) -> tuple[int, dict | None]:
     """The explicit cap, or the derived one (``derive()`` returns an estimate); question_count does not apply to these runs."""
     if body.question_count is not None:
         raise ApiError(400, "bad_request", "question_count only applies to generation")
+    if body.judge_errors_only and not judge:
+        raise ApiError(400, "bad_request", "judge_errors_only only applies to a judge run")
     if body.budget_cap_micros is not None:
         return body.budget_cap_micros, None
     try:
@@ -92,9 +94,11 @@ def _start_judge(conn: psycopg.Connection, actor_id: uuid.UUID, project_id: uuid
         row = conn.execute("SELECT benchmark_id FROM runs WHERE id = %s AND project_id = %s", (run_id, project_id)).fetchone()
         if row is None:
             raise NotFound("run")
-        cap, info = _cap(body, lambda: est.estimate_judge(conn, settings, project_id, row[0], run_id, body.max_output_tokens, body.model))
+        cap, info = _cap(body, lambda: est.estimate_judge(conn, settings, project_id, row[0], run_id, body.max_output_tokens, body.model, only_errors=body.judge_errors_only),
+                         judge=True)
         out = start_judge_run(conn, project_id, run_id, actor_id, model=body.model, budget_cap_micros=cap,
-                              currency=body.currency, pricing_revision=body.pricing_revision, max_output_tokens=body.max_output_tokens)
+                              currency=body.currency, pricing_revision=body.pricing_revision, max_output_tokens=body.max_output_tokens,
+                              only_errors=body.judge_errors_only)
     except NotFound:
         raise ApiError(404, "not_found", "run not found") from None
     except PermissionDenied as exc:

@@ -181,6 +181,8 @@ class GenerateJobRealDbTests(GenerateFixtures, FreshDatabase):
         self.assertTrue(all(r[1] == "ok" and r[4] == 0 for r in rows))             # every call settled, nothing left held
         self.assertEqual(len(seen), 450)                                           # the hook got every reply, once, in ONE final transaction
         self.assertEqual(self.budget(project, bench).held, 0)
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT stage FROM jobs WHERE id = %s", (job,)).fetchone()[0], "done")   # a succeeded job is never reported as queued (PM, #215)
 
     def test_a_failed_later_chunk_keeps_the_paid_chunks_and_releases_what_was_never_sent(self):
         import tempfile
@@ -191,7 +193,9 @@ class GenerateJobRealDbTests(GenerateFixtures, FreshDatabase):
         out = self.process(project, job, "ok", build_calls=self.many_calls(450), seen=seen,
                            env={"FAKE_LAB_GEN_MAX_CALLS": "200", "FAKE_LAB_GEN_LOG": log, "FAKE_LAB_GEN_FAIL_AFTER": "1"})
         self.assertEqual((out.status, out.reason), ("failed", "partial_calls"))
-        self.assertEqual(self.invocations(log), [200, 200])                         # the second one crashed, the third never ran
+        self.assertEqual(self.invocations(log), [200, 200])
+        with self.connect() as c:
+            self.assertNotEqual(c.execute("SELECT stage FROM jobs WHERE id = %s", (job,)).fetchone()[0], "done")   # only a succeeded job is done                         # the second one crashed, the third never ran
         by_status = {}
         for _, status, _, _, held in self.calls(job):
             by_status.setdefault(status, []).append(held)

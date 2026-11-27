@@ -1056,6 +1056,7 @@ export async function startJudgeRun({
   runId,
   model = "claude-haiku-4-5-20251001",
   budgetCapMicros,
+  onlyErrors = false,
   token,
   fetchFn = fetch,
   signal,
@@ -1066,6 +1067,8 @@ export async function startJudgeRun({
   runId: string;
   model?: string;
   budgetCapMicros?: number;
+  /** Judge again only the questions whose judged score is an error (same model and prompt revision); the other rows are carried over. */
+  onlyErrors?: boolean;
   token: string;
   fetchFn?: typeof fetch;
   signal?: AbortSignal;
@@ -1097,6 +1100,7 @@ export async function startJudgeRun({
       body: JSON.stringify({
         model: model.trim(),
         ...(budgetCapMicros !== undefined ? { budget_cap_micros: Math.floor(budgetCapMicros) } : {}),     // omitted = the API derives it
+        ...(onlyErrors ? { judge_errors_only: true } : {}),
       }),
     },
     cleanToken,

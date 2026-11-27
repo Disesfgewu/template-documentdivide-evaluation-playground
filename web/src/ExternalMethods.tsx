@@ -318,10 +318,10 @@ function UploadCard({ u, result, common, onChanged }: { u: UploadedMethod; resul
     return () => controller.abort();
   }, [u.run_id, u.judged, projectId, common.logicalId, token, fetchFn]);
 
-  const judge = useCallback(async () => {
+  const judge = useCallback(async (onlyErrors = false) => {
     setJudging(true);
     setMsg(null);
-    const started = await startJudgeRun({ projectId, runId: u.run_id, token, fetchFn });
+    const started = await startJudgeRun({ projectId, runId: u.run_id, token, fetchFn, onlyErrors });
     if (!started.ok) {
       setJudging(false);
       setMsg(started.error.message);
@@ -340,6 +340,7 @@ function UploadCard({ u, result, common, onChanged }: { u: UploadedMethod; resul
     setJudging(false);
     onChanged();
   }, [projectId, u.run_id, token, fetchFn, onChanged]);
+  const judgeErrors = result?.metrics.find((m) => m.metric_name === "correctness")?.error ?? 0;
 
   const toggle = async () => {
     const next = !showDetail;
@@ -370,6 +371,12 @@ function UploadCard({ u, result, common, onChanged }: { u: UploadedMethod; resul
           style={{ padding: "0.4rem 0.9rem", borderRadius: "8px", border: "1px solid var(--primary)", background: "var(--primary)", color: "#fff", cursor: "pointer" }}>
           {judging ? "評分中…" : u.judged ? "再評分一次" : "用評分模型評分"}
         </button>
+        {u.judged && judgeErrors > 0 && (
+          <button type="button" className="secondary" disabled={judging} onClick={() => void judge(true)} data-testid="rejudge-errors"
+            style={{ padding: "0.4rem 0.9rem", borderRadius: "8px", border: "1px solid var(--primary)", cursor: "pointer" }}>
+            {judging ? "評分中…" : `只重評出錯的題（${judgeErrors} 題）`}
+          </button>
+        )}
         <span className="small" style={{ color: "#c5221f", fontWeight: 700 }}>會呼叫真實模型、會花錢</span>
         {est && !u.judged && <span className="small" data-testid="judge-cost">最多約 {est.estimated_max_usd} 美元（{est.calls} 次呼叫）</span>}
         <button type="button" className="secondary" onClick={() => void toggle()}

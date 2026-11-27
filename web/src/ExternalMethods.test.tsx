@@ -199,6 +199,23 @@ describe("DeveloperUploads (step 9)", () => {
     expect(screen.getByTestId("not-found-note").textContent).toContain("整頁命中");
     expect(JSON.parse(calls.find((c) => c.url.includes("/judge-runs"))!.body!)).toEqual({ model: "claude-haiku-4-5-20251001" });   // no price: derived
   }, 20000);
+
+  it("a judged run with error rows offers to judge ONLY those again, and sends the flag; without errors there is no such button", async () => {
+    const { f, calls } = backend({ uploads: [upload({}, true)], judgedRuns: [RUN1] });
+    render(<DeveloperUploads {...common(f)} />);
+    const button = await screen.findByTestId("rejudge-errors");
+    expect(button.textContent).toContain("只重評出錯的題（2 題）");          // results() gives the judged correctness row 2 errors
+    fireEvent.click(button);
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/judge-runs"))).toBe(true));
+    expect(JSON.parse(calls.find((c) => c.url.includes("/judge-runs"))!.body!)).toEqual({ model: "claude-haiku-4-5-20251001", judge_errors_only: true });
+  }, 20000);
+
+  it("a run that was never judged has no 'judge only the errors again' button", async () => {
+    const { f } = backend({ uploads: [upload({}, false)] });
+    render(<DeveloperUploads {...common(f)} />);
+    await waitFor(() => expect(screen.getByTestId("judge-cost")).toBeTruthy());
+    expect(screen.queryByTestId("rejudge-errors")).toBeNull();
+  });
 });
 
 describe("Workflow: the real flow comes first, the system's own methods are an optional section", () => {

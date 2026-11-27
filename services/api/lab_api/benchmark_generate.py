@@ -47,6 +47,8 @@ class GenerateRequest(BaseModel):
     max_output_tokens: int = Field(default=MAX_OUTPUT_TOKENS, ge=1, le=MAX_OUTPUT_TOKENS)
     currency: str = Field(default="USD", min_length=1, max_length=16)
     pricing_revision: str = Field(default="configured-prices", min_length=1, max_length=128)
+    # Judge runs only (Issue #215 item 3): judge AGAIN only the questions whose judged score is an error the judge side caused, same model and prompt revision
+    judge_errors_only: bool = False
 
 
 def _derive_or_explicit(conn, settings, actor_id, project_id, benchmark_id, page_count, body: GenerateRequest, phase: str):
@@ -54,6 +56,8 @@ def _derive_or_explicit(conn, settings, actor_id, project_id, benchmark_id, page
     of the calls of this run. Estimation problems (no prices, over the ceiling, a bad question_count) are clean 4xx answers."""
     if phase != "generate" and body.question_count is not None:
         raise ApiError(400, "bad_request", "question_count only applies to generation")
+    if body.judge_errors_only:
+        raise ApiError(400, "bad_request", "judge_errors_only only applies to a judge run")
     try:
         if phase == "generate":
             count = body.question_count if body.question_count is not None else est.default_question_count(page_count)

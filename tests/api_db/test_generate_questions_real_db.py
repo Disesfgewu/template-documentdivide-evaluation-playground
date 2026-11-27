@@ -231,6 +231,28 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
             jobs = {r[0] for r in c.execute("SELECT job_id FROM generation_rejections WHERE benchmark_id = %s", (bench,)).fetchall()}
         self.assertEqual(jobs, {again})
 
+    def test_the_rejection_cap_is_per_job_not_per_chunk(self):
+        """A job runs in several chunks and calls on_results once per chunk: what the job already wrote counts against MAX_REJECTIONS_KEPT (PM, #215)."""
+        from unittest.mock import patch
+        import lab_api.generate_questions as gq
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=BIG)
+        with self.connect() as c:            # the first chunk of this job already kept two rows
+            for n in range(2):
+                c.execute("INSERT INTO generation_rejections (id, project_id, benchmark_id, job_id, call_id, kind, reason, question, facts, shown) "
+                          "VALUES (%s, %s, %s, %s, %s, 'general', 'earlier chunk', 'q', '[\"f\"]'::jsonb, '[]'::jsonb)", (uuid.uuid4(), project, bench, job, f"c{n}"))
+        with patch.object(gq, "MAX_REJECTIONS_KEPT", 2):
+            self.process(project, job, "questions_ungrounded", build_calls=make_build_calls(), on_results=make_on_results())
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM generation_rejections WHERE benchmark_id = %s AND job_id = %s", (bench, job)).fetchone()[0], 2)
+        # and with room left it still adds up to the cap and no further
+        project, owner, bench = self.planning_benchmark()
+        job = self.enqueue(project, owner, bench, cap=BIG)
+        with patch.object(gq, "MAX_REJECTIONS_KEPT", 3):
+            self.process(project, job, "questions_ungrounded", build_calls=make_build_calls(), on_results=make_on_results())
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM generation_rejections WHERE benchmark_id = %s AND job_id = %s", (bench, job)).fetchone()[0], 3)
+
     def test_a_document_with_one_clean_page_gets_no_cross_page_call(self):
         from lab_api.generate_prompts import select_page_pairs
         self.assertEqual(select_page_pairs([3], 2), [])
