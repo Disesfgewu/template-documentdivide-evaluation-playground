@@ -29,6 +29,7 @@ from lab_db.repo import NotFound, PermissionDenied, authorize
 from lab_db.storage import LocalArtifactStore
 from lab_api import baseline_eval as be
 from lab_api.generate_worker import CallSpec
+from lab_api.judge_redo import redo_state
 from lab_api.method_judge import (JUDGE_GRADER_SUFFIX, JUDGE_LIMITATION, JUDGE_PROMPT_REVISION, JUDGE_PROMPT_SHA256, MAX_JUDGED_CLAIMS,
                                   build_judge_call, check_verdict_ex, expand_to_sentences, parse_judge_reply_ex, span_check, span_in_answer)
 from lab_scoring import rules
@@ -53,8 +54,11 @@ class JudgeRunError(Exception):
 
 def start_judge_run(conn: psycopg.Connection, project_id: uuid.UUID, run_id: uuid.UUID, actor_id: uuid.UUID, *, model: str,
                     budget_cap_micros: int, currency: str = "USD", pricing_revision: str = "configured-prices",
-                    max_output_tokens: int = 500) -> dict:
-    """Queue the judge job for a finished answering run. Authorized for ``register_method_and_submit`` (owner/maintainer)."""
+                    max_output_tokens: int = 500, only_errors: bool = False) -> dict:
+    """Queue the judge job for a finished answering run. Authorized for ``register_method_and_submit`` (owner/maintainer).
+
+    ``only_errors`` queues a job that judges AGAIN only the questions whose judged correctness is an error the judge side caused (``judge_redo``), with
+    the same model and prompt revision as the evaluation it extends; every other row is copied unchanged (Issue #215 item 3)."""
     from lab_db.generation import MAX_OUTPUT_TOKENS, benchmark_budget
     if not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS or budget_cap_micros <= 0:
         raise JudgeRunError("max_output_tokens_or_budget_out_of_range")
@@ -89,6 +93,18 @@ def start_judge_run(conn: psycopg.Connection, project_id: uuid.UUID, run_id: uui
                                 "AND failure_reason IS NULL", (run_id,)).fetchone()[0]
         if answered == 0:
             raise JudgeRunError("the_run_has_no_answered_submission_to_judge")
+        redo_count = None
+        if only_errors:
+            state = redo_state(conn, run_id)
+            if not state["judged"]:
+                raise JudgeRunError("nothing_was_judged_yet")
+            if not state["question_ids"]:
+                raise JudgeRunError("no_judge_errors_to_redo")
+            if state["models"] != {model}:
+                raise JudgeRunError("the_model_differs_from_the_one_that_judged_this_run")
+            if state["revisions"] != {JUDGE_PROMPT_REVISION}:
+                raise JudgeRunError("the_judge_prompt_revision_differs_from_the_one_that_judged_this_run")
+            redo_count = len(state["question_ids"])
         used = benchmark_budget(conn, project_id, benchmark_id, 0)
         total_cap = used.spent + used.held + budget_cap_micros          # the request is THIS judge run's budget
         conn.execute("INSERT INTO operations (id, project_id, kind, actor_id, status, finished_at) "
@@ -97,13 +113,15 @@ def start_judge_run(conn: psycopg.Connection, project_id: uuid.UUID, run_id: uui
                      (job_id, project_id))
         conn.execute(
             "INSERT INTO generate_jobs (job_id, project_id, benchmark_id, operation_id, requested_by, model, max_output_tokens, "
-            "budget_cap_micros, currency, pricing_revision, phase, run_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'judge', %s)",
-            (job_id, project_id, benchmark_id, op_id, actor_id, model, max_output_tokens, total_cap, currency, pricing_revision, run_id))
+            "budget_cap_micros, currency, pricing_revision, phase, run_id, judge_scope) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'judge', %s, %s)",
+            (job_id, project_id, benchmark_id, op_id, actor_id, model, max_output_tokens, total_cap, currency, pricing_revision, run_id,
+             "errors" if only_errors else "all"))
         conn.execute(
             "INSERT INTO audit_events (event_id, project_id, actor_id, action, resource_type, resource_id, outcome, operation_id) "
             "VALUES (%s, %s, %s, 'run.requested', 'run', %s, 'succeeded', %s)", (uuid.uuid4(), project_id, actor_id, run_id, op_id))
     return {"run_id": str(run_id), "job_id": str(job_id), "status": "queued", "model": model, "max_output_tokens": max_output_tokens,
             "budget_cap_micros": budget_cap_micros, "benchmark_cap_micros": total_cap, "answered_submissions": answered,
+            "scope": "errors" if only_errors else "all", "questions_to_judge_again": redo_count,
             "judge_prompt_revision": JUDGE_PROMPT_REVISION, "judge_prompt_sha256": JUDGE_PROMPT_SHA256, "limits": JUDGE_LIMITS}
 
 
@@ -117,8 +135,9 @@ def _store_score(conn, evaluation_id, run_id, benchmark_id, qid, submission_id, 
          JUDGE_PROMPT_SHA256 if judged else None, JUDGE_LIMITATION if judged else None))
 
 
-def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Callable, Callable]:
-    """(build_calls, on_results) for one judge job. Both run as the job's requester (an owner or maintainer): the gold is read here."""
+def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID, scope: str = "all") -> tuple[Callable, Callable]:
+    """(build_calls, on_results) for one judge job. Both run as the job's requester (an owner or maintainer): the gold is read here.
+    ``scope='errors'`` judges only the questions ``judge_redo`` names and copies every other score row of the latest evaluation unchanged."""
 
     def load(conn, benchmark_id) -> list[dict]:
         """Every question of the benchmark with its submission of this run, in order. Deterministic and read-only."""
@@ -172,8 +191,9 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
     @app_traced(stage="judge")
     def build_calls(conn, project_id, benchmark_id) -> Sequence[CallSpec]:
         calls = []
+        redo = redo_state(conn, run_id)["question_ids"] if scope == "errors" else None
         for it in load(conn, benchmark_id):
-            if judgeable(it):
+            if judgeable(it) and (redo is None or it["qid"] in redo):
                 set_question(it["qkey"], it["ordinal"])
                 calls.append(build_judge_call(it["call_id"], it["facts"], it["response"].answer.text, it["claims"], it["hit_text"], it.get("question", "")))
         set_question(None)
@@ -245,17 +265,28 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
                             (run_id,)).fetchone()
         if prev is None:
             raise be.BaselineError("the_run_has_no_evaluation_to_extend")
-        grader = prev[1].split("+")[0] + JUDGE_GRADER_SUFFIX
+        redo = redo_state(conn, run_id)["question_ids"] if scope == "errors" else None
+        grader = prev[1] if redo is not None else prev[1].split("+")[0] + JUDGE_GRADER_SUFFIX
         evaluation_id = uuid.uuid4()
         conn.execute("INSERT INTO evaluations (id, run_id, benchmark_id, grader_revision, status) VALUES (%s, %s, %s, %s, 'provisional')",
                      (evaluation_id, run_id, benchmark_id, grader))
-        conn.execute(
-            "INSERT INTO question_scores (evaluation_id, run_id, benchmark_id, question_id, submission_id, metric_name, status, "
-            "raw_value, numerator, denominator, reason_codes) SELECT %s, run_id, benchmark_id, question_id, submission_id, metric_name, "
-            "status, raw_value, numerator, denominator, reason_codes FROM question_scores WHERE evaluation_id = %s AND metric_name = ANY(%s)",
-            (evaluation_id, prev[0], list(RULE_METRICS)))
+        if redo is None:
+            conn.execute(
+                "INSERT INTO question_scores (evaluation_id, run_id, benchmark_id, question_id, submission_id, metric_name, status, "
+                "raw_value, numerator, denominator, reason_codes) SELECT %s, run_id, benchmark_id, question_id, submission_id, metric_name, "
+                "status, raw_value, numerator, denominator, reason_codes FROM question_scores WHERE evaluation_id = %s AND metric_name = ANY(%s)",
+                (evaluation_id, prev[0], list(RULE_METRICS)))
+        else:         # a re-judge of the error rows: every other row, judged ones included (with their judge columns), is carried over unchanged
+            conn.execute(
+                "INSERT INTO question_scores (evaluation_id, run_id, benchmark_id, question_id, submission_id, metric_name, status, raw_value, numerator, "
+                "denominator, reason_codes, judge_model, judge_prompt_revision, judge_prompt_sha256, judge_limitation) SELECT %s, run_id, benchmark_id, "
+                "question_id, submission_id, metric_name, status, raw_value, numerator, denominator, reason_codes, judge_model, judge_prompt_revision, "
+                "judge_prompt_sha256, judge_limitation FROM question_scores WHERE evaluation_id = %s "
+                "AND NOT (question_id = ANY(%s) AND metric_name = ANY(%s))", (evaluation_id, prev[0], list(redo), list(JUDGED_METRICS)))
         counts: dict[str, int] = {}
         for it in items:
+            if redo is not None and it["qid"] not in redo:
+                continue
             qkey = it["qkey"]
             set_question(qkey, it["ordinal"])
             judged = False
@@ -302,7 +333,7 @@ def make_judge_hooks(store: LocalArtifactStore, run_id: uuid.UUID) -> tuple[Call
             for r in results:
                 _store_score(conn, evaluation_id, run_id, benchmark_id, it["qid"], it["sid"], r, judged, model)
         set_question(None)
-        return {"evaluation_id": str(evaluation_id), "failures": counts}
+        return {"evaluation_id": str(evaluation_id), "failures": counts, **({"redone": len(redo)} if redo is not None else {})}
 
     on_results.derive = derive           # exposed so a test can feed a hand-written verdict and assert the exact scores
     return build_calls, on_results

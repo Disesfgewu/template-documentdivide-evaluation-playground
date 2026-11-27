@@ -154,7 +154,12 @@ def finish(
     update, with the job row locked and still 'running' under this lease. Whatever it writes
     commits or rolls back together with the status change, so a result can never be stored
     for a job that did not finish, nor a job finish without its result. A hook that raises
-    rolls everything back and the exception propagates (the job stays 'running')."""
+    rolls everything back and the exception propagates (the job stays 'running').
+
+    A job that SUCCEEDED has no work left: its stage becomes ``done`` unless the caller names another one, for every kind of job (parse,
+    generate, validate, judge), so GET /jobs/{id} never reports a finished job as 'queued' or as the stage it last started."""
+    if status == "succeeded" and stage is None:
+        stage = "done"
     with conn.transaction():
         _check(conn, project_id, lease)
         _reason(conn, reason)

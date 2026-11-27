@@ -56,6 +56,8 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
             old = c.execute("SELECT id FROM evaluations WHERE run_id = %s", (run["run_id"],)).fetchone()[0]
         started, body = self.judge(project, owner, run, "judge_ok")
         self.assertEqual(started["judge_prompt_sha256"], method_judge.JUDGE_PROMPT_SHA256)
+        job_view = self.client.get(f"/api/v1/jobs/{started['job_id']}", headers=self.headers(owner)).json()
+        self.assertEqual((job_view["status"], job_view["stage"]), ("succeeded", "done"))           # a succeeded judge job is not 'queued' (PM, #215)
         for name in JUDGED:
             m = self.metric(body, name)
             self.assertEqual((m["scored"], m["pending"], m["error"]), (n, 0, 0), name)
@@ -115,6 +117,90 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
                 self.check_correctness(m, body, n)
             else:
                 self.assertEqual(m["mean"], 100.0, name)
+
+    # --- a re-judge of the error rows only (Issue #215 item 3) -------------------------------------------------------------------------------------
+
+    def redo(self, project, owner, run, mode, **extra):
+        res = self.api("post", owner, f"/api/v1/runs/{run['run_id']}/judge-runs", project, {"model": "fake-model", "budget_cap_micros": 50_000_000, **extra})
+        if res.status_code == 202:
+            self.worker(mode).run_once()
+        return res
+
+    def scores(self, run, evaluation=None):
+        with self.connect() as c:
+            ev = evaluation or c.execute("SELECT id FROM evaluations WHERE run_id = %s ORDER BY created_at DESC, id DESC LIMIT 1", (run["run_id"],)).fetchone()[0]
+            return ev, {(q, m): (st, v, rc, jm) for q, m, st, v, rc, jm in c.execute(
+                "SELECT question_id, metric_name, status, raw_value, reason_codes, judge_model FROM question_scores WHERE evaluation_id = %s", (ev,))}
+
+    def test_only_the_error_rows_are_judged_again_with_the_same_model_and_everything_else_is_carried_over(self):
+        project, owner, run = self.answered()
+        n = self.api("get", owner, self.GEN, project).json()["questions"]
+        self.judge(project, owner, run, "judge_bad_json")                          # every judged row is an error (an unusable reply)
+        first, before = self.scores(run)
+        errors = {q for (q, m), (st, *_) in before.items() if m == "correctness" and st == "error"}
+        self.assertEqual(len(errors), n)
+        # a run with nothing left to redo, a different model, an unknown flag combination: all refused with a reason
+        res = self.redo(project, owner, run, "judge_ok", judge_errors_only=True, model="another-model")
+        self.assertEqual(res.status_code, 409, res.text)
+        self.assertIn("model_differs", res.json()["error"]["message"])
+        res = self.redo(project, owner, run, "judge_ok", judge_errors_only=True)
+        self.assertEqual(res.status_code, 202, res.text)
+        job = res.json()
+        self.assertEqual((job["scope"], job["questions_to_judge_again"]), ("errors", n))
+        second, after = self.scores(run)
+        self.assertNotEqual(first, second)                                          # a NEW evaluation; the old one is untouched
+        self.assertEqual(self.scores(run, first)[1], before)
+        self.assertTrue(all(st == "scored" for (q, m), (st, *_) in after.items() if m == "correctness"))
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT stage FROM jobs WHERE id = %s", (job["job_id"],)).fetchone()[0], "done")
+            self.assertEqual(c.execute("SELECT count(DISTINCT call_id) FROM llm_calls WHERE job_id = %s", (job["job_id"],)).fetchone()[0], n)       # in the ledger: one call per redone question
+            self.assertEqual(c.execute("SELECT grader_revision FROM evaluations WHERE id = %s", (second,)).fetchone()[0],
+                             c.execute("SELECT grader_revision FROM evaluations WHERE id = %s", (first,)).fetchone()[0])
+        # nothing is left to redo now
+        again = self.redo(project, owner, run, "judge_ok", judge_errors_only=True)
+        self.assertEqual(again.status_code, 409, again.text)
+        self.assertIn("no_judge_errors_to_redo", again.json()["error"]["message"])
+
+    def test_the_rows_that_were_judged_fine_are_copied_unchanged_and_only_the_failed_ones_cost_calls(self):
+        project, owner, run = self.answered()
+        self.judge(project, owner, run, "judge_prose")                              # all judged fine
+        ok_eval, ok_rows = self.scores(run)
+        # make two questions' judged rows an error the judge side caused, in a new evaluation, the way a bad reply would have left them
+        with self.connect() as c:
+            ev = uuid.uuid4()
+            c.execute("INSERT INTO evaluations (id, run_id, benchmark_id, grader_revision, status) SELECT %s, run_id, benchmark_id, grader_revision, status "
+                      "FROM evaluations WHERE id = %s", (ev, ok_eval))
+            c.execute("INSERT INTO question_scores (evaluation_id, run_id, benchmark_id, question_id, submission_id, metric_name, status, raw_value, numerator, "
+                      "denominator, reason_codes, judge_model, judge_prompt_revision, judge_prompt_sha256, judge_limitation) SELECT %s, run_id, benchmark_id, "
+                      "question_id, submission_id, metric_name, status, raw_value, numerator, denominator, reason_codes, judge_model, judge_prompt_revision, "
+                      "judge_prompt_sha256, judge_limitation FROM question_scores WHERE evaluation_id = %s", (ev, ok_eval))
+            bad = [r[0] for r in c.execute("SELECT DISTINCT question_id FROM question_scores WHERE evaluation_id = %s AND metric_name = 'correctness' "
+                                           "AND status = 'scored' LIMIT 2", (ev,))]
+            for q in bad:
+                for m in ("correctness", "faithfulness", "citation_precision", "citation_completeness"):
+                    c.execute("UPDATE question_scores SET status = 'error', raw_value = NULL, numerator = NULL, denominator = NULL, "
+                              "reason_codes = ARRAY['invalid_judge_reply', 'not_json'] WHERE evaluation_id = %s AND question_id = %s AND metric_name = %s", (ev, q, m))
+            c.commit()
+        _, damaged = self.scores(run, ev)
+        res = self.redo(project, owner, run, "judge_ok", judge_errors_only=True)
+        self.assertEqual((res.status_code, res.json()["questions_to_judge_again"]), (202, 2), res.text)
+        new, after = self.scores(run)
+        self.assertNotIn(new, (ok_eval, ev))
+        for key, row in damaged.items():
+            if key[0] not in bad:
+                self.assertEqual(after[key], row, key)                              # not touched: value, reason and judge model are the same
+        self.assertTrue(all(after[(q, "correctness")][0] == "scored" for q in bad))
+        with self.connect() as c:
+            self.assertEqual(c.execute("SELECT count(DISTINCT call_id) FROM llm_calls WHERE job_id = %s", (res.json()["job_id"],)).fetchone()[0], 2)
+        # the judge_errors_only flag means nothing to another kind of run
+        answer = self.api("post", owner, RUN, project, {**BODY, "judge_errors_only": True})
+        self.assertEqual(answer.status_code, 400, answer.text)
+
+    def test_a_run_that_was_never_judged_has_nothing_to_judge_again(self):
+        project, owner, run = self.answered()
+        res = self.redo(project, owner, run, "judge_ok", judge_errors_only=True)
+        self.assertEqual(res.status_code, 409, res.text)
+        self.assertIn("nothing_was_judged_yet", res.json()["error"]["message"])
 
     def check_correctness(self, m, body, n):
         """The fake judge says every fact is stated. The code check (#197) overrules it where the fixture's lexical retrieval handed the answering

@@ -335,7 +335,8 @@ def make_on_results(page_chars: int = DEFAULT_PAGE_CHARS) -> Callable:
         stats = GenerationStats()
         # what was rejected and why, owner-local (migration 0028): only the last generation job's rows are kept, at most MAX_REJECTIONS_KEPT of them
         conn.execute("DELETE FROM generation_rejections WHERE benchmark_id = %s AND job_id <> %s", (benchmark_id, job_id))
-        kept = [0]
+        # the cap is per JOB, not per call: a job runs in several chunks (200 calls each), and each chunk calls this once, so count what the job already wrote
+        kept = [conn.execute("SELECT count(*) FROM generation_rejections WHERE benchmark_id = %s AND job_id = %s", (benchmark_id, job_id)).fetchone()[0]]
 
         def reject(kind: str, call_id: str, reason: str, question: str, facts, units) -> None:
             if kept[0] >= MAX_REJECTIONS_KEPT:

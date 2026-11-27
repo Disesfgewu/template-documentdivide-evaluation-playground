@@ -113,7 +113,7 @@ class GenerateWorker(Worker):
             LOG.warning("worker status not written (%s)", type(exc).__name__)
 
     def _process(self, conn, project_id: uuid.UUID, job_id: uuid.UUID) -> ParseOutcome:
-        row = conn.execute("SELECT phase, run_id FROM generate_jobs WHERE project_id = %s AND job_id = %s",
+        row = conn.execute("SELECT phase, run_id, judge_scope FROM generate_jobs WHERE project_id = %s AND job_id = %s",
                            (project_id, job_id)).fetchone()
         phase = row[0] if row else "generate"
         self._phases[job_id] = phase
@@ -128,7 +128,7 @@ class GenerateWorker(Worker):
         if phase == "judge":
             if self.store is None:
                 raise RuntimeError("the artifact store is required for judge jobs (LAB_ARTIFACT_ROOT)")
-            build, results = judge_run.make_judge_hooks(self.store, row[1])
+            build, results = judge_run.make_judge_hooks(self.store, row[1], row[2])
             return process_generate_job(
                 conn, project_id, job_id, worker=self.name, lab_gen_cmd=self.lab_gen_cmd, cfg=self.cfg, build_calls=build,
                 connect=self.connect, api_key=self.api_key, on_results=results, ttl_seconds=self.ttl,

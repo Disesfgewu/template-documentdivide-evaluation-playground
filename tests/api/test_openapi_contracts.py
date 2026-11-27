@@ -109,6 +109,7 @@ class OpenApiSchemaStructureTests(unittest.TestCase):
             "/api/v1/submission-format",
             "/api/v1/workspace",
             "/api/v1/runs/{run_id}/submission-details",
+            "/api/v1/runs/{run_id}/reviews",
             "/api/v1/benchmarks/{logical_id}/revisions/{revision}/questions/{question_id}/exclusion",
             "/api/v1/audit-events",
             "/api/v1/logs",

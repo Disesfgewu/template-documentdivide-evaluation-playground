@@ -32,7 +32,8 @@ function results(mean: number | null, judged: boolean) {
 }
 
 type Calls = { url: string; method: string; body?: string; auth: string | null }[];
-function backend(opts: { uploads?: unknown[]; uploadReply?: (body: Record<string, unknown>) => Response; judgedRuns?: string[] } = {}) {
+const NO_REVIEWS = { items: [], summary: { questions_reviewed: 0, reviewed_by: { human: 0, model_assisted: 0 }, judge_scored: 16, judge_mean: 40, reviewed_mean: 40, questions_in_reviewed_mean: 16, rule: "x" } };
+function backend(opts: { uploads?: unknown[]; uploadReply?: (body: Record<string, unknown>) => Response; judgedRuns?: string[]; reviews?: Record<string, unknown>; reviewsDenied?: boolean } = {}) {
   const calls: Calls = [];
   const f = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     const u = String(url);
@@ -47,6 +48,12 @@ function backend(opts: { uploads?: unknown[]; uploadReply?: (body: Record<string
     if (u.includes("/submissions?") && method === "GET") return json({ benchmark_status: "frozen", items: opts.uploads ?? RUNS });
     if (u.includes("/judge-runs") && method === "POST") return json({ run_id: RUN1, job_id: JOB, status: "queued", answered_submissions: 15 }, 202);
     if (u.includes(`/api/v1/jobs/${JOB}`)) return json({ job_id: JOB, status: "succeeded", stage: "done", attempt: 1 });
+    if (u.includes("/reviews?")) {
+      if (opts.reviewsDenied) return json({ error: { message: "no" } }, 403);
+      if (method === "POST") return json({ recorded: 1, summary: NO_REVIEWS.summary }, 201);
+      const run = u.includes(RUN2) ? RUN2 : RUN1;
+      return json({ run_id: run, ...(opts.reviews?.[run] ?? NO_REVIEWS) });
+    }
     if (u.includes("/estimate?")) return json({ phase: "judge", calls: 15, estimated_max_micros: 30000, estimated_max_usd: "0.0300", currency: "USD", ceiling_usd: "5.0000" });
     if (u.includes("/submission-details")) {
       return json({ run_id: RUN1, method_name: "alpha", items: [
@@ -199,6 +206,76 @@ describe("DeveloperUploads (step 9)", () => {
     expect(screen.getByTestId("not-found-note").textContent).toContain("整頁命中");
     expect(JSON.parse(calls.find((c) => c.url.includes("/judge-runs"))!.body!)).toEqual({ model: "claude-haiku-4-5-20251001" });   // no price: derived
   }, 20000);
+
+  it("a judged run with error rows offers to judge ONLY those again, and sends the flag; without errors there is no such button", async () => {
+    const { f, calls } = backend({ uploads: [upload({}, true)], judgedRuns: [RUN1] });
+    render(<DeveloperUploads {...common(f)} />);
+    const button = await screen.findByTestId("rejudge-errors");
+    expect(button.textContent).toContain("只重評出錯的題（2 題）");          // results() gives the judged correctness row 2 errors
+    fireEvent.click(button);
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/judge-runs"))).toBe(true));
+    expect(JSON.parse(calls.find((c) => c.url.includes("/judge-runs"))!.body!)).toEqual({ model: "claude-haiku-4-5-20251001", judge_errors_only: true });
+  }, 20000);
+
+  it("a run that was never judged has no 'judge only the errors again' button", async () => {
+    const { f } = backend({ uploads: [upload({}, false)] });
+    render(<DeveloperUploads {...common(f)} />);
+    await waitFor(() => expect(screen.getByTestId("judge-cost")).toBeTruthy());
+    expect(screen.queryByTestId("rejudge-errors")).toBeNull();
+  });
+});
+
+describe("Reviewed correctness next to the judge's value (#218)", () => {
+  const REVIEWED = { items: [{ question_id: "q-1", value: 100, reviewer_kind: "model_assisted", reviewer_label: "PM (Claude)", note: "asks only for the fee", reviewed_at: "2026-11-27T09:00:00Z", versions: 2 }],
+    summary: { questions_reviewed: 45, reviewed_by: { human: 0, model_assisted: 45 }, judge_scored: 100, judge_mean: 36, reviewed_mean: 51.5, questions_in_reviewed_mean: 100, rule: "x" } };
+
+  it("step 9 gets a separate 'correctness (reviewed)' row that says how many questions were reviewed and by whom, and the judge's own row is unchanged", async () => {
+    const { f } = backend({ uploads: [upload({}, true)], judgedRuns: [RUN1], reviews: { [RUN1]: REVIEWED } });
+    render(<DeveloperUploads {...common(f)} />);
+    await waitFor(() => expect(screen.getByTestId("reviewed-correctness-row")).toBeTruthy());
+    const row = screen.getByTestId("reviewed-correctness-row").textContent ?? "";
+    expect(row).toContain("答案正確性（覆核後）");
+    expect(row).toContain("51.5");
+    expect(row).toContain("覆核 45 題（模型協助 45）");
+    expect(row).toContain("評分模型 36.0");
+    expect(row).not.toContain("人工");                                   // a model-assisted review is never shown as a human one
+    const table = screen.getByTestId("comparison").textContent ?? "";
+    expect(table).toContain("答案正確性");                                // the judge's own row is still there
+    expect(table).toContain("模型協助的覆核不是人工覆核");
+  });
+
+  it("each question shows the reviewed value next to the judge's, and the owner can record one (human, 0-100) which is posted to the API", async () => {
+    const { f, calls } = backend({ uploads: [upload({}, true)], judgedRuns: [RUN1], reviews: { [RUN1]: REVIEWED } });
+    render(<DeveloperUploads {...common(f)} />);
+    fireEvent.click(await screen.findByRole("button", { name: "看每一題" }));
+    await waitFor(() => expect(screen.getByTestId("review-value-0")).toBeTruthy());
+    const shown = screen.getByTestId("review-value-0").textContent ?? "";
+    expect(shown).toContain("覆核後正確性：100");
+    expect(shown).toContain("模型協助覆核，PM (Claude)，第 2 次");
+    expect(shown).toContain("asks only for the fee");
+    expect(screen.getByTestId("upload-detail").textContent).toContain("正確性：0");        // the judge's value is still printed beside it
+    const save = screen.getAllByRole("button", { name: "記錄覆核" })[0] as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    const input = screen.getByLabelText("第 1 題的覆核分數（0–100）") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "101" } });
+    expect(save.disabled).toBe(true);                                    // out of range
+    fireEvent.change(input, { target: { value: "40" } });
+    fireEvent.click(save);
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url.includes("/reviews?"))).toBe(true));
+    const post = calls.find((c) => c.method === "POST" && c.url.includes("/reviews?"))!;
+    expect(post.url).toContain(`/api/v1/runs/${RUN1}/reviews?project_id=${P}`);
+    expect(JSON.parse(post.body!)).toEqual({ reviews: [{ question_id: "q-1", value: 40, reviewer_kind: "human", reviewer_label: "owner" }] });
+  });
+
+  it("without any review there is no reviewed row, and a role that may not read reviews just does not see them", async () => {
+    for (const opts of [{}, { reviewsDenied: true }]) {
+      const { f } = backend({ uploads: [upload({}, true)], judgedRuns: [RUN1], ...opts });
+      const view = render(<DeveloperUploads {...common(f)} />);
+      await waitFor(() => expect(screen.getByTestId("comparison").textContent).toContain("75.0"));
+      expect(screen.queryByTestId("reviewed-correctness-row")).toBeNull();
+      view.unmount();
+    }
+  });
 });
 
 describe("Workflow: the real flow comes first, the system's own methods are an optional section", () => {
