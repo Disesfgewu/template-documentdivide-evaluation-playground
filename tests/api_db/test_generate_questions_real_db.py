@@ -213,6 +213,24 @@ class GenerateQuestionsRealDbTests(GenerateFixtures, FreshDatabase):
                                        (bench,)).fetchone()[0], 0)                    # code grounding of the page attribution failed
         self.assertIn(f"cross_written=0", self.audit_reason(project)[0][0])
 
+    def test_what_was_rejected_is_kept_owner_local_for_the_last_job_only(self):
+        project, owner, bench, job, out = self.run_batch("questions_ungrounded")
+        with self.connect() as c:
+            rows = c.execute("SELECT job_id, kind, reason, question, facts, shown FROM generation_rejections WHERE benchmark_id = %s", (bench,)).fetchall()
+        self.assertTrue(rows)
+        self.assertTrue(all(r[0] == job for r in rows))
+        self.assertTrue({r[1] for r in rows} <= {"general", "cross_page", "confusable"})
+        self.assertTrue(all(r[2] and r[3] and r[4] and r[5] for r in rows))              # the reason, the question, the facts and the shown units
+        self.assertTrue(all(len(t) <= 400 for r in rows for _, t in r[5]))
+        # a later job of the same benchmark replaces them: only the last generation job's rows are kept
+        with self.connect() as c:
+            c.execute("UPDATE generation_rejections SET job_id = %s WHERE benchmark_id = %s", (uuid.uuid4(), bench))
+        again = self.enqueue(project, owner, bench, cap=BIG)
+        self.process(project, again, "questions_ungrounded", build_calls=make_build_calls(), on_results=make_on_results())
+        with self.connect() as c:
+            jobs = {r[0] for r in c.execute("SELECT job_id FROM generation_rejections WHERE benchmark_id = %s", (bench,)).fetchall()}
+        self.assertEqual(jobs, {again})
+
     def test_a_document_with_one_clean_page_gets_no_cross_page_call(self):
         from lab_api.generate_prompts import select_page_pairs
         self.assertEqual(select_page_pairs([3], 2), [])

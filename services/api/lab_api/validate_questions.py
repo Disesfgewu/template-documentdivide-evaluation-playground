@@ -68,6 +68,26 @@ def content_tokens(text: str) -> list[str]:
     return tokens
 
 
+# Grounding and attribution (Issue #215) are about WHAT a fact says, not how it is phrased: a table fact written as a sentence has function words
+# no cell contains ("the", "for", "with"), a unit may be glued to its number ("900W", "5V"), and "900.0" is "900". ``content_tokens`` stays as it is
+# (the judge and the external-submission check share it); the generation grounding, ``code_checks`` and the unit attribution use these.
+_FUNCTION_WORDS = frozenset(
+    "the and for with that this these those are was were been has have had from its their than which when where while into each can may will would "
+    "should does did also such only about then there here they them his her our your you what who how why but via upon per".split())
+_DIGIT_LETTER = re.compile(r"(?<=\d)(?=[^\W\d_])|(?<=[^\W\d_])(?=\d)")
+
+
+def grounding_tokens(text: str) -> list[str]:
+    """``content_tokens`` after splitting a number from a unit glued to it and without English function words (CJK bigrams unchanged)."""
+    return [t for t in content_tokens(_DIGIT_LETTER.sub(" ", text)) if t not in _FUNCTION_WORDS]
+
+
+def canonical_number(n: str) -> str:
+    """A number as a string, thousands separators and trailing decimal zeros removed: '1,000' -> '1000', '900.0' -> '900', '94.20' -> '94.2'."""
+    n = n.replace(",", "")
+    return n.rstrip("0").rstrip(".") if "." in n else n
+
+
 def _neutralise(text: str) -> str:
     return _TAG.sub(lambda m: m.group(0).replace("<", "＜"), text)
 
@@ -76,14 +96,14 @@ def _neutralise(text: str) -> str:
 def code_checks(shown_text: str, reference_answer: str, facts: Sequence[str]) -> dict:
     """Free grounding checks against the text that was actually shown. Words are matched after NFKC + case-folding."""
     page = _norm(shown_text)
-    page_words = set(content_tokens(shown_text))
-    # Whole numbers only (thousands separators ignored): the answer's "1" must not match the "1" inside "2019".
-    page_numbers = {n.replace(",", "") for n in _NUMBER.findall(page)}
-    numbers = [n.replace(",", "") for n in _NUMBER.findall(_norm(reference_answer + " " + " ".join(facts)))]
+    page_words = set(grounding_tokens(shown_text))
+    # Whole numbers only (thousands separators and trailing decimal zeros ignored): the answer's "1" must not match the "1" inside "2019".
+    page_numbers = {canonical_number(n) for n in _NUMBER.findall(page)}
+    numbers = [canonical_number(n) for n in _NUMBER.findall(_norm(reference_answer + " " + " ".join(facts)))]
     missing_numbers = [n for n in numbers if n not in page_numbers]
 
     def coverage(statement: str) -> float:
-        words = content_tokens(statement)
+        words = grounding_tokens(statement)
         return 1.0 if not words else sum(1 for w in words if w in page_words) / len(words)
     fact_cov = [round(coverage(f), 3) for f in facts]
     return {"numbers_in_answer": len(numbers), "numbers_missing_from_evidence": len(missing_numbers),
