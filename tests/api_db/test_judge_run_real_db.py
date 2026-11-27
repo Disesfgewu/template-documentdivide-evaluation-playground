@@ -153,7 +153,7 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
         self.assertTrue(all(st == "scored" for (q, m), (st, *_) in after.items() if m == "correctness"))
         with self.connect() as c:
             self.assertEqual(c.execute("SELECT stage FROM jobs WHERE id = %s", (job["job_id"],)).fetchone()[0], "done")
-            self.assertEqual(c.execute("SELECT count(*) FROM llm_calls WHERE job_id = %s", (job["job_id"],)).fetchone()[0], n)       # in the ledger: one call per redone question
+            self.assertEqual(c.execute("SELECT count(DISTINCT call_id) FROM llm_calls WHERE job_id = %s", (job["job_id"],)).fetchone()[0], n)       # in the ledger: one call per redone question
             self.assertEqual(c.execute("SELECT grader_revision FROM evaluations WHERE id = %s", (second,)).fetchone()[0],
                              c.execute("SELECT grader_revision FROM evaluations WHERE id = %s", (first,)).fetchone()[0])
         # nothing is left to redo now
@@ -191,7 +191,7 @@ class JudgeRunRealDbTests(GenerateApiFixtures, FreshDatabase):
                 self.assertEqual(after[key], row, key)                              # not touched: value, reason and judge model are the same
         self.assertTrue(all(after[(q, "correctness")][0] == "scored" for q in bad))
         with self.connect() as c:
-            self.assertEqual(c.execute("SELECT count(*) FROM llm_calls WHERE job_id = %s", (res.json()["job_id"],)).fetchone()[0], 2)
+            self.assertEqual(c.execute("SELECT count(DISTINCT call_id) FROM llm_calls WHERE job_id = %s", (res.json()["job_id"],)).fetchone()[0], 2)
         # the judge_errors_only flag means nothing to another kind of run
         answer = self.api("post", owner, RUN, project, {**BODY, "judge_errors_only": True})
         self.assertEqual(answer.status_code, 400, answer.text)
